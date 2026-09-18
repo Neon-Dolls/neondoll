@@ -1,4 +1,4 @@
-package state
+package dollstate
 
 import "fmt"
 
@@ -10,9 +10,9 @@ type StateError struct {
 
 func (e *StateError) Error() string {
 	if e.Err != nil {
-		return fmt.Sprintf("state %s: %v", e.Op, e.Err)
+		return fmt.Sprintf("dollstate %s: %v", e.Op, e.Err)
 	}
-	return fmt.Sprintf("state %s", e.Op)
+	return fmt.Sprintf("dollstate %s", e.Op)
 }
 
 func (e *StateError) Unwrap() error { return e.Err }

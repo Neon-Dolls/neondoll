@@ -1,4 +1,4 @@
-package state
+package dollstate
 
 import (
 	"os"
@@ -28,29 +28,6 @@ func TestSaveLoadDollState(t *testing.T) {
 	}
 	if loaded.Version != CurrentStateVersion {
 		t.Errorf("expected version %d, got %d", CurrentStateVersion, loaded.Version)
-	}
-}
-
-func TestSaveLoadCoreConfig(t *testing.T) {
-	dir := t.TempDir()
-	cfg := &CoreConfig{
-		CoreName: "test-core",
-		Version:  1,
-		Settings: map[string]any{"key": "value"},
-	}
-
-	path, err := SaveConfig(dir, cfg)
-	if err != nil {
-		t.Fatalf("SaveConfig: %v", err)
-	}
-
-	loaded, err := LoadConfig(path)
-	if err != nil {
-		t.Fatalf("LoadConfig: %v", err)
-	}
-
-	if loaded.CoreName != "test-core" {
-		t.Errorf("expected test-core, got %s", loaded.CoreName)
 	}
 }
 

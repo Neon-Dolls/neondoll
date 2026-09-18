@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Neon-Dolls/neondoll/internal/logger"
+	"github.com/Neon-Dolls/neondoll/Core/Logger"
 )
 
 func TestNewWS(t *testing.T) {

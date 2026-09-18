@@ -7,7 +7,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/Neon-Dolls/neondoll/internal/logger"
+	"github.com/Neon-Dolls/neondoll/Core/Logger"
 )
 
 // Server is the REST API server.

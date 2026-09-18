@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Neon-Dolls/neondoll/internal/logger"
+	"github.com/Neon-Dolls/neondoll/Core/Logger"
 )
 
 func TestHealthEndpoint(t *testing.T) {

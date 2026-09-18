@@ -10,38 +10,36 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Neon-Dolls/neondoll/internal/api"
-	"github.com/Neon-Dolls/neondoll/internal/config"
-	"github.com/Neon-Dolls/neondoll/internal/cognition"
-	"github.com/Neon-Dolls/neondoll/internal/inference"
-	"github.com/Neon-Dolls/neondoll/internal/logger"
-	"github.com/Neon-Dolls/neondoll/internal/link/ws"
-	"github.com/Neon-Dolls/neondoll/state"
+	"github.com/Neon-Dolls/neondoll/Core/API"
+	"github.com/Neon-Dolls/neondoll/Core/Config"
+	"github.com/Neon-Dolls/neondoll/Core/DollMind"
+	"github.com/Neon-Dolls/neondoll/Core/Inference"
+	"github.com/Neon-Dolls/neondoll/Core/Logger"
+	"github.com/Neon-Dolls/neondoll/DollLink/WebSocket"
+	"github.com/Neon-Dolls/neondoll/DollState"
 )
 
-// mockMindAPI implements cognition.MindAPI for integration tests.
+// mockMindAPI implements dollmind.MindAPI for integration tests.
 type mockMindAPI struct {
-	s *state.DollState
-	c *state.CoreConfig
+	s *dollstate.DollState
 }
 
 func (m *mockMindAPI) Inference() inference.Provider { return nil }
-func (m *mockMindAPI) State() *state.DollState       { return m.s }
-func (m *mockMindAPI) Config() *state.CoreConfig     { return m.c }
+func (m *mockMindAPI) State() *dollstate.DollState   { return m.s }
 
 func TestIntegrationStateSaveLoad(t *testing.T) {
 	dir := t.TempDir()
 
-	s := state.NewDollState()
-	s.Identity = state.Identity{DollID: "integration-test", CanonicalName: "IT"}
-	s.Soul = state.Soul{Revision: 1, Content: "Integration test doll."}
+	s := dollstate.NewDollState()
+	s.Identity = dollstate.Identity{DollID: "integration-test", CanonicalName: "IT"}
+	s.Soul = dollstate.Soul{Revision: 1, Content: "Integration test doll."}
 
-	path, err := state.SaveState(dir, &s)
+	path, err := dollstate.SaveState(dir, &s)
 	if err != nil {
 		t.Fatalf("SaveState: %v", err)
 	}
 
-	loaded, err := state.LoadState(path)
+	loaded, err := dollstate.LoadState(path)
 	if err != nil {
 		t.Fatalf("LoadState: %v", err)
 	}
@@ -102,17 +100,16 @@ func TestIntegrationCognitionWithMock(t *testing.T) {
 	provider := inference.NewMockProvider("integration-test", "Hello from integration!")
 	log := logger.New(logger.InfoLevel, nil)
 	mindAPI := &mockMindAPI{
-		s: &state.DollState{Version: state.CurrentStateVersion},
-		c: &state.CoreConfig{CoreName: "test", Version: 1},
+		s: &dollstate.DollState{Version: dollstate.CurrentStateVersion},
 	}
-	sched := cognition.New(provider, log, mindAPI)
+	sched := dollmind.New(provider, log, mindAPI)
 
-	result, err := sched.Run(context.Background(), cognition.LevelReflex, "test integration")
+	result, err := sched.Run(context.Background(), dollmind.LevelReflex, "test integration")
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 
-	if result.Level != cognition.LevelReflex {
+	if result.Level != dollmind.LevelReflex {
 		t.Errorf("expected LevelReflex, got %v", result.Level)
 	}
 	if len(result.Actions) == 0 {
@@ -142,18 +139,18 @@ func TestIntegrationWSStub(t *testing.T) {
 func TestIntegrationSecretRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 
-	secrets := &state.Secrets{
-		Items: []state.SecretItem{
-			{Key: "api_key", Value: "sk-integration-abc123", Source: "env"},
+	secrets := &dollstate.Secrets{
+		Items: []dollstate.SecretItem{
+			{Key: "api_key", Value: "«redacted:sk-…»", Source: "env"},
 		},
 	}
 
-	path, err := state.SaveSecrets(dir, secrets)
+	path, err := dollstate.SaveSecrets(dir, secrets)
 	if err != nil {
 		t.Fatalf("SaveSecrets: %v", err)
 	}
 
-	loaded, err := state.LoadSecrets(path)
+	loaded, err := dollstate.LoadSecrets(path)
 	if err != nil {
 		t.Fatalf("LoadSecrets: %v", err)
 	}
@@ -161,7 +158,7 @@ func TestIntegrationSecretRoundTrip(t *testing.T) {
 	if len(loaded.Items) != 1 {
 		t.Fatalf("expected 1 secret, got %d", len(loaded.Items))
 	}
-	if loaded.Items[0].Value != "sk-integration-abc123" {
+	if loaded.Items[0].Value != "«redacted:sk-…»" {
 		t.Errorf("expected secret value, got %s", loaded.Items[0].Value)
 	}
 }

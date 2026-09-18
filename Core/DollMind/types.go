@@ -1,11 +1,11 @@
-package cognition
+package dollmind
 
 import (
 	"context"
 
-	"github.com/Neon-Dolls/neondoll/internal/inference"
-	"github.com/Neon-Dolls/neondoll/internal/logger"
-	"github.com/Neon-Dolls/neondoll/state"
+	"github.com/Neon-Dolls/neondoll/Core/Inference"
+	"github.com/Neon-Dolls/neondoll/Core/Logger"
+	"github.com/Neon-Dolls/neondoll/DollState"
 )
 
 // Level maps to the Doll Mind cognition hierarchy.
@@ -39,8 +39,7 @@ func (l Level) String() string {
 // MindAPI is the interface between cognition and the inference provider.
 type MindAPI interface {
 	Inference() inference.Provider
-	State() *state.DollState
-	Config() *state.CoreConfig
+	State() *dollstate.DollState
 }
 
 // Result from a cognition cycle.

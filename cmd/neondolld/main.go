@@ -7,9 +7,9 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/Neon-Dolls/neondoll/internal/api"
-	"github.com/Neon-Dolls/neondoll/internal/config"
-	"github.com/Neon-Dolls/neondoll/internal/logger"
+	"github.com/Neon-Dolls/neondoll/Core/API"
+	"github.com/Neon-Dolls/neondoll/Core/Config"
+	"github.com/Neon-Dolls/neondoll/Core/Logger"
 )
 
 func main() {

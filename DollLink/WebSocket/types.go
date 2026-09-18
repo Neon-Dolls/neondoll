@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Neon-Dolls/neondoll/internal/logger"
+	"github.com/Neon-Dolls/neondoll/Core/Logger"
 )
 
 // Server is a minimal WebSocket transport stub.

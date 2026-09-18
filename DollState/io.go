@@ -1,4 +1,4 @@
-package state
+package dollstate
 
 import (
 	"encoding/json"
@@ -30,32 +30,6 @@ func LoadState(path string) (*DollState, error) {
 		return nil, &StateError{Op: "unmarshal", Err: err}
 	}
 	return &s, nil
-}
-
-// SaveConfig serializes CoreConfig to a JSON file.
-func SaveConfig(dir string, c *CoreConfig) (string, error) {
-	data, err := json.MarshalIndent(c, "", "  ")
-	if err != nil {
-		return "", &StateError{Op: "marshal_config", Err: err}
-	}
-	path := filepath.Join(dir, "coreconfig.json")
-	if err := os.WriteFile(path, data, 0644); err != nil {
-		return "", &StateError{Op: "write_config", Err: err}
-	}
-	return path, nil
-}
-
-// LoadConfig deserializes CoreConfig.
-func LoadConfig(path string) (*CoreConfig, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, &StateError{Op: "read_config", Err: err}
-	}
-	var c CoreConfig
-	if err := json.Unmarshal(data, &c); err != nil {
-		return nil, &StateError{Op: "unmarshal_config", Err: err}
-	}
-	return &c, nil
 }
 
 // SaveSecrets serializes Secrets to a JSON Lines file.

@@ -1,27 +1,25 @@
-package cognition
+package dollmind
 
 import (
 	"context"
 	"testing"
 
-	"github.com/Neon-Dolls/neondoll/internal/inference"
-	"github.com/Neon-Dolls/neondoll/internal/logger"
-	"github.com/Neon-Dolls/neondoll/state"
+	"github.com/Neon-Dolls/neondoll/Core/Inference"
+	"github.com/Neon-Dolls/neondoll/Core/Logger"
+	"github.com/Neon-Dolls/neondoll/DollState"
 )
 
 type mockMindAPI struct {
-	s *state.DollState
-	c *state.CoreConfig
+	s *dollstate.DollState
 }
 
 func (m *mockMindAPI) Inference() inference.Provider { return nil }
-func (m *mockMindAPI) State() *state.DollState       { return m.s }
-func (m *mockMindAPI) Config() *state.CoreConfig     { return m.c }
+func (m *mockMindAPI) State() *dollstate.DollState   { return m.s }
 
 func TestNewCognition(t *testing.T) {
 	provider := inference.NewMockProvider("mock", "Hello, doll!")
 	log := logger.New(logger.DebugLevel, nil)
-	mindAPI := &mockMindAPI{s: &state.DollState{}, c: &state.CoreConfig{}}
+	mindAPI := &mockMindAPI{s: &dollstate.DollState{}}
 	sched := New(provider, log, mindAPI)
 	if sched == nil {
 		t.Fatal("New returned nil")
@@ -31,7 +29,7 @@ func TestNewCognition(t *testing.T) {
 func TestCognitionRunReflex(t *testing.T) {
 	provider := inference.NewMockProvider("mock", "Reflex response")
 	log := logger.New(logger.InfoLevel, nil)
-	mindAPI := &mockMindAPI{s: &state.DollState{}, c: &state.CoreConfig{}}
+	mindAPI := &mockMindAPI{s: &dollstate.DollState{}}
 	sched := New(provider, log, mindAPI)
 
 	result, err := sched.Run(context.Background(), LevelReflex, "touch hot surface")
