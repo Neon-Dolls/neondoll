@@ -2,6 +2,7 @@ package dollcard
 
 import (
 	"archive/zip"
+	"bytes"
 	"os"
 	"path/filepath"
 	"strings"
@@ -55,7 +56,7 @@ func TestDecodeSparkFromReader(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadFile(spark.dollcard): %v", err)
 	}
-	state, err := DecodeFromReader(strings.NewReader(string(data)), int64(len(data)))
+	state, err := DecodeFromReader(bytes.NewReader(data), int64(len(data)))
 	if err != nil {
 		t.Fatalf("DecodeFromReader(spark.dollcard) failed: %v", err)
 	}
@@ -134,7 +135,7 @@ func TestSparkIsARealZIP(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadFile: %v", err)
 	}
-	r, err := zip.NewReader(strings.NewReader(string(data)), int64(len(data)))
+	r, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
 	if err != nil {
 		t.Fatalf("zip.NewReader: %v", err)
 	}
