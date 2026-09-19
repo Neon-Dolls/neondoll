@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -23,6 +24,7 @@ type Service struct {
 	store    persistence.Store
 	provider inference.Provider
 	log      *logger.Logger
+	mu       sync.Mutex
 }
 
 // New creates an Interaction service with the given persistence store and
@@ -52,6 +54,9 @@ func (s *Service) HandleEvent(ctx context.Context, event *events.Event) (*events
 		errResp := events.NewErrorResponse(event.ID, "", "doll_id is required")
 		return &errResp, nil
 	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
 	state, err := s.store.LoadDoll(ctx, event.DollID)
 	if err != nil {

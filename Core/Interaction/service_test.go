@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -330,6 +331,81 @@ func TestNextSequence(t *testing.T) {
 				t.Errorf("nextSequence = %d, want %d", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestConcurrentInteractionsForSameDoll(t *testing.T) {
+	store := openStore(t)
+	seedDoll(t, store, "concurrent-doll", "ConcurrentDoll")
+
+	// A provider that sleeps briefly to ensure goroutines overlap
+	slowProvider := inference.NewMockProvider("slow", "response")
+
+	svc := New(store, slowProvider, logger.New(logger.ErrorLevel, io.Discard))
+
+	var wg sync.WaitGroup
+	errs := make(chan error, 2)
+
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			event := newResponse("concurrent-doll", "hello")
+			_, err := svc.HandleEvent(context.Background(), &event)
+			if err != nil {
+				errs <- err
+			}
+		}()
+	}
+
+	wg.Wait()
+	close(errs)
+
+	for err := range errs {
+		t.Errorf("HandleEvent: %v", err)
+	}
+
+	loaded, err := store.LoadDoll(context.Background(), "concurrent-doll")
+	if err != nil {
+		t.Fatalf("LoadDoll: %v", err)
+	}
+
+	if len(loaded.Memories.Items) != 4 {
+		t.Fatalf("expected 4 memory items from 2 concurrent interactions, got %d", len(loaded.Memories.Items))
+	}
+
+	// Sequences must be 0,1,2,3 globally
+	for i, m := range loaded.Memories.Items {
+		if m.Sequence != i {
+			t.Errorf("item %d: expected sequence %d, got %d", i, i, m.Sequence)
+		}
+	}
+
+	// Kinds must be in order: human, doll, human, doll
+	expectedKinds := []string{
+		dollstate.KindHumanMessage,
+		dollstate.KindDollResponse,
+		dollstate.KindHumanMessage,
+		dollstate.KindDollResponse,
+	}
+	for i, k := range expectedKinds {
+		if loaded.Memories.Items[i].Kind != k {
+			t.Errorf("item %d: expected kind %q, got %q", i, k, loaded.Memories.Items[i].Kind)
+		}
+	}
+
+	// Two unique InteractionIDs, each owning one pair
+	interactionIDs := make(map[string]int)
+	for _, m := range loaded.Memories.Items {
+		interactionIDs[m.InteractionID]++
+	}
+	if len(interactionIDs) != 2 {
+		t.Errorf("expected 2 unique interaction IDs, got %d", len(interactionIDs))
+	}
+	for id, count := range interactionIDs {
+		if count != 2 {
+			t.Errorf("interaction %s has %d items, want 2", id, count)
+		}
 	}
 }
 
