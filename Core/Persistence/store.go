@@ -66,9 +66,10 @@ func NewStore(dbPath string) (Store, error) {
 	return &store{db: db}, nil
 }
 
-// createSchema ensures the dolls table exists.
+// createSchema ensures the dolls and memories tables exist.
 func createSchema(db *sql.DB) error {
-	schema := `CREATE TABLE IF NOT EXISTS dolls (
+	schema := `
+	CREATE TABLE IF NOT EXISTS dolls (
 		doll_id      TEXT PRIMARY KEY,
 		version      INTEGER NOT NULL,
 		identity_json TEXT NOT NULL,
@@ -76,6 +77,17 @@ func createSchema(db *sql.DB) error {
 		owner_json    TEXT NOT NULL,
 		created_at   TEXT NOT NULL DEFAULT (datetime('now')),
 		updated_at   TEXT NOT NULL DEFAULT (datetime('now'))
+	);
+	CREATE TABLE IF NOT EXISTS memories (
+		doll_id        TEXT NOT NULL,
+		seq            INTEGER NOT NULL,
+		mem_id         TEXT NOT NULL,
+		interaction_id TEXT NOT NULL DEFAULT '',
+		kind           TEXT NOT NULL,
+		content        TEXT NOT NULL,
+		timestamp      TEXT NOT NULL DEFAULT '',
+		PRIMARY KEY (doll_id, seq),
+		FOREIGN KEY (doll_id) REFERENCES dolls(doll_id)
 	);`
 	_, err := db.Exec(schema)
 	return err
@@ -117,6 +129,30 @@ func (s *store) SaveDoll(ctx context.Context, state *dollstate.DollState) error 
 	if err != nil {
 		return fmt.Errorf("%w: %v", ErrCannotSave, err)
 	}
+
+	// Persist MemoryItems: nil = leave untouched, non-nil = replace.
+	if state.Memories.Items != nil {
+		if _, err := s.db.ExecContext(ctx, `DELETE FROM memories WHERE doll_id = ?`, state.Identity.DollID); err != nil {
+			return fmt.Errorf("%w: delete memories: %v", ErrCannotSave, err)
+		}
+		if len(state.Memories.Items) > 0 {
+			stmt, err := s.db.PrepareContext(ctx,
+				`INSERT INTO memories (doll_id, seq, mem_id, interaction_id, kind, content, timestamp)
+				 VALUES (?, ?, ?, ?, ?, ?, ?)`)
+			if err != nil {
+				return fmt.Errorf("%w: prepare memory insert: %v", ErrCannotSave, err)
+			}
+			defer stmt.Close()
+			for i := range state.Memories.Items {
+				m := &state.Memories.Items[i]
+				if _, err := stmt.ExecContext(ctx,
+					state.Identity.DollID, m.Sequence, m.ID, m.InteractionID, m.Kind, m.Content, m.Timestamp,
+				); err != nil {
+					return fmt.Errorf("%w: insert memory %q: %v", ErrCannotSave, m.ID, err)
+				}
+			}
+		}
+	}
 	return nil
 }
 
@@ -152,6 +188,30 @@ func (s *store) LoadDoll(ctx context.Context, dollID string) (*dollstate.DollSta
 	}
 	if err := json.Unmarshal([]byte(ownerJSON), &state.Owner); err != nil {
 		return nil, fmt.Errorf("%w: owner: %v", ErrCannotDecode, err)
+	}
+
+	// Load memories ordered by sequence.
+	mrows, err := s.db.QueryContext(ctx,
+		`SELECT seq, mem_id, interaction_id, kind, content, timestamp
+		 FROM memories WHERE doll_id = ? ORDER BY seq`, dollID)
+	if err != nil {
+		return nil, fmt.Errorf("%w: query memories: %v", ErrCannotDecode, err)
+	}
+	defer mrows.Close()
+
+	var items []dollstate.MemoryItem
+	for mrows.Next() {
+		var m dollstate.MemoryItem
+		if err := mrows.Scan(&m.Sequence, &m.ID, &m.InteractionID, &m.Kind, &m.Content, &m.Timestamp); err != nil {
+			return nil, fmt.Errorf("%w: scan memory: %v", ErrCannotDecode, err)
+		}
+		items = append(items, m)
+	}
+	if err := mrows.Err(); err != nil {
+		return nil, fmt.Errorf("%w: iterate memories: %v", ErrCannotDecode, err)
+	}
+	if items != nil {
+		state.Memories.Items = items
 	}
 
 	return &state, nil
