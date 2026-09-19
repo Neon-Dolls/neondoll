@@ -87,29 +87,41 @@ type MemoryItem struct {
 	Timestamp     string `json:"timestamp,omitempty"`
 }
 
-// Drives — the Doll's active drives and motivations.
+// Drives — the Doll's durable motivations and directions.
 type Drives struct {
 	Items []DriveItem `json:"items,omitempty"`
 }
 
-// DriveItem represents a single active drive.
+// DriveItem represents a single durable motivation or direction.
+//
+// Name provides the core human/cognition-readable content. Description may
+// carry a richer explanation but is not required when Name alone suffices.
+//
+// An ID is a portable semantic identifier — never derived from a SQLite row
+// ID, runtime handle, or other non-portable source.
 type DriveItem struct {
-	ID      string `json:"id"`
-	Name    string `json:"name"`
-	Active  bool   `json:"active"`
-	Priority int   `json:"priority"`
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
 }
 
-// Goals — the Doll's tracked objectives.
+// Goals — the Doll's tracked desired outcomes.
 type Goals struct {
 	Items []GoalItem `json:"items,omitempty"`
 }
 
-// GoalItem represents a single goal.
+// GoalItem represents a single durable desired outcome.
+//
+// Name provides the core content. Description may carry a richer explanation.
+// Completed marks lifecycle state: false = actively pursued, true = achieved.
+// DriveID optionally references the semantic identifier of the Drive that
+// motivates this Goal. Both IDs are portable semantic identifiers.
 type GoalItem struct {
-	ID        string `json:"id"`
-	Name      string `json:"name"`
-	Completed bool   `json:"completed"`
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+	Completed   bool   `json:"completed,omitempty"`
+	DriveID     string `json:"drive_id,omitempty"`
 }
 
 // Skills — learned or installed capabilities.
