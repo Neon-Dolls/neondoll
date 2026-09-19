@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/Neon-Dolls/neondoll/pkg/logger"
@@ -16,6 +17,7 @@ type Server struct {
 	httpServer   *http.Server
 	log          *logger.Logger
 	mux          *http.ServeMux
+	mu           sync.Mutex
 	listenerAddr string
 }
 
@@ -52,14 +54,19 @@ func (s *Server) Start() error {
 	if err != nil {
 		return err
 	}
+	s.mu.Lock()
 	s.listenerAddr = listener.Addr().String()
+	s.mu.Unlock()
 	s.log.Info("api server starting", map[string]any{"addr": s.listenerAddr})
 	return s.httpServer.Serve(listener)
 }
 
 // Addr returns the actual bound address (available after Start).
 func (s *Server) Addr() string {
-	return s.listenerAddr
+	s.mu.Lock()
+	addr := s.listenerAddr
+	s.mu.Unlock()
+	return addr
 }
 
 // Shutdown gracefully stops the server.

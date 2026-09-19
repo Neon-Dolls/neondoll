@@ -25,7 +25,7 @@ func (l *testLogger) Error(msg string, fields ...map[string]any) {
 
 func TestNewWS(t *testing.T) {
 	log := &testLogger{t}
-	srv := New(Config{Listen: ":0"}, log)
+	srv := New(Config{Listen: ":0"}, log, nil)
 	if srv == nil {
 		t.Fatal("New returned nil")
 	}
@@ -33,23 +33,22 @@ func TestNewWS(t *testing.T) {
 
 func TestWSEndpoint(t *testing.T) {
 	log := &testLogger{t}
-	srv := New(Config{Listen: ":0"}, log)
+	srv := New(Config{Listen: ":0"}, log, nil)
 
+	// Plain HTTP request to /ws should fail upgrade (no WebSocket headers).
 	req := httptest.NewRequest(http.MethodGet, "/ws", nil)
 	rec := httptest.NewRecorder()
 	srv.mux.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusNotImplemented {
-		t.Errorf("expected 501, got %d", rec.Code)
-	}
-	if rec.Body.Len() == 0 {
-		t.Error("expected response body")
+	// Expect an upgrade error response (typically 200 with an error body for gorilla).
+	if rec.Code != http.StatusOK && rec.Code != http.StatusBadRequest {
+		t.Errorf("expected 200 or 400 from WS upgrade without headers, got %d", rec.Code)
 	}
 }
 
 func TestWSStatus(t *testing.T) {
 	log := &testLogger{t}
-	srv := New(Config{Listen: ":0"}, log)
+	srv := New(Config{Listen: ":0"}, log, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/ws/status", nil)
 	rec := httptest.NewRecorder()
@@ -65,7 +64,7 @@ func TestWSStatus(t *testing.T) {
 
 func TestConnCount(t *testing.T) {
 	log := &testLogger{t}
-	srv := New(Config{Listen: ":0"}, log)
+	srv := New(Config{Listen: ":0"}, log, nil)
 	if count := srv.ConnCount(); count != 0 {
 		t.Errorf("expected 0 connections, got %d", count)
 	}
@@ -73,7 +72,7 @@ func TestConnCount(t *testing.T) {
 
 func TestStartShutdown(t *testing.T) {
 	log := &testLogger{t}
-	srv := New(Config{Listen: "127.0.0.1:0"}, log)
+	srv := New(Config{Listen: "127.0.0.1:0"}, log, nil)
 
 	go func() {
 		srv.Start(context.Background())

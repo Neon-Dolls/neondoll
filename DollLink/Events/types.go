@@ -15,11 +15,13 @@ const (
 
 // Event is the generic inbound event envelope.
 type Event struct {
-	ID        string    `json:"id"`
-	Type      Type      `json:"type"`
-	Timestamp time.Time `json:"timestamp"`
-	Source    string    `json:"source"`
-	Payload   any       `json:"payload"`
+	ID            string    `json:"id"`
+	Type          Type      `json:"type"`
+	Timestamp     time.Time `json:"timestamp"`
+	Source        string    `json:"source"`
+	DollID        string    `json:"doll_id,omitempty"`
+	CorrelationID string    `json:"correlation_id,omitempty"`
+	Payload       any       `json:"payload"`
 }
 
 // MessagePayload for standard chat messages.
@@ -58,6 +60,51 @@ func New(id string, typ Type, source string, payload any) Event {
 		Timestamp: time.Now().UTC(),
 		Source:    source,
 		Payload:   payload,
+	}
+}
+
+// NewDollMessage creates a message Event addressed to a specific Doll.
+func NewDollMessage(id, dollID, text string) Event {
+	return Event{
+		ID:     id,
+		Type:   TypeMessage,
+		Source: "client",
+		DollID: dollID,
+		Timestamp: time.Now().UTC(),
+		Payload: MessagePayload{
+			Text: text,
+		},
+	}
+}
+
+// NewResponse creates a response Event that echoes the correlation ID.
+func NewResponse(correlationID, dollID, text string) Event {
+	return Event{
+		ID:            "",
+		Type:          TypeMessage,
+		Source:        "core",
+		DollID:        dollID,
+		CorrelationID: correlationID,
+		Timestamp:     time.Now().UTC(),
+		Payload: MessagePayload{
+			Text: text,
+		},
+	}
+}
+
+// NewErrorResponse creates a system Event reporting an error.
+func NewErrorResponse(correlationID, dollID, message string) Event {
+	return Event{
+		ID:            "",
+		Type:          TypeSystem,
+		Source:        "core",
+		DollID:        dollID,
+		CorrelationID: correlationID,
+		Timestamp:     time.Now().UTC(),
+		Payload: SystemPayload{
+			Event: "error",
+			Data:  message,
+		},
 	}
 }
 

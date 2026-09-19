@@ -4,16 +4,25 @@ package integration
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/google/uuid"
+	"github.com/gorilla/websocket"
 
 	"github.com/Neon-Dolls/neondoll/Core/API"
 	"github.com/Neon-Dolls/neondoll/Core/Config"
 	"github.com/Neon-Dolls/neondoll/Core/DollMind"
 	"github.com/Neon-Dolls/neondoll/Core/Inference"
+	"github.com/Neon-Dolls/neondoll/Core/Interaction"
+	"github.com/Neon-Dolls/neondoll/Core/Persistence"
+	"github.com/Neon-Dolls/neondoll/DollCard"
+	"github.com/Neon-Dolls/neondoll/DollLink/Events"
 	"github.com/Neon-Dolls/neondoll/DollLink/WebSocket"
 	"github.com/Neon-Dolls/neondoll/DollState"
 	"github.com/Neon-Dolls/neondoll/pkg/logger"
@@ -137,9 +146,9 @@ func TestIntegrationCognitionWithMock(t *testing.T) {
 	}
 }
 
-func TestIntegrationWSStub(t *testing.T) {
+func TestIntegrationWSStartStop(t *testing.T) {
 	log := logger.New(logger.WarnLevel, nil)
-	srv := ws.New(ws.Config{Listen: "127.0.0.1:0"}, log)
+	srv := ws.New(ws.Config{Listen: "127.0.0.1:0"}, log, nil)
 
 	go func() {
 		srv.Start(context.Background())
@@ -181,6 +190,267 @@ func TestIntegrationSecretRoundTrip(t *testing.T) {
 	if loaded.Items[0].Value != "«redacted:sk-…»" {
 		t.Errorf("expected secret value, got %s", loaded.Items[0].Value)
 	}
+}
+
+// decodeSparkFromCard decodes Spark's doll card. Kept in test helpers
+// so the E2E test does not read the card during the interaction phase.
+func decodeSparkFromCard(t *testing.T) *dollstate.DollState {
+	t.Helper()
+	cardPath := filepath.Join("..", "testdata", "dolls", "spark.dollcard")
+	state, err := dollcard.Decode(cardPath)
+	if err != nil {
+		t.Fatalf("Decode(spark.dollcard): %v", err)
+	}
+	return state
+}
+
+// waitForWSAddr polls the WS server until it has a bound address.
+func waitForWSAddr(t *testing.T, srv *ws.Server) string {
+	t.Helper()
+	for range 50 {
+		if a := srv.Addr(); a != "" {
+			return a
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("WS server did not bind within 500ms")
+	return ""
+}
+
+// wsConnect dials a WS server and returns the connection.
+func wsConnect(t *testing.T, addr string) *websocket.Conn {
+	t.Helper()
+	dialer := websocket.Dialer{HandshakeTimeout: 3 * time.Second}
+	conn, _, err := dialer.Dial("ws://"+addr+"/ws", http.Header{})
+	if err != nil {
+		t.Fatalf("WS dial: %v", err)
+	}
+	return conn
+}
+
+// sendAndReceive sends an event over WS and waits for a matching response.
+func sendAndReceive(t *testing.T, conn *websocket.Conn, req events.Event, timeout time.Duration) *events.Event {
+	t.Helper()
+	if err := conn.WriteJSON(req); err != nil {
+		t.Fatalf("WS write: %v", err)
+	}
+
+	conn.SetReadDeadline(time.Now().Add(timeout))
+	for {
+		_, raw, err := conn.ReadMessage()
+		if err != nil {
+			t.Fatalf("WS read (waiting for correlation %s): %v", req.ID, err)
+		}
+		var resp events.Event
+		if err := json.Unmarshal(raw, &resp); err != nil {
+			t.Logf("skipping unparseable frame: %v", err)
+			continue
+		}
+		if resp.CorrelationID == req.ID || resp.Type == events.TypeSystem {
+			return &resp
+		}
+	}
+}
+
+// --- Spark through Doll Link: E2E tests ---
+
+func TestIntegrationSparkThroughDollLink(t *testing.T) {
+	// Phase 1: Seed the database from Spark's doll card (before Core starts).
+	dbDir := t.TempDir()
+	dbPath := filepath.Join(dbDir, "neondoll.db")
+
+	spark := decodeSparkFromCard(t)
+	const sparkID = "3f3cd340-cac2-4674-b1ac-36c5510096eb"
+	const sparkName = "Spark"
+
+	if spark.Identity.DollID != sparkID {
+		t.Fatalf("Spark DollID = %q, want %q", spark.Identity.DollID, sparkID)
+	}
+
+	store, err := persistence.NewStore(dbPath)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	if err := store.SaveDoll(context.Background(), spark); err != nil {
+		t.Fatalf("SaveDoll: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close store: %v", err)
+	}
+
+	// Phase 2: Start Core + Doll Link on a fresh store (must NOT read the doll card).
+	log := logger.New(logger.WarnLevel, nil)
+
+	store2, err := persistence.NewStore(dbPath)
+	if err != nil {
+		t.Fatalf("NewStore (phase 2): %v", err)
+	}
+	defer store2.Close()
+
+	svc := interaction.New(store2, log)
+	srv := ws.New(ws.Config{Listen: "127.0.0.1:0"}, log, svc)
+
+	startErr := make(chan error, 1)
+	go func() {
+		startErr <- srv.Start(context.Background())
+	}()
+
+	addr := waitForWSAddr(t, srv)
+	defer func() {
+		if err := srv.Shutdown(context.Background()); err != nil {
+			t.Logf("Shutdown: %v", err)
+		}
+	}()
+
+	select {
+	case err := <-startErr:
+		t.Fatalf("Start returned unexpectedly: %v", err)
+	default:
+	}
+
+	// --- Subtest: successful interaction with persisted Spark ---
+	t.Run("Spark responds", func(t *testing.T) {
+		conn := wsConnect(t, addr)
+		defer conn.Close()
+
+		reqID := uuid.New().String()
+		req := events.NewDollMessage(reqID, sparkID, "Hello Spark")
+
+		resp := sendAndReceive(t, conn, req, 5*time.Second)
+		if resp == nil {
+			t.Fatal("no response received")
+		}
+
+		// Correlation must be preserved.
+		if resp.CorrelationID != reqID {
+			t.Errorf("CorrelationID = %q, want %q", resp.CorrelationID, reqID)
+		}
+
+		// Response must be a message type.
+		if resp.Type != events.TypeMessage {
+			t.Errorf("Type = %q, want %q", resp.Type, events.TypeMessage)
+		}
+
+		// Response must derive from loaded doll state.
+		payload, ok := resp.Payload.(map[string]any)
+		if !ok {
+			// Try JSON re-marshal for typed payloads.
+			b, _ := json.Marshal(resp.Payload)
+			payload = make(map[string]any)
+			json.Unmarshal(b, &payload)
+		}
+
+		text, _ := payload["text"].(string)
+		if text == "" {
+			t.Error("response text is empty")
+		}
+
+		// The deterministic response must contain the CanonicalName from loaded state.
+		if !contains(text, sparkName) {
+			t.Errorf("response text = %q, should contain %q", text, sparkName)
+		}
+
+		// Source should identify Core.
+		if resp.Source != "core" {
+			t.Errorf("Source = %q, want %q", resp.Source, "core")
+		}
+
+		// DollID echo.
+		if resp.DollID != sparkID {
+			t.Errorf("DollID = %q, want %q", resp.DollID, sparkID)
+		}
+	})
+
+	// --- Subtest: unknown Doll ID returns clean error ---
+	t.Run("Unknown doll returns error", func(t *testing.T) {
+		conn := wsConnect(t, addr)
+		defer conn.Close()
+
+		reqID := uuid.New().String()
+		req := events.NewDollMessage(reqID, "nonexistent-doll-id", "Hello?")
+
+		resp := sendAndReceive(t, conn, req, 5*time.Second)
+		if resp == nil {
+			t.Fatal("no response received")
+		}
+
+		// Must be a system event (error).
+		if resp.Type != events.TypeSystem {
+			t.Errorf("Type = %q, want %q (system error)", resp.Type, events.TypeSystem)
+		}
+
+		// Correlation must still be preserved.
+		if resp.CorrelationID != reqID {
+			t.Errorf("CorrelationID = %q, want %q", resp.CorrelationID, reqID)
+		}
+	})
+
+	// --- Subtest: Core stays alive after unknown doll request ---
+	t.Run("Core alive after error", func(t *testing.T) {
+		conn := wsConnect(t, addr)
+		defer conn.Close()
+
+		// Send an error-triggering request first.
+		badReq := events.NewDollMessage(uuid.New().String(), "bad-id", "hi")
+		_ = sendAndReceive(t, conn, badReq, 5*time.Second)
+
+		// Now send a real request — must still work.
+		goodReq := events.NewDollMessage(uuid.New().String(), sparkID, "are you still there?")
+		resp := sendAndReceive(t, conn, goodReq, 5*time.Second)
+		if resp == nil {
+			t.Fatal("no response after error recovery")
+		}
+		if resp.Type == events.TypeSystem {
+			payload, _ := resp.Payload.(map[string]any)
+			t.Fatalf("got error after recovery: %v", payload)
+		}
+		if resp.DollID != sparkID {
+			t.Errorf("response DollID = %q, want %q", resp.DollID, sparkID)
+		}
+	})
+
+	// --- Subtest: Empty/invalid message shape ---
+	t.Run("Invalid message rejected gracefully", func(t *testing.T) {
+		conn := wsConnect(t, addr)
+		defer conn.Close()
+
+		// Send raw invalid JSON.
+		if err := conn.WriteMessage(websocket.TextMessage, []byte("not json")); err != nil {
+			t.Fatalf("WriteMessage: %v", err)
+		}
+
+		conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+		_, raw, err := conn.ReadMessage()
+		if err != nil {
+			// If the server closed the connection, that's acceptable
+			// as long as the server is still running.
+			t.Logf("connection closed after invalid message (acceptable): %v", err)
+		} else {
+			var resp events.Event
+			if err := json.Unmarshal(raw, &resp); err == nil && resp.Type == events.TypeSystem {
+				// Got a system error response — clean handling.
+				t.Logf("invalid message produced system error as expected")
+			}
+		}
+
+		// Verify server is still alive by connecting again.
+		newConn := wsConnect(t, addr)
+		defer newConn.Close()
+		req := events.NewDollMessage(uuid.New().String(), sparkID, "still up?")
+		if err := newConn.WriteJSON(req); err != nil {
+			t.Fatalf("server dead after invalid message: %v", err)
+		}
+		newConn.SetReadDeadline(time.Now().Add(2 * time.Second))
+		_, _, err = newConn.ReadMessage()
+		if err != nil {
+			t.Fatalf("server did not respond after invalid message: %v", err)
+		}
+	})
+}
+
+// contains is a helper for substring check.
+func contains(s, substr string) bool {
+	return strings.Contains(s, substr)
 }
 
 func TestMain(m *testing.M) {
