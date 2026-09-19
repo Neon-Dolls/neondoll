@@ -19,8 +19,6 @@ const (
 
 	// DefaultBaseURL is the default llama.cpp server URL.
 	DefaultBaseURL = "http://localhost:8080"
-
-	defaultMaxRetries = 2
 )
 
 // OpenAIProviderID is the provider identifier for the OpenAI-compatible provider.
@@ -113,9 +111,13 @@ func (p *OpenAIProvider) ID() ProviderID {
 
 // Infer sends a chat completion request and returns the generated response.
 func (p *OpenAIProvider) Infer(ctx context.Context, req Request) (*Response, error) {
+	maxTokens := p.maxTokens
+	if req.MaxTokens > 0 {
+		maxTokens = req.MaxTokens
+	}
 	chatReq := chatCompletionRequest{
-		Model:     req.Model,
-		MaxTokens: p.maxTokens,
+		Model:       req.Model,
+		MaxTokens:   maxTokens,
 		Temperature: req.Temperature,
 	}
 	if chatReq.MaxTokens <= 0 {
@@ -178,9 +180,6 @@ func (p *OpenAIProvider) Infer(ctx context.Context, req Request) (*Response, err
 		Content:    content,
 		ProviderID: p.id,
 		TokensUsed: chatResp.Usage.CompletionTokens,
-	}
-	if result.TokensUsed == 0 {
-		result.TokensUsed = len(req.Messages)
 	}
 
 	return result, nil

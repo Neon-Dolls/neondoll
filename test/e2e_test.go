@@ -423,15 +423,23 @@ func TestE2E_InferenceFails(t *testing.T) {
 
 	t.Log("Inference failure returned clean error")
 
-	// Verify Core is still alive.
+	// Send another request on a new connection — Core must still process it
+	// after the first provider failure.
 	conn2 := wsConnect(t, addr)
 	defer conn2.Close()
 	reqID2 := uuid.New().String()
 	req2 := events.NewDollMessage(reqID2, sparkID, "still up?")
-	if err := conn2.WriteJSON(req2); err != nil {
-		t.Fatalf("Core not responding after error: %v", err)
+	resp2 := sendAndReceive(t, conn2, req2, 10*time.Second)
+	if resp2 == nil {
+		t.Fatal("no response after first inference failure")
 	}
-	// Just check the connection is alive — don't wait for a real response
-	// since inference will fail again, but the server should stay up.
-	t.Log("Core remained alive after inference failure")
+
+	if resp2.Type != events.TypeSystem {
+		t.Errorf("second response: expected system (error) event, got %v", resp2.Type)
+	}
+	if resp2.CorrelationID != reqID2 {
+		t.Errorf("second response: CorrelationID = %q, want %q", resp2.CorrelationID, reqID2)
+	}
+
+	t.Log("Core remained operational after inference failure — second request also returned clean error")
 }

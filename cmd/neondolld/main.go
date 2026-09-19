@@ -35,6 +35,12 @@ func main() {
 		cfg = &defaults
 	}
 
+	// Validate the inference provider.
+	if cfg.Inference.Provider != "openai" {
+		log.Error("unsupported inference provider", map[string]any{"provider": cfg.Inference.Provider})
+		os.Exit(1)
+	}
+
 	// Ensure database directory exists.
 	if err := os.MkdirAll(cfg.Paths.DataDir, 0o755); err != nil {
 		log.Error("mkdir error", map[string]any{"error": err.Error()})
