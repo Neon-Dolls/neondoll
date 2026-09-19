@@ -49,6 +49,7 @@ func TestRoundTrip(t *testing.T) {
 
 	ctx := context.Background()
 	s := openStore(t, path)
+	defer s.Close()
 
 	spark := decodeSpark(t)
 	if err := s.SaveDoll(ctx, spark); err != nil {
@@ -88,6 +89,7 @@ func TestStableIdentity(t *testing.T) {
 
 	ctx := context.Background()
 	s := openStore(t, path)
+	defer s.Close()
 
 	const wantID = "3f3cd340-cac2-4674-b1ac-36c5510096eb"
 	spark := decodeSpark(t)
@@ -115,6 +117,7 @@ func TestMissingDoll(t *testing.T) {
 
 	ctx := context.Background()
 	s := openStore(t, path)
+	defer s.Close()
 
 	_, err := s.LoadDoll(ctx, "nonexistent-doll-id")
 	if err == nil {
@@ -132,6 +135,7 @@ func TestInvalidDollID(t *testing.T) {
 
 	ctx := context.Background()
 	s := openStore(t, path)
+	defer s.Close()
 
 	state := dollstate.NewDollState()
 	state.Identity.DollID = ""
@@ -145,14 +149,15 @@ func TestInvalidDollID(t *testing.T) {
 	}
 }
 
-// TestReplacement verifies saving updated state for the same DollID replaces
-// the existing record without creating a second Doll.
+// TestReplacement verifies that saving updated state for the same DollID
+// replaces the existing record (UPSERT) and LoadDoll returns the new state.
 func TestReplacement(t *testing.T) {
 	path, cleanup := tempDB(t)
 	defer cleanup()
 
 	ctx := context.Background()
 	s := openStore(t, path)
+	defer s.Close()
 
 	spark := decodeSpark(t)
 	if err := s.SaveDoll(ctx, spark); err != nil {
@@ -178,11 +183,24 @@ func TestReplacement(t *testing.T) {
 	if !strings.Contains(loaded.Soul.Content, "Updated after initial persistence") {
 		t.Error("Soul.Content does not contain updated text")
 	}
+}
 
-	// Verify only one Doll exists by checking that loading a different ID fails.
-	_, err = s.LoadDoll(ctx, "some-other-id")
+// TestNilDollState verifies SaveDoll with a nil state returns ErrInvalidDollID
+// and does not panic.
+func TestNilDollState(t *testing.T) {
+	path, cleanup := tempDB(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	s := openStore(t, path)
+	defer s.Close()
+
+	err := s.SaveDoll(ctx, nil)
 	if err == nil {
-		t.Error("expected error for non-existent doll after replacement")
+		t.Fatal("SaveDoll(nil): expected error, got nil")
+	}
+	if err != persistence.ErrInvalidDollID {
+		t.Errorf("SaveDoll(nil): error = %v, want %v", err, persistence.ErrInvalidDollID)
 	}
 }
 

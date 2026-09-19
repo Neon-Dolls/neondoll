@@ -83,7 +83,7 @@ func createSchema(db *sql.DB) error {
 
 // SaveDoll inserts or replaces a Doll's state, keyed by its stable DollID.
 func (s *store) SaveDoll(ctx context.Context, state *dollstate.DollState) error {
-	if state.Identity.DollID == "" {
+	if state == nil || state.Identity.DollID == "" {
 		return ErrInvalidDollID
 	}
 
