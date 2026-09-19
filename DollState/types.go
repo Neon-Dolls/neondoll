@@ -57,20 +57,34 @@ const (
 	KindDollResponse = "doll_response"
 )
 
-// MemoryItem is a single memory record.
+// MemoryItem is a single memory record in the Doll's portable memory stream.
 //
-// Kind describes the source or type of the experience (see Kind* constants).
-// Sequence provides deterministic ordering where multiple records belong
-// to one interaction — lower values sort before higher values.
-// Do not rely on SQLite row IDs, insertion order, or Timestamp alone
-// as the semantic ordering contract. Timestamp records wall-clock time
-// when the experience occurred; Sequence defines logical ordering.
+// InteractionID groups records belonging to the same experienced interaction.
+// It is NOT a Session, Conversation, Thread, or larger abstraction — it exists
+// solely to associate the human message with the doll response that followed.
+//
+// Sequence provides deterministic global ordering across the entire Doll
+// memory stream. It does NOT reset per interaction. Every new record in the
+// stream receives a monotonically increasing Sequence value regardless of
+// which interaction it belongs to.
+//
+//   Sequence orders experience. InteractionID groups related experience.
+//
+// Do not rely on SQLite row IDs, Timestamp alone, or Doll Card JSONL line
+// position as the semantic ordering contract. Timestamp records wall-clock
+// time; Sequence defines logical global order. InteractionID provides
+// associative grouping independent of ordering.
+//
+// Level was present in an earlier version but lacked any defined semantic
+// meaning: no doc comment, no constants, no mention in the Doll Card spec
+// or any concept document. It was genuinely undefined and has been removed.
 type MemoryItem struct {
-	ID        string `json:"id"`
-	Kind      string `json:"kind"`
-	Content   string `json:"content"`
-	Sequence  int    `json:"sequence"`
-	Timestamp string `json:"timestamp,omitempty"`
+	ID            string `json:"id"`
+	InteractionID string `json:"interaction_id,omitempty"`
+	Kind          string `json:"kind"`
+	Content       string `json:"content"`
+	Sequence      int    `json:"sequence"`
+	Timestamp     string `json:"timestamp,omitempty"`
 }
 
 // Drives — the Doll's active drives and motivations.
