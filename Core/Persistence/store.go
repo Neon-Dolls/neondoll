@@ -94,6 +94,9 @@ func createSchema(db *sql.DB) error {
 }
 
 // SaveDoll inserts or replaces a Doll's state, keyed by its stable DollID.
+// The doll row and any memory changes are applied atomically in a single
+// SQLite transaction. If Memories.Items is nil, existing memories are
+// preserved untouched; if non-nil (including empty slice), they are replaced.
 func (s *store) SaveDoll(ctx context.Context, state *dollstate.DollState) error {
 	if state == nil || state.Identity.DollID == "" {
 		return ErrInvalidDollID
@@ -112,8 +115,14 @@ func (s *store) SaveDoll(ctx context.Context, state *dollstate.DollState) error 
 		return fmt.Errorf("%w: owner: %v", ErrCannotSave, err)
 	}
 
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("%w: begin tx: %v", ErrCannotSave, err)
+	}
+	defer tx.Rollback() // no-op if Commit succeeds
+
 	now := time.Now().UTC().Format(time.RFC3339)
-	_, err = s.db.ExecContext(ctx,
+	_, err = tx.ExecContext(ctx,
 		`INSERT INTO dolls (doll_id, version, identity_json, soul_json, owner_json, created_at, updated_at)
 		 VALUES (?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(doll_id) DO UPDATE SET
@@ -132,20 +141,15 @@ func (s *store) SaveDoll(ctx context.Context, state *dollstate.DollState) error 
 
 	// Persist MemoryItems: nil = leave untouched, non-nil = replace.
 	if state.Memories.Items != nil {
-		if _, err := s.db.ExecContext(ctx, `DELETE FROM memories WHERE doll_id = ?`, state.Identity.DollID); err != nil {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM memories WHERE doll_id = ?`, state.Identity.DollID); err != nil {
 			return fmt.Errorf("%w: delete memories: %v", ErrCannotSave, err)
 		}
 		if len(state.Memories.Items) > 0 {
-			stmt, err := s.db.PrepareContext(ctx,
-				`INSERT INTO memories (doll_id, seq, mem_id, interaction_id, kind, content, timestamp)
-				 VALUES (?, ?, ?, ?, ?, ?, ?)`)
-			if err != nil {
-				return fmt.Errorf("%w: prepare memory insert: %v", ErrCannotSave, err)
-			}
-			defer stmt.Close()
 			for i := range state.Memories.Items {
 				m := &state.Memories.Items[i]
-				if _, err := stmt.ExecContext(ctx,
+				if _, err := tx.ExecContext(ctx,
+					`INSERT INTO memories (doll_id, seq, mem_id, interaction_id, kind, content, timestamp)
+					 VALUES (?, ?, ?, ?, ?, ?, ?)`,
 					state.Identity.DollID, m.Sequence, m.ID, m.InteractionID, m.Kind, m.Content, m.Timestamp,
 				); err != nil {
 					return fmt.Errorf("%w: insert memory %q: %v", ErrCannotSave, m.ID, err)
@@ -153,7 +157,8 @@ func (s *store) SaveDoll(ctx context.Context, state *dollstate.DollState) error 
 			}
 		}
 	}
-	return nil
+
+	return tx.Commit()
 }
 
 // LoadDoll retrieves a Doll's state by its stable DollID.

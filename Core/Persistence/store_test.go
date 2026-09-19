@@ -685,3 +685,127 @@ func TestContinuityIntegration(t *testing.T) {
 		t.Errorf("Owner.Content mismatch")
 	}
 }
+
+// TestMemoryFullRecordRoundTrip verifies every field of a MemoryItem
+// survives a round trip through SaveDoll → LoadDoll: ID, InteractionID,
+// Kind, Content, Sequence, Timestamp.
+func TestMemoryFullRecordRoundTrip(t *testing.T) {
+	path, cleanup := tempDB(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	store := openStore(t, path)
+
+	state := dollstate.NewDollState()
+	state.Identity.DollID = "roundtrip-doll"
+	state.Version = dollstate.CurrentStateVersion
+	state.Identity.CanonicalName = "Roundtrip Doll"
+	state.Soul.Content = "test soul"
+	state.Owner.Content = "test owner"
+
+	state.Memories.Items = []dollstate.MemoryItem{
+		{
+			ID:            "mem-42",
+			InteractionID: "iact-roundtrip",
+			Kind:          dollstate.KindHumanMessage,
+			Content:       "Hello! This is a full-record test.",
+			Sequence:      1,
+			Timestamp:     "2026-09-19T12:00:00Z",
+		},
+	}
+
+	if err := store.SaveDoll(ctx, &state); err != nil {
+		t.Fatalf("SaveDoll: %v", err)
+	}
+
+	loaded, err := store.LoadDoll(ctx, "roundtrip-doll")
+	if err != nil {
+		t.Fatalf("LoadDoll: %v", err)
+	}
+	if len(loaded.Memories.Items) != 1 {
+		t.Fatalf("got %d memories, want 1", len(loaded.Memories.Items))
+	}
+
+	m := loaded.Memories.Items[0]
+	if m.ID != "mem-42" {
+		t.Errorf("ID = %q, want %q", m.ID, "mem-42")
+	}
+	if m.InteractionID != "iact-roundtrip" {
+		t.Errorf("InteractionID = %q, want %q", m.InteractionID, "iact-roundtrip")
+	}
+	if m.Kind != dollstate.KindHumanMessage {
+		t.Errorf("Kind = %q, want %q", m.Kind, dollstate.KindHumanMessage)
+	}
+	if m.Content != "Hello! This is a full-record test." {
+		t.Errorf("Content = %q, want %q", m.Content, "Hello! This is a full-record test.")
+	}
+	if m.Sequence != 1 {
+		t.Errorf("Sequence = %d, want %d", m.Sequence, 1)
+	}
+	if m.Timestamp != "2026-09-19T12:00:00Z" {
+		t.Errorf("Timestamp = %q, want %q", m.Timestamp, "2026-09-19T12:00:00Z")
+	}
+}
+
+// TestMemoryRollbackOnFailure verifies that when a SaveDoll memory
+// replacement fails partway through (duplicate sequence → PK violation),
+// the existing memories remain intact — proving the SQLite transaction
+// rolls back the whole save.
+func TestMemoryRollbackOnFailure(t *testing.T) {
+	path, cleanup := tempDB(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	store := openStore(t, path)
+
+	// Save a doll with two original memories.
+	state := dollstate.NewDollState()
+	state.Identity.DollID = "rollback-doll"
+	state.Version = dollstate.CurrentStateVersion
+	state.Identity.CanonicalName = "Rollback Doll"
+	state.Soul.Content = "test soul"
+	state.Owner.Content = "test owner"
+
+	state.Memories.Items = []dollstate.MemoryItem{
+		{ID: "orig-a", Kind: dollstate.KindHumanMessage, Content: "original A", Sequence: 1, InteractionID: "iact-1", Timestamp: "2026-09-19T10:00:00Z"},
+		{ID: "orig-b", Kind: dollstate.KindDollResponse, Content: "original B", Sequence: 2, InteractionID: "iact-1", Timestamp: "2026-09-19T10:01:00Z"},
+	}
+	if err := store.SaveDoll(ctx, &state); err != nil {
+		t.Fatalf("initial SaveDoll: %v", err)
+	}
+
+	// Confirm originals are persisted.
+	loaded, err := store.LoadDoll(ctx, "rollback-doll")
+	if err != nil {
+		t.Fatalf("first LoadDoll: %v", err)
+	}
+	if len(loaded.Memories.Items) != 2 {
+		t.Fatalf("expected 2 original memories, got %d", len(loaded.Memories.Items))
+	}
+
+	// Attempt to replace with a set that will fail on the second insert
+	// (same seq = primary key violation).
+	state.Memories.Items = []dollstate.MemoryItem{
+		{ID: "replace-a", Kind: dollstate.KindHumanMessage, Content: "replacement A", Sequence: 1, InteractionID: "iact-2", Timestamp: "2026-09-19T12:00:00Z"},
+		{ID: "replace-b", Kind: dollstate.KindDollResponse, Content: "replacement B", Sequence: 1, InteractionID: "iact-2", Timestamp: "2026-09-19T12:01:00Z"},
+	}
+	err = store.SaveDoll(ctx, &state)
+	if err == nil {
+		t.Fatal("SaveDoll should have failed (duplicate seq PK violation)")
+	}
+
+	// Reload — the original memories must still be there (rollback).
+	reloaded, err := store.LoadDoll(ctx, "rollback-doll")
+	if err != nil {
+		t.Fatalf("LoadDoll after failure: %v", err)
+	}
+	if len(reloaded.Memories.Items) != 2 {
+		t.Fatalf("expected 2 original memories after rollback, got %d", len(reloaded.Memories.Items))
+	}
+	if reloaded.Memories.Items[0].ID != "orig-a" {
+		t.Errorf("memory 0 ID = %q, want %q", reloaded.Memories.Items[0].ID, "orig-a")
+	}
+	if reloaded.Memories.Items[1].ID != "orig-b" {
+		t.Errorf("memory 1 ID = %q, want %q", reloaded.Memories.Items[1].ID, "orig-b")
+	}
+}
