@@ -88,7 +88,7 @@ func main() {
 	info := map[string]any{
 		"http_listen": listenAddr,
 		"db_path":     dbPath,
-		"version":     "0.1.0",
+		"version":     1,
 	}
 	b, _ := json.Marshal(info)
 	fmt.Fprintf(os.Stderr, "neondoll started: %s\n", string(b))
