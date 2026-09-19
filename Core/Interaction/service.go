@@ -3,34 +3,43 @@ package interaction
 import (
 	"context"
 	"fmt"
+	"strings"
 
+	"github.com/Neon-Dolls/neondoll/Core/Inference"
 	"github.com/Neon-Dolls/neondoll/Core/Persistence"
 	"github.com/Neon-Dolls/neondoll/DollLink/Events"
+	"github.com/Neon-Dolls/neondoll/DollState"
 	"github.com/Neon-Dolls/neondoll/pkg/logger"
 )
 
 // Service handles incoming Doll Link interactions by loading the addressed
-// Doll from persistence and constructing a deterministic response.
+// Doll from persistence and using inference to generate a response.
 //
-// This is the minimal bridge between Doll Link and Core:
-//   Doll Link ↔ Interaction ↔ Persistence
+//   Doll Link ↔ Interaction ↔ Persistence + Inference
 type Service struct {
-	store persistence.Store
-	log   *logger.Logger
+	store    persistence.Store
+	provider inference.Provider
+	log      *logger.Logger
 }
 
-// New creates an Interaction service with the given persistence store.
-func New(store persistence.Store, log *logger.Logger) *Service {
-	return &Service{store: store, log: log}
+// New creates an Interaction service with the given persistence store and
+// inference provider.
+func New(store persistence.Store, provider inference.Provider, log *logger.Logger) *Service {
+	return &Service{
+		store:    store,
+		provider: provider,
+		log:      log,
+	}
 }
 
 // HandleEvent processes an incoming event and returns a response.
 //
-// For a message event with a valid DollID, it loads the Doll from persistence
-// and returns a deterministic response derived from the loaded DollState.
+// For a message event with a valid DollID, it loads the Doll from persistence,
+// builds a minimal prompt from the loaded state, and calls the inference
+// provider to generate a response.
 //
 // Unknown DollIDs return a clean error event. Nil state or missing ID return
-// an error event.
+// an error event. Inference failures produce a system error response.
 func (s *Service) HandleEvent(ctx context.Context, event *events.Event) (*events.Event, error) {
 	if event == nil {
 		return nil, fmt.Errorf("nil event")
@@ -51,21 +60,77 @@ func (s *Service) HandleEvent(ctx context.Context, event *events.Event) (*events
 		return nil, fmt.Errorf("load doll: %w", err)
 	}
 
-	// Build a deterministic response from the loaded DollState.
-	// This proves the interaction path resolved the correct persisted Doll.
-	name := state.Identity.CanonicalName
-	if name == "" {
-		name = "Spark"
+	// Build a minimal prompt from the loaded state.
+	prompt := buildPrompt(state, event)
+
+	inferenceReq := inference.Request{
+		Model: event.DollID,
+		Messages: []inference.Message{
+			{Role: "user", Content: prompt},
+		},
+		Temperature: 0.7,
 	}
 
-	response := events.NewResponse(event.ID, event.DollID, fmt.Sprintf("Hello. I am %s.", name))
-	s.log.Info("interaction served",
-		map[string]any{
+	result, err := s.provider.Infer(ctx, inferenceReq)
+	if err != nil {
+		s.log.Error("inference failed", map[string]any{
 			"doll_id": event.DollID,
-			"name":    name,
 			"event":   event.ID,
-		},
-	)
+			"error":   err.Error(),
+		})
+		errResp := events.NewErrorResponse(event.ID, event.DollID, "inference failed")
+		return &errResp, nil
+	}
 
+	s.log.Info("interaction served", map[string]any{
+		"doll_id":     event.DollID,
+		"provider":    result.ProviderID,
+		"tokens_used": result.TokensUsed,
+		"event":       event.ID,
+	})
+
+	response := events.NewResponse(event.ID, event.DollID, result.Content)
 	return &response, nil
+}
+
+// buildPrompt constructs a minimal prompt from the loaded DollState.
+//
+// The prompt includes the Doll's identity and soul where available, and the
+// user's message. This is intentionally minimal — no history, no memory
+// retrieval, no elaborate templates.
+func buildPrompt(state *dollstate.DollState, event *events.Event) string {
+	var parts []string
+
+	name := state.Identity.CanonicalName
+	if name != "" {
+		parts = append(parts, "Your name is "+name+".")
+	}
+	if soul := state.Soul.Content; soul != "" {
+		parts = append(parts, "Your nature: "+soul)
+	}
+	if owner := state.Owner.Name; owner != "" {
+		parts = append(parts, "Your owner is "+owner+".")
+	}
+
+	msgText := extractMessageText(event.Payload)
+	if msgText != "" {
+		parts = append(parts, msgText)
+	}
+
+	if len(parts) == 0 {
+		return "Hello."
+	}
+	return strings.Join(parts, "\n")
+}
+
+func extractMessageText(payload any) string {
+	switch p := payload.(type) {
+	case events.MessagePayload:
+		return p.Text
+	case map[string]any:
+		if t, ok := p["text"].(string); ok {
+			return t
+		}
+	}
+	return ""
 }

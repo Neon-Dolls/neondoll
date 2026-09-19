@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/Neon-Dolls/neondoll/Core/Config"
+	"github.com/Neon-Dolls/neondoll/Core/Inference"
 	"github.com/Neon-Dolls/neondoll/Core/Interaction"
 	"github.com/Neon-Dolls/neondoll/Core/Persistence"
 	"github.com/Neon-Dolls/neondoll/DollLink/WebSocket"
@@ -56,8 +57,17 @@ func main() {
 	defer store.Close()
 	log.Info("persistence opened", map[string]any{"path": dbPath})
 
+	// Create the inference provider.
+	inferenceProvider := inference.NewOpenAIProvider(
+		inference.WithBaseURL(cfg.Inference.BaseURL),
+	)
+	log.Info("inference provider created", map[string]any{
+		"provider": cfg.Inference.Provider,
+		"base_url": cfg.Inference.BaseURL,
+	})
+
 	// Create the Interaction service (Doll Link ↔ Persistence bridge).
-	interactionSvc := interaction.New(store, log)
+	interactionSvc := interaction.New(store, inferenceProvider, log)
 
 	// Create WebSocket transport.
 	wsCfg := ws.Config{Listen: listenAddr}

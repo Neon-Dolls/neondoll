@@ -9,11 +9,12 @@ import (
 
 // Config holds the Doll's runtime configuration.
 type Config struct {
-	Core    CoreConfig    `json:"core"`
-	Console ConsoleConfig `json:"console"`
-	Paths   PathConfig    `json:"paths"`
-	Link    LinkConfig    `json:"link"`
-	HTTP    HTTPConfig    `json:"http"`
+	Core      CoreConfig      `json:"core"`
+	Console   ConsoleConfig   `json:"console"`
+	Inference InferenceConfig `json:"inference"`
+	Paths     PathConfig      `json:"paths"`
+	Link      LinkConfig      `json:"link"`
+	HTTP      HTTPConfig      `json:"http"`
 }
 
 // CoreConfig for runtime settings.
@@ -33,6 +34,12 @@ type PathConfig struct {
 	StateDir   string `json:"state_dir"`
 	SecretsDir string `json:"secrets_dir"`
 	DataDir    string `json:"data_dir"`
+}
+
+// InferenceConfig for the inference provider.
+type InferenceConfig struct {
+	Provider string `json:"provider"`
+	BaseURL  string `json:"base_url"`
 }
 
 // LinkConfig for transport connectivity.
@@ -63,6 +70,10 @@ func Defaults() Config {
 		Console: ConsoleConfig{
 			Enabled: true,
 			Prompt:  "> ",
+		},
+		Inference: InferenceConfig{
+			Provider: "openai",
+			BaseURL:  "http://localhost:8080",
 		},
 		Paths: PathConfig{
 			StateDir:   "data/state",
