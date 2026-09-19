@@ -4,17 +4,19 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"time"
 
-	"github.com/Neon-Dolls/neondoll/Core/Logger"
+	"github.com/Neon-Dolls/neondoll/pkg/logger"
 )
 
 // Server is the REST API server.
 type Server struct {
-	httpServer *http.Server
-	log        *logger.Logger
-	mux        *http.ServeMux
+	httpServer   *http.Server
+	log          *logger.Logger
+	mux          *http.ServeMux
+	listenerAddr string
 }
 
 // Config for the API server.
@@ -46,8 +48,18 @@ func New(cfg Config, log *logger.Logger) *Server {
 
 // Start begins listening. Returns nil; call Shutdown to stop.
 func (s *Server) Start() error {
-	s.log.Info("api server starting", map[string]any{"addr": s.httpServer.Addr})
-	return s.httpServer.ListenAndServe()
+	listener, err := net.Listen("tcp", s.httpServer.Addr)
+	if err != nil {
+		return err
+	}
+	s.listenerAddr = listener.Addr().String()
+	s.log.Info("api server starting", map[string]any{"addr": s.listenerAddr})
+	return s.httpServer.Serve(listener)
+}
+
+// Addr returns the actual bound address (available after Start).
+func (s *Server) Addr() string {
+	return s.listenerAddr
 }
 
 // Shutdown gracefully stops the server.
@@ -79,7 +91,7 @@ func (s *Server) handleVersion(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"version": "0.1.0-draft",
+		"version": 1,
 		"build":   "core1",
 	})
 }

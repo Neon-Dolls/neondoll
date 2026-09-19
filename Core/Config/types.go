@@ -35,24 +35,15 @@ type PathConfig struct {
 	DataDir    string `json:"data_dir"`
 }
 
-// LinkConfig for platform connectivity.
+// LinkConfig for transport connectivity.
 type LinkConfig struct {
 	WebSocket WebSocketConfig `json:"websocket"`
-	Discord   PlatformConfig  `json:"discord,omitempty"`
-	Telegram  PlatformConfig  `json:"telegram,omitempty"`
 }
 
 // WebSocketConfig for the WS server.
 type WebSocketConfig struct {
 	Enabled   bool   `json:"enabled"`
 	Listen    string `json:"listen"`
-}
-
-// PlatformConfig for platform-specific settings.
-type PlatformConfig struct {
-	Enabled       bool   `json:"enabled"`
-	Token         string `json:"token,omitempty"`
-	ApplicationID string `json:"application_id,omitempty"`
 }
 
 // HTTPConfig for the API server.

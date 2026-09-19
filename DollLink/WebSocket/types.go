@@ -6,18 +6,24 @@ import (
 	"net/http"
 	"sync"
 	"time"
-
-	"github.com/Neon-Dolls/neondoll/Core/Logger"
 )
+
+// Logger is the minimal logging interface used by the WebSocket transport.
+// DollLink defines its own to avoid importing Core's logger.
+type Logger interface {
+	Info(msg string, fields ...map[string]any)
+	Warn(msg string, fields ...map[string]any)
+	Error(msg string, fields ...map[string]any)
+}
 
 // Server is a minimal WebSocket transport stub.
 type Server struct {
-	mu        sync.Mutex
-	conns     map[string]*conn
-	log       *logger.Logger
-	listen    string
-	mux       *http.ServeMux
-	httpSrv   *http.Server
+	mu      sync.Mutex
+	conns   map[string]*conn
+	log     Logger
+	listen  string
+	mux     *http.ServeMux
+	httpSrv *http.Server
 }
 
 type conn struct {
@@ -31,7 +37,7 @@ type Config struct {
 }
 
 // New creates a WS Server stub.
-func New(cfg Config, log *logger.Logger) *Server {
+func New(cfg Config, log Logger) *Server {
 	mux := http.NewServeMux()
 	s := &Server{
 		conns:  make(map[string]*conn),
@@ -61,7 +67,7 @@ func (s *Server) Start(ctx context.Context) error {
 
 // Shutdown stops the stub server.
 func (s *Server) Shutdown(ctx context.Context) error {
-	s.log.Info("ws stub shutting down")
+	s.log.Info("ws stub shutting down", map[string]any{})
 	return s.httpSrv.Shutdown(ctx)
 }
 

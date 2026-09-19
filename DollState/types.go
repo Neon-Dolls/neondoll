@@ -89,7 +89,11 @@ type Skills struct {
 	Items []SkillItem `json:"items,omitempty"`
 }
 
-// SkillItem represents a single skill/capability.
+// SkillItem is a reference to an installed Agent Skill.
+// The actual canonical Skill remains the Agent Skills directory rooted at SKILL.md.
+// Path is a portable relative path within the Skills directory, not an absolute
+// host filesystem path. DollCard export preserves the entire referenced directory;
+// import may install it at a different physical location.
 type SkillItem struct {
 	ID   string `json:"id"`
 	Name string `json:"name"`

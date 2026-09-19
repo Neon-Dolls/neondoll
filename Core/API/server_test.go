@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Neon-Dolls/neondoll/Core/Logger"
+	"github.com/Neon-Dolls/neondoll/pkg/logger"
 )
 
 func TestHealthEndpoint(t *testing.T) {
@@ -45,8 +45,8 @@ func TestVersionEndpoint(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if body["version"] != "0.1.0-draft" {
-		t.Errorf("expected version '0.1.0-draft', got %v", body["version"])
+	if body["version"] != float64(1) {
+		t.Errorf("expected version 1, got %v", body["version"])
 	}
 }
 

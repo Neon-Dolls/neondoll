@@ -6,12 +6,25 @@ import (
 	"net/http/httptest"
 	"testing"
 	"time"
-
-	"github.com/Neon-Dolls/neondoll/Core/Logger"
 )
 
+// testLogger implements ws.Logger for tests.
+type testLogger struct {
+	t *testing.T
+}
+
+func (l *testLogger) Info(msg string, fields ...map[string]any) {
+	l.t.Logf("INFO: %s %v", msg, fields)
+}
+func (l *testLogger) Warn(msg string, fields ...map[string]any) {
+	l.t.Logf("WARN: %s %v", msg, fields)
+}
+func (l *testLogger) Error(msg string, fields ...map[string]any) {
+	l.t.Logf("ERROR: %s %v", msg, fields)
+}
+
 func TestNewWS(t *testing.T) {
-	log := logger.New(logger.WarnLevel, nil)
+	log := &testLogger{t}
 	srv := New(Config{Listen: ":0"}, log)
 	if srv == nil {
 		t.Fatal("New returned nil")
@@ -19,7 +32,7 @@ func TestNewWS(t *testing.T) {
 }
 
 func TestWSEndpoint(t *testing.T) {
-	log := logger.New(logger.WarnLevel, nil)
+	log := &testLogger{t}
 	srv := New(Config{Listen: ":0"}, log)
 
 	req := httptest.NewRequest(http.MethodGet, "/ws", nil)
@@ -35,7 +48,7 @@ func TestWSEndpoint(t *testing.T) {
 }
 
 func TestWSStatus(t *testing.T) {
-	log := logger.New(logger.WarnLevel, nil)
+	log := &testLogger{t}
 	srv := New(Config{Listen: ":0"}, log)
 
 	req := httptest.NewRequest(http.MethodGet, "/ws/status", nil)
@@ -51,7 +64,7 @@ func TestWSStatus(t *testing.T) {
 }
 
 func TestConnCount(t *testing.T) {
-	log := logger.New(logger.WarnLevel, nil)
+	log := &testLogger{t}
 	srv := New(Config{Listen: ":0"}, log)
 	if count := srv.ConnCount(); count != 0 {
 		t.Errorf("expected 0 connections, got %d", count)
@@ -59,7 +72,7 @@ func TestConnCount(t *testing.T) {
 }
 
 func TestStartShutdown(t *testing.T) {
-	log := logger.New(logger.WarnLevel, nil)
+	log := &testLogger{t}
 	srv := New(Config{Listen: "127.0.0.1:0"}, log)
 
 	go func() {

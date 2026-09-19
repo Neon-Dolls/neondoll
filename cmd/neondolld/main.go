@@ -9,14 +9,13 @@ import (
 
 	"github.com/Neon-Dolls/neondoll/Core/API"
 	"github.com/Neon-Dolls/neondoll/Core/Config"
-	"github.com/Neon-Dolls/neondoll/Core/Logger"
+	"github.com/Neon-Dolls/neondoll/pkg/logger"
 )
 
 func main() {
 	log := logger.New(logger.InfoLevel, os.Stdout)
 	log.Info("NeonDoll starting", map[string]any{
-		"version": "0.1.0-draft",
-		"core":    "core1",
+		"core": 1,
 	})
 
 	// Load config

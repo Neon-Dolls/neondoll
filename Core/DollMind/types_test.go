@@ -5,7 +5,7 @@ import (
 	"testing"
 
 	"github.com/Neon-Dolls/neondoll/Core/Inference"
-	"github.com/Neon-Dolls/neondoll/Core/Logger"
+	"github.com/Neon-Dolls/neondoll/pkg/logger"
 	"github.com/Neon-Dolls/neondoll/DollState"
 )
 

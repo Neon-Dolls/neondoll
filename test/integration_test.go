@@ -14,9 +14,9 @@ import (
 	"github.com/Neon-Dolls/neondoll/Core/Config"
 	"github.com/Neon-Dolls/neondoll/Core/DollMind"
 	"github.com/Neon-Dolls/neondoll/Core/Inference"
-	"github.com/Neon-Dolls/neondoll/Core/Logger"
 	"github.com/Neon-Dolls/neondoll/DollLink/WebSocket"
 	"github.com/Neon-Dolls/neondoll/DollState"
+	"github.com/Neon-Dolls/neondoll/pkg/logger"
 )
 
 // mockMindAPI implements dollmind.MindAPI for integration tests.
@@ -75,20 +75,40 @@ func TestIntegrationAPIServer(t *testing.T) {
 	log := logger.New(logger.WarnLevel, nil)
 	srv := api.New(api.Config{Listen: "127.0.0.1:0"}, log)
 
+	// Start the server in the background.
+	startErr := make(chan error, 1)
 	go func() {
-		srv.Start()
+		startErr <- srv.Start()
 	}()
 
-	time.Sleep(100 * time.Millisecond)
-
-	resp, err := http.Get("http://127.0.0.1:8080/health")
-	if err != nil {
-		t.Logf("Health check attempt: %v (server may not be on 8080)", err)
-	} else {
-		defer resp.Body.Close()
-		if resp.StatusCode != http.StatusOK {
-			t.Errorf("expected 200, got %d", resp.StatusCode)
+	// Wait for the server to actually bind by polling Addr().
+	addr := ""
+	for range 50 {
+		if a := srv.Addr(); a != "" {
+			addr = a
+			break
 		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if addr == "" {
+		t.Fatal("server did not start within 500ms")
+	}
+
+	// Fail the test if Start() returned early.
+	select {
+	case err := <-startErr:
+		t.Fatalf("Start returned unexpectedly: %v", err)
+	default:
+	}
+
+	// Connection to the actual bound address must succeed.
+	resp, err := http.Get("http://" + addr + "/health")
+	if err != nil {
+		t.Fatalf("Health check failed: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("expected 200, got %d", resp.StatusCode)
 	}
 
 	if err := srv.Shutdown(context.Background()); err != nil {
