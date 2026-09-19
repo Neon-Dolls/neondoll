@@ -66,7 +66,8 @@ func NewStore(dbPath string) (Store, error) {
 	return &store{db: db}, nil
 }
 
-// createSchema ensures the dolls and memories tables exist.
+// createSchema ensures the dolls and memories tables exist and migrates
+// columns for Drive and Goal JSON persistence.
 func createSchema(db *sql.DB) error {
 	schema := `
 	CREATE TABLE IF NOT EXISTS dolls (
@@ -89,8 +90,21 @@ func createSchema(db *sql.DB) error {
 		PRIMARY KEY (doll_id, seq),
 		FOREIGN KEY (doll_id) REFERENCES dolls(doll_id)
 	);`
-	_, err := db.Exec(schema)
-	return err
+	if _, err := db.Exec(schema); err != nil {
+		return err
+	}
+
+	// Add JSON columns for Drives and Goals if they don't already exist.
+	// These columns hold JSON arrays serialized via encoding/json.
+	for _, alter := range []string{
+		"ALTER TABLE dolls ADD COLUMN drives_json TEXT NOT NULL DEFAULT '[]'",
+		"ALTER TABLE dolls ADD COLUMN goals_json TEXT NOT NULL DEFAULT '[]'",
+	} {
+		if _, err := db.Exec(alter); err != nil {
+			// Column may already exist from a prior migration — ignore.
+		}
+	}
+	return nil
 }
 
 // SaveDoll inserts or replaces a Doll's state, keyed by its stable DollID.
@@ -115,6 +129,28 @@ func (s *store) SaveDoll(ctx context.Context, state *dollstate.DollState) error 
 		return fmt.Errorf("%w: owner: %v", ErrCannotSave, err)
 	}
 
+	// Marshal Drives and Goals for JSON columns.
+	// We track whether each was explicitly provided (non-nil Items) so we can
+	// preserve existing column values when the caller means "don't touch".
+	var (
+		drivesJSON, goalsJSON []byte
+		hasDrives, hasGoals   bool
+	)
+	if state.Drives.Items != nil {
+		drivesJSON, err = json.Marshal(state.Drives)
+		if err != nil {
+			return fmt.Errorf("%w: drives: %v", ErrCannotSave, err)
+		}
+		hasDrives = true
+	}
+	if state.Goals.Items != nil {
+		goalsJSON, err = json.Marshal(state.Goals)
+		if err != nil {
+			return fmt.Errorf("%w: goals: %v", ErrCannotSave, err)
+		}
+		hasGoals = true
+	}
+
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("%w: begin tx: %v", ErrCannotSave, err)
@@ -122,17 +158,43 @@ func (s *store) SaveDoll(ctx context.Context, state *dollstate.DollState) error 
 	defer tx.Rollback() // no-op if Commit succeeds
 
 	now := time.Now().UTC().Format(time.RFC3339)
+
+	// Determine the final JSON values for drives_json and goals_json columns.
+	// If the caller provided non-nil Items we use the marshaled value;
+	// otherwise we read the existing column to preserve it (nil-preserve semantic).
+	var drivesStr, goalsStr string
+	if err := tx.QueryRowContext(ctx,
+		`SELECT drives_json, goals_json FROM dolls WHERE doll_id = ?`,
+		state.Identity.DollID,
+	).Scan(&drivesStr, &goalsStr); err != nil {
+		if err != sql.ErrNoRows {
+			return fmt.Errorf("%w: read existing drives/goals: %v", ErrCannotSave, err)
+		}
+		// New doll — use default empty JSON array.
+		drivesStr = "[]"
+		goalsStr = "[]"
+	}
+	if hasDrives {
+		drivesStr = string(drivesJSON)
+	}
+	if hasGoals {
+		goalsStr = string(goalsJSON)
+	}
+
 	_, err = tx.ExecContext(ctx,
-		`INSERT INTO dolls (doll_id, version, identity_json, soul_json, owner_json, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?)
+		`INSERT INTO dolls (doll_id, version, identity_json, soul_json, owner_json, drives_json, goals_json, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(doll_id) DO UPDATE SET
 			version=excluded.version,
 			identity_json=excluded.identity_json,
 			soul_json=excluded.soul_json,
 			owner_json=excluded.owner_json,
+			drives_json=excluded.drives_json,
+			goals_json=excluded.goals_json,
 			updated_at=excluded.updated_at`,
 		state.Identity.DollID, state.Version,
 		string(identityJSON), string(soulJSON), string(ownerJSON),
+		drivesStr, goalsStr,
 		now, now,
 	)
 	if err != nil {
@@ -168,13 +230,14 @@ func (s *store) LoadDoll(ctx context.Context, dollID string) (*dollstate.DollSta
 	}
 
 	var (
-		version       int
+		version                          int
 		identityJSON, soulJSON, ownerJSON string
+		drivesJSON, goalsJSON            string
 	)
 	err := s.db.QueryRowContext(ctx,
-		`SELECT version, identity_json, soul_json, owner_json
+		`SELECT version, identity_json, soul_json, owner_json, drives_json, goals_json
 		 FROM dolls WHERE doll_id = ?`, dollID,
-	).Scan(&version, &identityJSON, &soulJSON, &ownerJSON)
+	).Scan(&version, &identityJSON, &soulJSON, &ownerJSON, &drivesJSON, &goalsJSON)
 	if err == sql.ErrNoRows {
 		return nil, ErrDollNotFound
 	}
@@ -193,6 +256,26 @@ func (s *store) LoadDoll(ctx context.Context, dollID string) (*dollstate.DollSta
 	}
 	if err := json.Unmarshal([]byte(ownerJSON), &state.Owner); err != nil {
 		return nil, fmt.Errorf("%w: owner: %v", ErrCannotDecode, err)
+	}
+
+	// Load Drives — normalize empty JSON array to nil for nil-preserve convention.
+	if drivesJSON != "[]" {
+		if err := json.Unmarshal([]byte(drivesJSON), &state.Drives); err != nil {
+			return nil, fmt.Errorf("%w: drives: %v", ErrCannotDecode, err)
+		}
+	}
+	if len(state.Drives.Items) == 0 {
+		state.Drives.Items = nil
+	}
+
+	// Load Goals — same nil normalization.
+	if goalsJSON != "[]" {
+		if err := json.Unmarshal([]byte(goalsJSON), &state.Goals); err != nil {
+			return nil, fmt.Errorf("%w: goals: %v", ErrCannotDecode, err)
+		}
+	}
+	if len(state.Goals.Items) == 0 {
+		state.Goals.Items = nil
 	}
 
 	// Load memories ordered by sequence.
