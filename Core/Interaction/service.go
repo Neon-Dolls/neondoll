@@ -4,6 +4,9 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
+
+	"github.com/google/uuid"
 
 	"github.com/Neon-Dolls/neondoll/Core/Inference"
 	"github.com/Neon-Dolls/neondoll/Core/Persistence"
@@ -82,11 +85,46 @@ func (s *Service) HandleEvent(ctx context.Context, event *events.Event) (*events
 		return &errResp, nil
 	}
 
-	s.log.Info("interaction served", map[string]any{
-		"doll_id":     event.DollID,
-		"provider":    result.ProviderID,
-		"tokens_used": result.TokensUsed,
-		"event":       event.ID,
+	// --- Persist interaction Memory ---
+	interactionID := uuid.New().String()
+	nextSeq := nextSequence(state.Memories.Items)
+
+	humanMemory := dollstate.MemoryItem{
+		ID:            uuid.New().String(),
+		InteractionID: interactionID,
+		Kind:          dollstate.KindHumanMessage,
+		Content:       extractMessageText(event.Payload),
+		Sequence:      nextSeq,
+		Timestamp:     time.Now().UTC().Format(time.RFC3339),
+	}
+
+	dollMemory := dollstate.MemoryItem{
+		ID:            uuid.New().String(),
+		InteractionID: interactionID,
+		Kind:          dollstate.KindDollResponse,
+		Content:       result.Content,
+		Sequence:      nextSeq + 1,
+		Timestamp:     time.Now().UTC().Format(time.RFC3339),
+	}
+
+	state.Memories.Items = append(state.Memories.Items, humanMemory, dollMemory)
+
+	if err := s.store.SaveDoll(ctx, state); err != nil {
+		s.log.Error("failed to persist interaction memory", map[string]any{
+			"doll_id": event.DollID,
+			"event":   event.ID,
+			"error":   err.Error(),
+		})
+		errResp := events.NewErrorResponse(event.ID, event.DollID, "failed to persist interaction")
+		return &errResp, nil
+	}
+
+	s.log.Info("interaction served and persisted", map[string]any{
+		"doll_id":        event.DollID,
+		"provider":       result.ProviderID,
+		"tokens_used":    result.TokensUsed,
+		"event":          event.ID,
+		"interaction_id": interactionID,
 	})
 
 	response := events.NewResponse(event.ID, event.DollID, result.Content)
@@ -133,4 +171,16 @@ func extractMessageText(payload any) string {
 		}
 	}
 	return ""
+}
+
+// nextSequence returns the next monotonically increasing Sequence value
+// for a new MemoryItem given the existing items.
+func nextSequence(items []dollstate.MemoryItem) int {
+	max := -1
+	for _, item := range items {
+		if item.Sequence > max {
+			max = item.Sequence
+		}
+	}
+	return max + 1
 }
