@@ -105,6 +105,12 @@ type DriveItem struct {
 	Description string `json:"description,omitempty"`
 }
 
+// Goal state constants.
+const (
+	GoalStateActive    = "active"
+	GoalStateCompleted = "completed"
+)
+
 // Goals — the Doll's tracked desired outcomes.
 type Goals struct {
 	Items []GoalItem `json:"items,omitempty"`
@@ -113,14 +119,16 @@ type Goals struct {
 // GoalItem represents a single durable desired outcome.
 //
 // Name provides the core content. Description may carry a richer explanation.
-// Completed marks lifecycle state: false = actively pursued, true = achieved.
+// State marks lifecycle explicitly: "active" means being pursued, "completed"
+// means achieved. State is always serialized — active is never inferred from
+// a missing boolean.
 // DriveID optionally references the semantic identifier of the Drive that
 // motivates this Goal. Both IDs are portable semantic identifiers.
 type GoalItem struct {
 	ID          string `json:"id"`
 	Name        string `json:"name"`
 	Description string `json:"description,omitempty"`
-	Completed   bool   `json:"completed,omitempty"`
+	State       string `json:"state"`
 	DriveID     string `json:"drive_id,omitempty"`
 }
 

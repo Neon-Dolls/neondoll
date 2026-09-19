@@ -33,7 +33,7 @@ func TestGoalAllCanonicalFields(t *testing.T) {
 		ID:          sparkGoalID,
 		Name:        "Prove Memory Survives",
 		Description: "Verify that Spark's memories persist after store close and reopen.",
-		Completed:   false,
+		State:       GoalStateActive,
 		DriveID:     sparkDriveID,
 	}
 	if g.ID != sparkGoalID {
@@ -45,8 +45,8 @@ func TestGoalAllCanonicalFields(t *testing.T) {
 	if g.Description == "" {
 		t.Error("expected non-empty Description")
 	}
-	if g.Completed {
-		t.Error("expected Completed to be false")
+	if g.State != GoalStateActive {
+		t.Errorf("expected State %q, got %q", GoalStateActive, g.State)
 	}
 	if g.DriveID != sparkDriveID {
 		t.Errorf("expected DriveID %q, got %q", sparkDriveID, g.DriveID)
@@ -86,7 +86,7 @@ func TestGoalJSONRoundTrip(t *testing.T) {
 		ID:          sparkGoalID,
 		Name:        "Prove Memory Survives",
 		Description: "Memories must survive store close and reopen.",
-		Completed:   false,
+		State:       GoalStateActive,
 		DriveID:     sparkDriveID,
 	}
 
@@ -109,11 +109,69 @@ func TestGoalJSONRoundTrip(t *testing.T) {
 	if restored.Description != original.Description {
 		t.Errorf("Description lost in round-trip: expected %q, got %q", original.Description, restored.Description)
 	}
-	if restored.Completed != original.Completed {
-		t.Errorf("Completed changed in round-trip: expected %v, got %v", original.Completed, restored.Completed)
+	if restored.State != original.State {
+		t.Errorf("State changed in round-trip: expected %q, got %q", original.State, restored.State)
 	}
 	if restored.DriveID != original.DriveID {
 		t.Errorf("DriveID lost in round-trip: expected %q, got %q", original.DriveID, restored.DriveID)
+	}
+}
+
+func TestGoalActiveExplicitlySerialized(t *testing.T) {
+	// Active must appear explicitly in JSON, not be inferred from a missing boolean.
+	g := GoalItem{
+		ID:    sparkGoalID,
+		Name:  "Prove Memory Survives",
+		State: GoalStateActive,
+	}
+
+	b, err := json.Marshal(g)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+
+	var raw map[string]any
+	if err := json.Unmarshal(b, &raw); err != nil {
+		t.Fatalf("json.Unmarshal to map: %v", err)
+	}
+
+	if raw["state"] != "active" {
+		t.Errorf("expected state=\"active\" in JSON, got %v", raw["state"])
+	}
+
+	// Prove there is no 'completed' boolean field — it's State now.
+	if _, ok := raw["completed"]; ok {
+		t.Error("unexpected 'completed' field in Goal JSON — state replaces completed")
+	}
+}
+
+func TestGoalCompletedExplicitlySerialized(t *testing.T) {
+	g := GoalItem{
+		ID:    "goal-completed-test",
+		Name:  "Completed Goal",
+		State: GoalStateCompleted,
+	}
+
+	b, err := json.Marshal(g)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+
+	var raw map[string]any
+	if err := json.Unmarshal(b, &raw); err != nil {
+		t.Fatalf("json.Unmarshal to map: %v", err)
+	}
+
+	if raw["state"] != "completed" {
+		t.Errorf("expected state=\"completed\" in JSON, got %v", raw["state"])
+	}
+
+	var restored GoalItem
+	if err := json.Unmarshal(b, &restored); err != nil {
+		t.Fatalf("json.Unmarshal: %v", err)
+	}
+	if restored.State != GoalStateCompleted {
+		t.Errorf("expected State %q, got %q", GoalStateCompleted, restored.State)
 	}
 }
 
@@ -125,6 +183,7 @@ func TestGoalToDriveRelationshipSurvivesJSON(t *testing.T) {
 	goal := GoalItem{
 		ID:      sparkGoalID,
 		Name:    "Prove Memory Survives",
+		State:   GoalStateActive,
 		DriveID: sparkDriveID,
 	}
 
@@ -160,7 +219,7 @@ func TestSemanticIDsUnchangedThroughSerialization(t *testing.T) {
 	goalID := "goal-prove-persistence-v2"
 
 	drive := DriveItem{ID: driveID, Name: "Test"}
-	goal := GoalItem{ID: goalID, Name: "Test", DriveID: driveID}
+	goal := GoalItem{ID: goalID, Name: "Test", State: GoalStateActive, DriveID: driveID}
 
 	db, _ := json.Marshal(drive)
 	gb, _ := json.Marshal(goal)
@@ -233,7 +292,7 @@ func TestDrivesAndGoalsInDollStateRoundTrip(t *testing.T) {
 				ID:          sparkGoalID,
 				Name:        "Prove Memory Survives",
 				Description: "Memories survive store close and reopen.",
-				Completed:   false,
+				State:       GoalStateActive,
 				DriveID:     sparkDriveID,
 			},
 		},
@@ -271,6 +330,9 @@ func TestDrivesAndGoalsInDollStateRoundTrip(t *testing.T) {
 	if restored.Goals.Items[0].Name != "Prove Memory Survives" {
 		t.Errorf("Goal Name: expected %q, got %q", "Prove Memory Survives", restored.Goals.Items[0].Name)
 	}
+	if restored.Goals.Items[0].State != GoalStateActive {
+		t.Errorf("Goal State: expected %q, got %q", GoalStateActive, restored.Goals.Items[0].State)
+	}
 	if restored.Goals.Items[0].DriveID != sparkDriveID {
 		t.Errorf("Goal DriveID: expected %q, got %q", sparkDriveID, restored.Goals.Items[0].DriveID)
 	}
@@ -281,65 +343,12 @@ func TestDrivesAndGoalsInDollStateRoundTrip(t *testing.T) {
 	}
 }
 
-func TestCompletedGoalRoundTrip(t *testing.T) {
+func TestGoalMinimalFields(t *testing.T) {
+	// A Goal with only ID, Name, and State should serialize and deserialize cleanly.
 	g := GoalItem{
-		ID:        "goal-completed-test",
-		Name:      "Completed",
-		Completed: true,
-	}
-
-	b, err := json.Marshal(g)
-	if err != nil {
-		t.Fatalf("json.Marshal: %v", err)
-	}
-
-	var raw map[string]any
-	if err := json.Unmarshal(b, &raw); err != nil {
-		t.Fatalf("json.Unmarshal to map: %v", err)
-	}
-
-	if raw["completed"] != true {
-		t.Errorf("expected completed=true in JSON, got %v", raw["completed"])
-	}
-
-	var restored GoalItem
-	if err := json.Unmarshal(b, &restored); err != nil {
-		t.Fatalf("json.Unmarshal: %v", err)
-	}
-	if !restored.Completed {
-		t.Error("Completed not preserved: expected true")
-	}
-}
-
-func TestDriveNoActiveOrPriorityFields(t *testing.T) {
-	// Prove the provisional fields (Active, Priority) are NOT present.
-	d := DriveItem{
-		ID:   "drive-test",
-		Name: "Test",
-	}
-	b, err := json.Marshal(d)
-	if err != nil {
-		t.Fatalf("json.Marshal: %v", err)
-	}
-
-	var raw map[string]any
-	if err := json.Unmarshal(b, &raw); err != nil {
-		t.Fatalf("json.Unmarshal to map: %v", err)
-	}
-
-	if _, ok := raw["active"]; ok {
-		t.Error("unexpected field 'active' found in DriveItem JSON — Active was deliberately removed")
-	}
-	if _, ok := raw["priority"]; ok {
-		t.Error("unexpected field 'priority' found in DriveItem JSON — Priority was deliberately removed")
-	}
-}
-
-func TestGoalDescriptionOptional(t *testing.T) {
-	// A Goal without Description should still serialize and deserialize cleanly.
-	g := GoalItem{
-		ID:   "goal-minimal",
-		Name: "Minimal goal",
+		ID:    "goal-minimal",
+		Name:  "Minimal goal",
+		State: GoalStateActive,
 	}
 
 	b, err := json.Marshal(g)
@@ -358,11 +367,11 @@ func TestGoalDescriptionOptional(t *testing.T) {
 	if restored.Name != g.Name {
 		t.Errorf("Name: expected %q, got %q", g.Name, restored.Name)
 	}
+	if restored.State != GoalStateActive {
+		t.Errorf("State: expected %q, got %q", GoalStateActive, restored.State)
+	}
 	if restored.Description != "" {
 		t.Errorf("expected empty Description, got %q", restored.Description)
-	}
-	if restored.Completed {
-		t.Error("expected Completed to default to false")
 	}
 	if restored.DriveID != "" {
 		t.Errorf("expected empty DriveID, got %q", restored.DriveID)
