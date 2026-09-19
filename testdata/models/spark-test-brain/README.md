@@ -2,29 +2,31 @@
 
 This directory is reserved for NeonDoll's committed real-inference E2E fixture.
 
-## Canonical source
-
-- Upstream model: `sdobson/tinystories-llama-15m`
-- Revision: `6cc2bab8c4a55cce6f7532317af84a94bb340d5e`
-- Architecture: LlamaForCausalLM, 6 layers, 288 hidden dim, 6 heads
-- Parameters: ~15.2M
-- Upstream license: MIT
-- Purpose: test fixture only; not a supported production inference model
-- Upstream: https://huggingface.co/sdobson/tinystories-llama-15m
-
 ## Required committed files
 
 ```text
 spark-test-brain/
 ├── model.gguf
 ├── LICENSE
-└── README.md
+├── README.md
+└── llama.cpp-conversion.patch
 ```
 
 `model.gguf` MUST be committed to normal Git. Do not use Git LFS and do not
 download the model during tests or CI.
 
-`LICENSE` is the exact MIT license from the pinned upstream model revision.
+## Canonical source
+
+-   **Upstream model:** `sdobson/tinystories-llama-15m`
+-   **Pinned revision (weights):** `6cc2bab8c4a55cce6f7532317af84a94bb340d5e`
+-   **Architecture:** LlamaForCausalLM, 6 layers, 288 hidden dim, 6 heads
+-   **Parameters:** ~15.2M
+-   **License declared upstream:** MIT (declared in Hugging Face model-card
+    metadata on the pinned revision; no LICENSE file is present in that revision)
+-   **Committed LICENSE file:** standard MIT license text, matching the
+    upstream declaration, with copyright attributed to the model author
+-   **Purpose:** test fixture only; not a supported production inference model
+-   **Upstream:** https://huggingface.co/sdobson/tinystories-llama-15m
 
 ## Conversion
 
@@ -37,6 +39,27 @@ download the model during tests or CI.
 
 `5b59b83f4e2101ea173d4f853a0522d9971f48c6`
 
+### Conversion Patch
+
+The pinned llama.cpp revision does not handle tied word embeddings
+(`tie_word_embeddings: true`) for this model architecture, so the converter
+must be patched before running. A minimal patch is committed alongside the
+model as `llama.cpp-conversion.patch`.
+
+The safetensors snapshot of this model contains only `lm_head.weight`
+(output.weight). The llama.cpp model loader requires a separate
+`token_embd.weight` tensor when embeddings are shared between the input and
+output projections. The patch makes the converter emit `token_embd.weight`
+alongside `output.weight` when `tie_word_embeddings` is set.
+
+Apply before converting:
+
+```sh
+cd <llama.cpp checkout>
+git checkout 5b59b83f4e2101ea173d4f853a0522d9971f48c6
+git apply <path/to>/llama.cpp-conversion.patch
+```
+
 ### Conversion Commands
 
 ```sh
@@ -48,12 +71,6 @@ python3 convert_hf_to_gguf.py /tmp/hf-models/tinystories \
 llama-quantize /tmp/hf-models/tinystories/model-f16.gguf \
     /tmp/hf-models/tinystories/model-q4_km.gguf Q4_K_M
 ```
-
-Note: The GGUF converter was patched to emit `token_embd.weight` in addition
-to `output.weight` for tied-embedding models (tinystories-llama-15m has
-`tie_word_embeddings: true`, meaning the safetensors contain only
-`lm_head.weight` and the converter must create both `token_embd.weight`
-and `output.weight`).
 
 ## Smoke Test
 
@@ -71,8 +88,8 @@ good — only non-empty.
 | Property | Value |
 |----------|-------|
 | File | `model.gguf` |
-| Size | 21,041,328 bytes (21 MiB) |
-| SHA-256 | `9cda598c8eceae5385fd6cd51386daa1d9fd7f11564a37c811f1c62489` |
+| Size | 20,987,040 bytes (~20 MiB) |
+| SHA-256 | `9cda598c5ee0708eceae5385fd6cd51386daa1d9fd7f11564a37c811f1c62489` |
 | Quantization | Mixed Q4_K_M / Q5_0 / Q8_0 |
 | Model bits per weight | 6.64 BPW |
 

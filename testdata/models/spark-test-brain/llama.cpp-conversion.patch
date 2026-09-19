@@ -1,0 +1,19 @@
+diff --git a/conversion/llama.py b/conversion/llama.py
+index 41d8c23..5ea2efc 100644
+--- a/conversion/llama.py
++++ b/conversion/llama.py
+@@ -293,6 +293,14 @@ class LlamaModel(TextModel):
+             else:
+                 return
+ 
++        # Handle tied embeddings: when tie_word_embeddings is True, safetensors only
++        # contains lm_head.weight (output.weight). We must also emit token_embd.weight
++        # for llama.cpp's model loader.
++        is_tied = self.hparams.get("tie_word_embeddings", False)
++        if is_tied and name in ("lm_head.weight", "model.lm_head.weight"):
++            tok_name = self.format_tensor_name(gguf.MODEL_TENSOR.TOKEN_EMBD)
++            yield (tok_name, data_torch)
++
+         yield from super().modify_tensors(data_torch, name, bid)
+ 
+     def generate_extra_tensors(self) -> Iterable[tuple[str, Tensor]]:
