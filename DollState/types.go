@@ -51,11 +51,25 @@ type Memories struct {
 	Items []MemoryItem `json:"items,omitempty"`
 }
 
+// Kind constants for MemoryItem.
+const (
+	KindHumanMessage = "human_message"
+	KindDollResponse = "doll_response"
+)
+
 // MemoryItem is a single memory record.
+//
+// Kind describes the source or type of the experience (see Kind* constants).
+// Sequence provides deterministic ordering where multiple records belong
+// to one interaction — lower values sort before higher values.
+// Do not rely on SQLite row IDs, insertion order, or Timestamp alone
+// as the semantic ordering contract. Timestamp records wall-clock time
+// when the experience occurred; Sequence defines logical ordering.
 type MemoryItem struct {
 	ID        string `json:"id"`
+	Kind      string `json:"kind"`
 	Content   string `json:"content"`
-	Level     int    `json:"level"`
+	Sequence  int    `json:"sequence"`
 	Timestamp string `json:"timestamp,omitempty"`
 }
 
