@@ -15,11 +15,11 @@ import (
 
 // Common errors returned by Store operations.
 var (
-	ErrDollNotFound    = errors.New("persistence: doll not found")
-	ErrInvalidDollID   = errors.New("persistence: invalid doll ID")
-	ErrCannotOpen      = errors.New("persistence: cannot open database")
-	ErrCannotSave      = errors.New("persistence: cannot save doll")
-	ErrCannotDecode    = errors.New("persistence: cannot decode stored state")
+	ErrDollNotFound  = errors.New("persistence: doll not found")
+	ErrInvalidDollID = errors.New("persistence: invalid doll ID")
+	ErrCannotOpen    = errors.New("persistence: cannot open database")
+	ErrCannotSave    = errors.New("persistence: cannot save doll")
+	ErrCannotDecode  = errors.New("persistence: cannot decode stored state")
 )
 
 // Store is the public interface for Doll persistence.
@@ -66,6 +66,38 @@ func NewStore(dbPath string) (Store, error) {
 	return &store{db: db}, nil
 }
 
+// columnExists checks whether a column exists in a table by querying
+// PRAGMA table_info. Table names are interpolated via fmt.Sprintf because
+// SQLite PRAGMAs do not support parameterized placeholders.
+func columnExists(db *sql.DB, table, column string) (bool, error) {
+	query := fmt.Sprintf("PRAGMA table_info('%s')", table)
+	rows, err := db.Query(query)
+	if err != nil {
+		return false, fmt.Errorf("schema inspection: %s: %v", query, err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var (
+			cid        int
+			name, ctyp string
+			notnull    int
+			dflt       sql.NullString
+			pk         int
+		)
+		if err := rows.Scan(&cid, &name, &ctyp, &notnull, &dflt, &pk); err != nil {
+			return false, fmt.Errorf("scan %s: %v", query, err)
+		}
+		if name == column {
+			return true, nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return false, err
+	}
+	return false, nil
+}
+
 // createSchema ensures the dolls and memories tables exist and migrates
 // columns for Drive and Goal JSON persistence.
 func createSchema(db *sql.DB) error {
@@ -94,14 +126,26 @@ func createSchema(db *sql.DB) error {
 		return err
 	}
 
-	// Add JSON columns for Drives and Goals if they don't already exist.
-	// These columns hold JSON arrays serialized via encoding/json.
-	for _, alter := range []string{
-		"ALTER TABLE dolls ADD COLUMN drives_json TEXT NOT NULL DEFAULT '[]'",
-		"ALTER TABLE dolls ADD COLUMN goals_json TEXT NOT NULL DEFAULT '[]'",
-	} {
-		if _, err := db.Exec(alter); err != nil {
-			// Column may already exist from a prior migration — ignore.
+	// Migrate JSON columns for Drives and Goals (Phase 2).
+	// Use PRAGMA table_info to detect whether each column already exists
+	// so we only run ALTER TABLE ADD COLUMN for genuinely missing columns.
+	// Real ALTER failures on missing columns must bubble up.
+	cols := []struct {
+		name     string
+		alterSQL string
+	}{
+		{"drives_json", "ALTER TABLE dolls ADD COLUMN drives_json TEXT NOT NULL DEFAULT '[]'"},
+		{"goals_json", "ALTER TABLE dolls ADD COLUMN goals_json TEXT NOT NULL DEFAULT '[]'"},
+	}
+	for _, c := range cols {
+		exists, err := columnExists(db, "dolls", c.name)
+		if err != nil {
+			return fmt.Errorf("columnExists(%q): %v", c.name, err)
+		}
+		if !exists {
+			if _, err := db.Exec(c.alterSQL); err != nil {
+				return fmt.Errorf("migrate %s: %v", c.name, err)
+			}
 		}
 	}
 	return nil
@@ -230,9 +274,9 @@ func (s *store) LoadDoll(ctx context.Context, dollID string) (*dollstate.DollSta
 	}
 
 	var (
-		version                          int
+		version                           int
 		identityJSON, soulJSON, ownerJSON string
-		drivesJSON, goalsJSON            string
+		drivesJSON, goalsJSON             string
 	)
 	err := s.db.QueryRowContext(ctx,
 		`SELECT version, identity_json, soul_json, owner_json, drives_json, goals_json

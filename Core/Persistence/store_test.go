@@ -2,6 +2,7 @@ package persistence_test
 
 import (
 	"context"
+	"database/sql"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,6 +11,8 @@ import (
 	"github.com/Neon-Dolls/neondoll/Core/Persistence"
 	"github.com/Neon-Dolls/neondoll/DollCard"
 	"github.com/Neon-Dolls/neondoll/DollState"
+
+	_ "modernc.org/sqlite"
 )
 
 // tempDB creates a temporary SQLite database path and a cleanup function.
@@ -807,5 +810,160 @@ func TestMemoryRollbackOnFailure(t *testing.T) {
 	}
 	if reloaded.Memories.Items[1].ID != "orig-b" {
 		t.Errorf("memory 1 ID = %q, want %q", reloaded.Memories.Items[1].ID, "orig-b")
+	}
+}
+
+// TestPrePhase2Migration verifies that an existing database created without
+// the drives_json/goals_json columns is correctly upgraded by createSchema
+// and retains its existing Doll and Memory state.
+func TestPrePhase2Migration(t *testing.T) {
+	path, cleanup := tempDB(t)
+	defer cleanup()
+
+	// Open a raw connection and create the pre-Phase-2 schema (no drives_json/goals_json).
+	raw, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+
+	prePhase2 := `
+	CREATE TABLE IF NOT EXISTS dolls (
+		doll_id      TEXT PRIMARY KEY,
+		version      INTEGER NOT NULL,
+		identity_json TEXT NOT NULL,
+		soul_json     TEXT NOT NULL,
+		owner_json    TEXT NOT NULL,
+		created_at   TEXT NOT NULL DEFAULT (datetime('now')),
+		updated_at   TEXT NOT NULL DEFAULT (datetime('now'))
+	);
+	CREATE TABLE IF NOT EXISTS memories (
+		doll_id        TEXT NOT NULL,
+		seq            INTEGER NOT NULL,
+		mem_id         TEXT NOT NULL,
+		interaction_id TEXT NOT NULL DEFAULT '',
+		kind           TEXT NOT NULL,
+		content        TEXT NOT NULL,
+		timestamp      TEXT NOT NULL DEFAULT '',
+		PRIMARY KEY (doll_id, seq),
+		FOREIGN KEY (doll_id) REFERENCES dolls(doll_id)
+	);`
+	if _, err := raw.Exec(prePhase2); err != nil {
+		raw.Close()
+		t.Fatalf("create pre-Phase-2 schema: %v", err)
+	}
+
+	// Insert a doll with known state and two memories.
+	ctx := context.Background()
+	spark := decodeSpark(t)
+	identityJSON := `{"doll_id":"3f3cd340-cac2-4674-b1ac-36c5510096eb","canonical_name":"Spark","display_name":"Spark","tags":null}`
+	soulJSON := `{"content":"I am a test doll with an ancient soul.","revision":42}`
+	ownerJSON := `{"content":"Master Zero"}`
+	_, err = raw.Exec(
+		`INSERT INTO dolls (doll_id, version, identity_json, soul_json, owner_json) VALUES (?, ?, ?, ?, ?)`,
+		spark.Identity.DollID, spark.Version, identityJSON, soulJSON, ownerJSON,
+	)
+	if err != nil {
+		raw.Close()
+		t.Fatalf("insert doll: %v", err)
+	}
+
+	ms := []struct {
+		seq  int
+		kid  string
+		id   string
+		iact string
+		ct   string
+		ts   string
+	}{
+		{1, dollstate.KindHumanMessage, "mem-1", "iact-0", "Hello Spark", "2026-09-19T10:00:00Z"},
+		{2, dollstate.KindDollResponse, "mem-2", "iact-0", "Greetings Master", "2026-09-19T10:00:05Z"},
+	}
+	for _, m := range ms {
+		_, err = raw.Exec(
+			`INSERT INTO memories (doll_id, seq, mem_id, interaction_id, kind, content, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			spark.Identity.DollID, m.seq, m.id, m.iact, m.kid, m.ct, m.ts,
+		)
+		if err != nil {
+			raw.Close()
+			t.Fatalf("insert memory seq=%d: %v", m.seq, err)
+		}
+	}
+	raw.Close()
+
+	// Re-open through NewStore — this runs the Phase-2 migration.
+	s, err := persistence.NewStore(path)
+	if err != nil {
+		t.Fatalf("NewStore (migration): %v", err)
+	}
+	defer s.Close()
+
+	// Load the doll — all pre-existing state must survive.
+	loaded, err := s.LoadDoll(ctx, spark.Identity.DollID)
+	if err != nil {
+		t.Fatalf("LoadDoll after migration: %v", err)
+	}
+
+	// Core identity fields preserved.
+	if loaded.Identity.DollID != spark.Identity.DollID {
+		t.Errorf("DollID = %q, want %q", loaded.Identity.DollID, spark.Identity.DollID)
+	}
+	if loaded.Identity.CanonicalName != "Spark" {
+		t.Errorf("CanonicalName = %q, want %q", loaded.Identity.CanonicalName, "Spark")
+	}
+	if loaded.Version != spark.Version {
+		t.Errorf("Version = %d, want %d", loaded.Version, spark.Version)
+	}
+	if loaded.Soul.Revision != 42 {
+		t.Errorf("Soul.Revision = %d, want 42", loaded.Soul.Revision)
+	}
+	if loaded.Soul.Content != "I am a test doll with an ancient soul." {
+		t.Errorf("Soul.Content mismatch")
+	}
+	if loaded.Owner.Content != "Master Zero" {
+		t.Errorf("Owner.Content = %q, want %q", loaded.Owner.Content, "Master Zero")
+	}
+
+	// Memories preserved.
+	if len(loaded.Memories.Items) != 2 {
+		t.Fatalf("Memories.Items = %d entries, want 2", len(loaded.Memories.Items))
+	}
+	if loaded.Memories.Items[0].ID != "mem-1" {
+		t.Errorf("Memory[0].ID = %q, want %q", loaded.Memories.Items[0].ID, "mem-1")
+	}
+	if loaded.Memories.Items[1].ID != "mem-2" {
+		t.Errorf("Memory[1].ID = %q, want %q", loaded.Memories.Items[1].ID, "mem-2")
+	}
+
+	// Drives and goals must be nil (migrated from DEFAULT '[]' → LoadDoll normalization).
+	if loaded.Drives.Items != nil {
+		t.Errorf("Drives.Items = %v, want nil (migrated from empty DB)", loaded.Drives.Items)
+	}
+	if loaded.Goals.Items != nil {
+		t.Errorf("Goals.Items = %v, want nil (migrated from empty DB)", loaded.Goals.Items)
+	}
+
+	// Verify the migration is idempotent: close and re-open.
+	s.Close()
+	s2, err := persistence.NewStore(path)
+	if err != nil {
+		t.Fatalf("NewStore (second open): %v", err)
+	}
+	defer s2.Close()
+
+	loaded2, err := s2.LoadDoll(ctx, spark.Identity.DollID)
+	if err != nil {
+		t.Fatalf("LoadDoll after second open: %v", err)
+	}
+	if loaded2.Identity.DollID != spark.Identity.DollID {
+		t.Errorf("Second open: DollID = %q, want %q", loaded2.Identity.DollID, spark.Identity.DollID)
+	}
+	if len(loaded2.Memories.Items) != 2 {
+		t.Errorf("Second open: Memories.Items = %d, want 2", len(loaded2.Memories.Items))
+	}
+	if loaded2.Drives.Items != nil {
+		t.Errorf("Second open: Drives.Items = %v, want nil", loaded2.Drives.Items)
+	}
+	if loaded2.Goals.Items != nil {
+		t.Errorf("Second open: Goals.Items = %v, want nil", loaded2.Goals.Items)
 	}
 }
