@@ -2,6 +2,7 @@ package dollmind
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -237,6 +238,20 @@ func TestParsePlan_EmptyObservations(t *testing.T) {
 // ──────────────────────────────────────────────
 // Scheduler.Plan tests
 // ──────────────────────────────────────────────
+
+// saveMockAPI tracks Save() calls for persistence verification.
+type saveMockAPI struct {
+	state      *dollstate.DollState
+	saveCalled int
+	saveErr    error
+}
+
+func (m *saveMockAPI) Inference() inference.Provider { return nil }
+func (m *saveMockAPI) State() *dollstate.DollState   { return m.state }
+func (m *saveMockAPI) Save() error {
+	m.saveCalled++
+	return m.saveErr
+}
 
 func TestPlan_NilOrientation(t *testing.T) {
 	provider := &orientTestProvider{response: `{"summary":"test"}`}
@@ -499,14 +514,16 @@ func TestPlan_NoFutureCognition_NoIntention(t *testing.T) {
 }
 
 func TestPlan_FutureCognition_CreatesIntention(t *testing.T) {
-	wakeTime := "2035-06-15T14:30:00Z"
+	refTime := time.Date(2035, 6, 15, 12, 0, 0, 0, time.UTC)
+	wakeTime := refTime.Add(2 * time.Hour).Format(time.RFC3339)
 	json := `{"summary":"need to reconsider later","observations":["something needs attention later"],"should_reorient":false,"request_future_cognition":true,"future_subject":"review Phase 4 progress","future_reason":"milestone deadline approaching","future_wake_time":"` + wakeTime + `"}`
 	provider := &orientTestProvider{response: json}
 	log := logger.New(logger.ErrorLevel, nil)
 	state := &dollstate.DollState{
 		Identity: dollstate.Identity{CanonicalName: "Spark"},
 	}
-	sched := New(provider, log, &orientMockAPI{state: state})
+	sched := New(provider, log, &saveMockAPI{state: state})
+	sched.timeProvider = func() time.Time { return refTime }
 
 	orient := &Orientation{
 		Summary: "Master discussed Phase 3 completion",
@@ -587,13 +604,16 @@ func TestPlan_FutureCognition_MalformedWakeTime(t *testing.T) {
 }
 
 func TestPlan_FutureCognition_PastWakeTime(t *testing.T) {
-	json := `{"summary":"past wake","observations":[],"should_reorient":false,"request_future_cognition":true,"future_subject":"test","future_reason":"testing","future_wake_time":"2000-01-01T00:00:00Z"}`
+	refTime := time.Date(2035, 6, 15, 12, 0, 0, 0, time.UTC)
+	pastWake := refTime.Add(-35*365*24*time.Hour).Format(time.RFC3339) // ~2000-01-01
+	json := `{"summary":"past wake","observations":[],"should_reorient":false,"request_future_cognition":true,"future_subject":"test","future_reason":"testing","future_wake_time":"` + pastWake + `"}`
 	provider := &orientTestProvider{response: json}
 	log := logger.New(logger.ErrorLevel, nil)
 	state := &dollstate.DollState{
 		Identity: dollstate.Identity{CanonicalName: "Spark"},
 	}
 	sched := New(provider, log, &orientMockAPI{state: state})
+	sched.timeProvider = func() time.Time { return refTime }
 
 	orient := &Orientation{
 		Summary: "test past",
@@ -617,7 +637,8 @@ func TestPlan_FutureCognition_PastWakeTime(t *testing.T) {
 
 func TestPlan_FutureCognition_PreservesMultipleIntentions(t *testing.T) {
 	// Verify that creating a new intention appends to existing intentions
-	wakeTime := "2035-06-15T14:30:00Z"
+	refTime := time.Date(2035, 6, 15, 12, 0, 0, 0, time.UTC)
+	wakeTime := refTime.Add(2*time.Hour + 30*time.Minute).Format(time.RFC3339)
 	json := `{"summary":"second intention","observations":[],"should_reorient":false,"request_future_cognition":true,"future_subject":"check progress","future_reason":"scheduled review","future_wake_time":"` + wakeTime + `"}`
 	provider := &orientTestProvider{response: json}
 	log := logger.New(logger.ErrorLevel, nil)
@@ -629,7 +650,8 @@ func TestPlan_FutureCognition_PreservesMultipleIntentions(t *testing.T) {
 			},
 		},
 	}
-	sched := New(provider, log, &orientMockAPI{state: state})
+	sched := New(provider, log, &saveMockAPI{state: state})
+	sched.timeProvider = func() time.Time { return refTime }
 
 	orient := &Orientation{
 		Summary: "append test",
@@ -654,5 +676,99 @@ func TestPlan_FutureCognition_PreservesMultipleIntentions(t *testing.T) {
 	// New intention has the right subject
 	if state.Intentions.Items[1].Subject != "check progress" {
 		t.Errorf("new intention Subject = %q", state.Intentions.Items[1].Subject)
+	}
+}
+
+func TestPlan_FutureCognition_EqualToNow(t *testing.T) {
+	// Wake time equal to reference time must be rejected (not strictly after).
+	refTime := time.Date(2035, 6, 15, 12, 0, 0, 0, time.UTC)
+	wakeTime := refTime.Format(time.RFC3339)
+	json := `{"summary":"equal","observations":[],"should_reorient":false,"request_future_cognition":true,"future_subject":"test","future_reason":"testing","future_wake_time":"` + wakeTime + `"}`
+	provider := &orientTestProvider{response: json}
+	log := logger.New(logger.ErrorLevel, nil)
+	state := &dollstate.DollState{
+		Identity: dollstate.Identity{CanonicalName: "Spark"},
+	}
+	sched := New(provider, log, &orientMockAPI{state: state})
+	sched.timeProvider = func() time.Time { return refTime }
+
+	orient := &Orientation{
+		Summary: "test equal to now",
+		Matters: true,
+		Reason:  "testing equal wake time rejection",
+	}
+
+	_, _, err := sched.Plan(context.Background(), events.TypeMessage, "equal test", orient)
+	if err == nil {
+		t.Fatal("expected error for wake time equal to reference time")
+	}
+	if !strings.Contains(err.Error(), "not in the future") {
+		t.Errorf("expected 'not in the future' error, got: %v", err)
+	}
+}
+
+func TestPlan_IntentionPersistedViaSave(t *testing.T) {
+	// Verify that materialising an intention calls Save() on the MindAPI,
+	// proving the created Intention reaches the Core persistence boundary.
+	refTime := time.Date(2035, 6, 15, 12, 0, 0, 0, time.UTC)
+	wakeTime := refTime.Add(2 * time.Hour).Format(time.RFC3339)
+	json := `{"summary":"save test","observations":[],"should_reorient":false,"request_future_cognition":true,"future_subject":"verify persistence","future_reason":"save call test","future_wake_time":"` + wakeTime + `"}`
+	provider := &orientTestProvider{response: json}
+	log := logger.New(logger.ErrorLevel, nil)
+	state := &dollstate.DollState{
+		Identity: dollstate.Identity{CanonicalName: "Spark"},
+	}
+	mindAPI := &saveMockAPI{state: state}
+	sched := New(provider, log, mindAPI)
+	sched.timeProvider = func() time.Time { return refTime }
+
+	orient := &Orientation{
+		Summary: "persistence test",
+		Matters: true,
+		Reason:  "testing save call",
+	}
+
+	_, dirty, err := sched.Plan(context.Background(), events.TypeMessage, "save test", orient)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !dirty {
+		t.Error("expected StateDirty=true")
+	}
+	if mindAPI.saveCalled < 1 {
+		t.Errorf("expected Save() to be called at least once, got %d call(s)", mindAPI.saveCalled)
+	}
+	if len(state.Intentions.Items) != 1 {
+		t.Fatalf("expected 1 intention in state, got %d", len(state.Intentions.Items))
+	}
+}
+
+func TestPlan_IntentionPersistenceFails(t *testing.T) {
+	// When Save() fails, Plan must return an error rather than reporting
+	// successful durable future agency.
+	refTime := time.Date(2035, 6, 15, 12, 0, 0, 0, time.UTC)
+	wakeTime := refTime.Add(2 * time.Hour).Format(time.RFC3339)
+	json := `{"summary":"save fail","observations":[],"should_reorient":false,"request_future_cognition":true,"future_subject":"fail test","future_reason":"should fail on save","future_wake_time":"` + wakeTime + `"}`
+	provider := &orientTestProvider{response: json}
+	log := logger.New(logger.ErrorLevel, nil)
+	state := &dollstate.DollState{
+		Identity: dollstate.Identity{CanonicalName: "Spark"},
+	}
+	mindAPI := &saveMockAPI{state: state, saveErr: fmt.Errorf("disk full")}
+	sched := New(provider, log, mindAPI)
+	sched.timeProvider = func() time.Time { return refTime }
+
+	orient := &Orientation{
+		Summary: "persistence failure test",
+		Matters: true,
+		Reason:  "testing save failure path",
+	}
+
+	_, _, err := sched.Plan(context.Background(), events.TypeMessage, "fail test", orient)
+	if err == nil {
+		t.Fatal("expected error when Save() fails, got nil")
+	}
+	if !strings.Contains(err.Error(), "persist intention") {
+		t.Errorf("expected 'persist intention' in error, got: %v", err)
 	}
 }

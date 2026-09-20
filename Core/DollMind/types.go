@@ -3,6 +3,7 @@ package dollmind
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/Neon-Dolls/neondoll/Core/Inference"
 	"github.com/Neon-Dolls/neondoll/DollLink/Events"
@@ -42,6 +43,9 @@ func (l Level) String() string {
 type MindAPI interface {
 	Inference() inference.Provider
 	State() *dollstate.DollState
+	// Save durably persists the current Doll State through the Core
+	// persistence boundary. Called by Plan after materialising Intention.
+	Save() error
 }
 
 // Result from a cognition cycle.
@@ -51,10 +55,6 @@ type Result struct {
 	StateDirty  bool
 	Orientation *Orientation // set when Level is LevelOrient
 	Plan        *Plan        // set when Level is LevelPlan
-
-	// CreatedIntention is set when L2 Plan materialised a pending Intention
-	// into Doll State during the cognition cycle.
-	CreatedIntention *dollstate.IntentionItem
 }
 
 // Action represents something the Doll should do.
@@ -65,13 +65,19 @@ type Action struct {
 
 // Scheduler manages cognition cycles.
 type Scheduler struct {
-	provider inference.Provider
-	log      *logger.Logger
-	mindAPI  MindAPI
+	provider     inference.Provider
+	log          *logger.Logger
+	mindAPI      MindAPI
+	timeProvider func() time.Time
 }
 
 func New(provider inference.Provider, log *logger.Logger, mindAPI MindAPI) *Scheduler {
-	return &Scheduler{provider: provider, log: log, mindAPI: mindAPI}
+	return &Scheduler{
+		provider:     provider,
+		log:          log,
+		mindAPI:      mindAPI,
+		timeProvider: time.Now,
+	}
 }
 
 // Enter is the cognition entry boundary.
@@ -112,10 +118,6 @@ func (s *Scheduler) Enter(ctx context.Context, eventType events.Type, input stri
 			return nil, fmt.Errorf("enter plan: %w", err)
 		}
 		result := &Result{Level: LevelPlan, Orientation: orient, Plan: plan, StateDirty: dirty}
-		if dirty && len(s.mindAPI.State().Intentions.Items) > 0 {
-			items := s.mindAPI.State().Intentions.Items
-			result.CreatedIntention = &items[len(items)-1]
-		}
 		return result, nil
 	default:
 		// Defensive: unknown mind paths fall back to sleep.

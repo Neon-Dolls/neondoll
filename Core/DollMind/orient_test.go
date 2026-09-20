@@ -39,6 +39,7 @@ type orientMockAPI struct {
 
 func (m *orientMockAPI) Inference() inference.Provider { return nil }
 func (m *orientMockAPI) State() *dollstate.DollState   { return m.state }
+func (m *orientMockAPI) Save() error                    { return nil }
 
 func TestBuildOrientPrompt_IncludesState(t *testing.T) {
 	state := &dollstate.DollState{

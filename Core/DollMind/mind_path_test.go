@@ -55,6 +55,7 @@ type enterMockAPI struct {
 
 func (m *enterMockAPI) Inference() inference.Provider { return nil }
 func (m *enterMockAPI) State() *dollstate.DollState   { return m.s }
+func (m *enterMockAPI) Save() error                    { return nil }
 
 // ──────────────────────────────────────────────
 // L0Reflex — unit tests

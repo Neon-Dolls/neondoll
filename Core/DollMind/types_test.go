@@ -15,6 +15,7 @@ type mockMindAPI struct {
 
 func (m *mockMindAPI) Inference() inference.Provider { return nil }
 func (m *mockMindAPI) State() *dollstate.DollState   { return m.s }
+func (m *mockMindAPI) Save() error                    { return nil }
 
 func TestNewCognition(t *testing.T) {
 	provider := inference.NewMockProvider("mock", "Hello, doll!")

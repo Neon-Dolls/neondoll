@@ -241,16 +241,19 @@ func (s *Scheduler) Plan(ctx context.Context, eventType events.Type, input strin
 }
 
 // materialiseIntention converts a Plan's future cognition request into a
-// canonical pending IntentionItem stored in Doll State.
+// canonical pending IntentionItem stored in Doll State and durably persisted
+// through the Core persistence boundary.
 //
 // It returns true if state was mutated, and an error if the intention request
-// is rejected. Validation rules:
+// is rejected or persistence fails. Validation rules:
 //   - RequestFutureCognition must be true
 //   - FutureSubject must be non-empty
 //   - FutureWakeTime must be a valid RFC 3339 timestamp in the future
 //
 // If validation fails, the intention is not created and an error is returned
-// so the caller can decide how to handle the rejected request.
+// so the caller can decide how to handle the rejected request. If persistence
+// fails, the in-memory state still reflects the mutation but the error is
+// propagated so the caller can retry or recover.
 func (s *Scheduler) materialiseIntention(plan *Plan) (bool, error) {
 	if !plan.RequestFutureCognition {
 		return false, nil
@@ -266,7 +269,7 @@ func (s *Scheduler) materialiseIntention(plan *Plan) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("intention rejected: invalid future_wake_time %q: %w", plan.FutureWakeTime, err)
 	}
-	if !wakeTime.After(time.Now()) {
+	if !wakeTime.After(s.timeProvider()) {
 		return false, fmt.Errorf("intention rejected: future_wake_time %q is not in the future", plan.FutureWakeTime)
 	}
 
@@ -288,6 +291,11 @@ func (s *Scheduler) materialiseIntention(plan *Plan) (bool, error) {
 			"subject":   intention.Subject,
 			"wake_time": intention.WakeTime,
 		})
+
+	// Durably persist through the existing Core persistence boundary.
+	if err := s.mindAPI.Save(); err != nil {
+		return false, fmt.Errorf("persist intention: %w", err)
+	}
 
 	return true, nil
 }
