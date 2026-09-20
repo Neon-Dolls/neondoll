@@ -14,6 +14,7 @@ type DollState struct {
 	Drives       Drives           `json:"drives,omitempty"`
 	Goals        Goals            `json:"goals,omitempty"`
 	Skills       Skills           `json:"skills,omitempty"`
+	Intentions   Intentions       `json:"intentions,omitempty"`
 	Auth         Auth             `json:"auth,omitempty"`
 	Secrets      Secrets          `json:"secrets,omitempty"`
 	ExtensionData map[string]any  `json:"extensions,omitempty"`
@@ -146,6 +147,38 @@ type SkillItem struct {
 	ID   string `json:"id"`
 	Name string `json:"name"`
 	Path string `json:"path,omitempty"`
+}
+
+// Intention lifecycle state constants.
+const (
+	IntentionStatePending = "pending"
+)
+
+// Intentions — Spark's durable future cognitive obligations.
+type Intentions struct {
+	Items []IntentionItem `json:"items,omitempty"`
+}
+
+// IntentionItem represents a single future cognitive obligation.
+//
+// ID provides stable identity. Goal is what Spark intends to reconsider
+// or do cognitively. Description may carry why the Intention exists.
+// WakeTime is an RFC3339 UTC timestamp representing when this cognition
+// becomes due.
+//
+// State marks lifecycle explicitly. For Core 1, "pending" is the only
+// required state — it means the Intention exists and has not yet been
+// fulfilled.
+//
+// An Intention is NOT a scheduler job, timer handle, goroutine state,
+// queue entry, or any other Core-local runtime machinery. It is portable
+// semantic Doll State that survives without any particular Core runtime.
+type IntentionItem struct {
+	ID          string `json:"id"`
+	Goal        string `json:"goal"`
+	Description string `json:"description,omitempty"`
+	WakeTime    string `json:"wake_time"`
+	State       string `json:"state"`
 }
 
 // Auth — authentication and authorization state.
