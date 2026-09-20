@@ -1,8 +1,8 @@
 // Package dollmind provides the core cognition pipeline for NeonDoll.
 //
 // Phase 3 — Spark Thinks: L2 Plan uses the Inference Provider and the L1
-// Orientation to produce an actionable plan when the doll determines an
-// event matters.
+// Orientation to produce structured semantic planning output describing what
+// Spark thinks should happen next.
 
 package dollmind
 
@@ -17,38 +17,29 @@ import (
 	"github.com/Neon-Dolls/neondoll/DollState"
 )
 
-// Plan is the structured result of L2 cognition — a course of action
-// the Doll decided to take when L1 orientation determined the event matters.
+// Plan is the structured semantic result of L2 cognition — what Spark thinks
+// should happen next when L1 orientation determined the event matters.
 //
-// Phase 3 minimum: summary of intent + list of actions to execute.
-// Future phases add goal modifications and scheduled intentions.
+// The Plan is purely semantic: it describes proposed courses of action, observed
+// state about goals and drives, and whether re-evaluation is warranted. It does
+// NOT contain executable commands, action types, or instructions that imply
+// Core execution or Goal mutation. The caller interprets the Plan's semantics.
+//
+// All fields except Summary are optional. JSON serialisation is used for
+// model output parsing.
 type Plan struct {
-	Summary string       `json:"summary"`  // what this plan is about
-	Actions []PlanAction `json:"actions"`  // immediate actions to take
-}
-
-// PlanAction is a single actionable item within a Plan.
-//
-// Type describes what kind of action. Known types for Phase 3:
-//   - "respond"     — reply to the user (payload: {"text": "..."})
-//   - "create_goal" — establish a new goal (payload: {"name":"...","description":"..."})
-//   - "complete_goal" — mark a goal finished (payload: {"name":"..."})
-//
-// Payload is a flexible map so action types can evolve without schema changes.
-type PlanAction struct {
-	Type    string         `json:"type"`
-	Payload map[string]any `json:"payload"`
+	Summary        string   `json:"summary"`          // what Spark thinks should happen next
+	ProposedAction string   `json:"proposed_action"`  // semantic description of course of action
+	Observations   []string `json:"observations"`     // noticed things about goals, drives, context
+	ShouldReorient bool     `json:"should_reorient"`  // whether to re-evaluate later
 }
 
 // planJSON is the strictly parsed JSON shape expected from model output.
 type planJSON struct {
-	Summary string          `json:"summary"`
-	Actions []planActionJSON `json:"actions"`
-}
-
-type planActionJSON struct {
-	Type    string         `json:"type"`
-	Payload map[string]any `json:"payload"`
+	Summary        string   `json:"summary"`
+	ProposedAction string   `json:"proposed_action"`
+	Observations   []string `json:"observations"`
+	ShouldReorient bool     `json:"should_reorient"`
 }
 
 // buildPlanPrompt constructs the full planning context from the Doll's
@@ -125,15 +116,15 @@ func buildPlanPrompt(state *dollstate.DollState, eventType events.Type, input st
 
 	// Task instruction — purpose "plan"
 	parts = append(parts, `Your task is PLANNING: decide what to do about this situation. Return ONLY valid JSON with no markdown formatting or code blocks. Use this format:
+
 {
-  "summary": "what you plan to do",
-  "actions": [
-    {"type": "respond", "payload": {"text": "your response message"}},
-    {"type": "create_goal", "payload": {"name": "...", "description": "..."}},
-    {"type": "complete_goal", "payload": {"name": "..."}}
-  ]
+  "summary": "what you think should happen next",
+  "proposed_action": "semantic description of the course of action you recommend",
+  "observations": ["relevant observation about goals, drives, or context", "another observation, if any"],
+  "should_reorient": false
 }
-You may include zero or more actions. A "respond" action is the most common. Include create_goal or complete_goal only when you intend to modify your goal set.`)
+
+All fields are optional except "summary". "observations" may be empty. "should_reorient" indicates whether you want to re-evaluate this situation later. Describe what should happen semantically rather than issuing commands.`)
 
 	return strings.Join(parts, "\n\n")
 }
@@ -160,29 +151,16 @@ func parsePlan(raw string) (*Plan, error) {
 		return nil, fmt.Errorf("plan missing required field: summary")
 	}
 
-	// Actions is optional — an empty list means "act on orientation only,
-	// no immediate action needed" — but ensure it's not nil for clean serialization.
-	if parsed.Actions == nil {
-		parsed.Actions = []planActionJSON{}
-	}
-
-	actions := make([]PlanAction, len(parsed.Actions))
-	for i, a := range parsed.Actions {
-		if a.Type == "" {
-			return nil, fmt.Errorf("plan action %d missing required field: type", i)
-		}
-		if a.Payload == nil {
-			a.Payload = map[string]any{}
-		}
-		actions[i] = PlanAction{
-			Type:    a.Type,
-			Payload: a.Payload,
-		}
+	// Nil-safety for observations
+	if parsed.Observations == nil {
+		parsed.Observations = []string{}
 	}
 
 	return &Plan{
-		Summary: parsed.Summary,
-		Actions: actions,
+		Summary:        parsed.Summary,
+		ProposedAction: parsed.ProposedAction,
+		Observations:   parsed.Observations,
+		ShouldReorient: parsed.ShouldReorient,
 	}, nil
 }
 
@@ -190,8 +168,8 @@ func parsePlan(raw string) (*Plan, error) {
 // canonical state, current event, and L1 orientation, then sends an inference
 // request with purpose "plan" and parses the structured plan output.
 //
-// Plan does NOT mutate state. The caller uses the returned Plan to decide
-// how to execute actions, update goals, or schedule further cognition.
+// Plan does NOT mutate state. The returned Plan is purely semantic — the
+// caller interprets what Spark thinks should happen next.
 func (s *Scheduler) Plan(ctx context.Context, eventType events.Type, input string, orientation *Orientation) (*Plan, error) {
 	if s.mindAPI == nil {
 		return nil, fmt.Errorf("mind API not set: cannot access state")
@@ -222,9 +200,9 @@ func (s *Scheduler) Plan(ctx context.Context, eventType events.Type, input strin
 
 	s.log.Info("plan complete",
 		map[string]any{
-			"event_type":     eventType,
-			"summary":        plan.Summary,
-			"action_count":   len(plan.Actions),
+			"event_type":       eventType,
+			"summary":          plan.Summary,
+			"should_reorient":  plan.ShouldReorient,
 		})
 
 	return plan, nil

@@ -29,7 +29,7 @@ func newSpy(name, orientResp string) *spyProvider {
 	return &spyProvider{
 		name:       name,
 		orientResp: orientResp,
-		planResp:   `{"summary":"auto-generated plan","actions":[{"type":"respond","payload":{"text":"ok"}}]}`,
+		planResp:   `{"summary":"acknowledge and continue","observations":["nothing notable"]}`,
 	}
 }
 
@@ -234,14 +234,11 @@ func TestScheduler_Enter_CommandReturnsOrientation(t *testing.T) {
 	if result.Plan == nil {
 		t.Fatal("expected Plan to be set (matters=true → L2 cascade)")
 	}
-	if result.Plan.Summary != "auto-generated plan" {
+	if result.Plan.Summary != "acknowledge and continue" {
 		t.Errorf("Plan.Summary = %q", result.Plan.Summary)
 	}
-	if len(result.Plan.Actions) != 1 {
-		t.Errorf("expected 1 Plan action, got %d", len(result.Plan.Actions))
-	}
-	if result.Plan.Actions[0].Type != "respond" {
-		t.Errorf("Plan action type = %q", result.Plan.Actions[0].Type)
+	if result.Plan.ProposedAction != "" {
+		t.Errorf("expected empty proposed_action for default spy, got %q", result.Plan.ProposedAction)
 	}
 	if len(result.Actions) != 0 {
 		t.Errorf("expected 0 actions from command orient, got %d", len(result.Actions))

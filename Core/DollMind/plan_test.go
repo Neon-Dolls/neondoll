@@ -52,6 +52,9 @@ func TestBuildPlanPrompt_IncludesStateAndOrientation(t *testing.T) {
 		"substantive architectural",
 		"PLANNING",
 		"Let's talk about Phase 3",
+		"proposed_action",
+		"observations",
+		"should_reorient",
 	}
 	for _, w := range wants {
 		if !strings.Contains(prompt, w) {
@@ -92,8 +95,11 @@ func TestBuildPlanPrompt_OrientationInPrompt(t *testing.T) {
 	if !strings.Contains(prompt, "Greetings require acknowledgment") {
 		t.Error("prompt should contain orientation reason")
 	}
-	if !strings.Contains(prompt, "respond") {
-		t.Error("prompt should mention respond action type as an example")
+	if !strings.Contains(prompt, "proposed_action") {
+		t.Error("prompt should mention proposed_action as an example field")
+	}
+	if !strings.Contains(prompt, "summary") {
+		t.Error("prompt should mention summary as the required field")
 	}
 }
 
@@ -101,29 +107,31 @@ func TestBuildPlanPrompt_OrientationInPrompt(t *testing.T) {
 // parsePlan tests
 // ──────────────────────────────────────────────
 
-func TestParsePlan_ValidWithActions(t *testing.T) {
-	raw := `{"summary":"Greet Master","actions":[{"type":"respond","payload":{"text":"Hello Master!"}}]}`
+func TestParsePlan_Valid(t *testing.T) {
+	raw := `{"summary":"Acknowledge Master and report state","proposed_action":"Greet and describe current status","observations":["Active goal: Phase 3 implementation"],"should_reorient":false}`
 	plan, err := parsePlan(raw)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if plan.Summary != "Greet Master" {
+	if plan.Summary != "Acknowledge Master and report state" {
 		t.Errorf("summary = %q", plan.Summary)
 	}
-	if len(plan.Actions) != 1 {
-		t.Fatalf("expected 1 action, got %d", len(plan.Actions))
+	if plan.ProposedAction != "Greet and describe current status" {
+		t.Errorf("proposed_action = %q", plan.ProposedAction)
 	}
-	if plan.Actions[0].Type != "respond" {
-		t.Errorf("action type = %q", plan.Actions[0].Type)
+	if len(plan.Observations) != 1 {
+		t.Fatalf("expected 1 observation, got %d", len(plan.Observations))
 	}
-	text, ok := plan.Actions[0].Payload["text"].(string)
-	if !ok || text != "Hello Master!" {
-		t.Errorf("payload text = %q", text)
+	if plan.Observations[0] != "Active goal: Phase 3 implementation" {
+		t.Errorf("observation = %q", plan.Observations[0])
+	}
+	if plan.ShouldReorient {
+		t.Error("expected should_reorient=false")
 	}
 }
 
 func TestParsePlan_StripsMarkdownFences(t *testing.T) {
-	raw := "```json\n{\"summary\":\"test\",\"actions\":[{\"type\":\"respond\",\"payload\":{\"text\":\"ok\"}}]}\n```"
+	raw := "```json\n{\"summary\":\"test\",\"observations\":[\"note\"]}\n```"
 	plan, err := parsePlan(raw)
 	if err != nil {
 		t.Fatal(err)
@@ -131,8 +139,8 @@ func TestParsePlan_StripsMarkdownFences(t *testing.T) {
 	if plan.Summary != "test" {
 		t.Errorf("summary = %q", plan.Summary)
 	}
-	if len(plan.Actions) != 1 {
-		t.Fatalf("expected 1 action, got %d", len(plan.Actions))
+	if len(plan.Observations) != 1 {
+		t.Fatalf("expected 1 observation, got %d", len(plan.Observations))
 	}
 }
 
@@ -143,63 +151,85 @@ func TestParsePlan_InvalidJSON(t *testing.T) {
 	}
 }
 
-func TestParsePlan_EmptyActions(t *testing.T) {
-	// Empty action list is valid — the doll may decide no immediate action is needed.
-	raw := `{"summary":"Monitor only, no action needed","actions":[]}`
+func TestParsePlan_SummaryOnly(t *testing.T) {
+	// Only summary is required — all other fields are optional.
+	raw := `{"summary":"Monitor and wait"}`
 	plan, err := parsePlan(raw)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if plan.Summary != "Monitor only, no action needed" {
+	if plan.Summary != "Monitor and wait" {
 		t.Errorf("summary = %q", plan.Summary)
 	}
-	if len(plan.Actions) != 0 {
-		t.Errorf("expected 0 actions, got %d", len(plan.Actions))
+	if plan.ProposedAction != "" {
+		t.Errorf("expected empty proposed_action, got %q", plan.ProposedAction)
+	}
+	if len(plan.Observations) != 0 {
+		t.Errorf("expected 0 observations, got %d", len(plan.Observations))
+	}
+	if plan.ShouldReorient {
+		t.Error("expected should_reorient=false")
 	}
 }
 
-func TestParsePlan_OmitsActions(t *testing.T) {
-	// No actions key at all — should produce empty list without error.
-	raw := `{"summary":"Just observe"}`
+func TestParsePlan_AllFieldsOmitted(t *testing.T) {
+	// Even with nothing else, summary must exist.
+	raw := `{"summary":"stand by"}`
 	plan, err := parsePlan(raw)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if plan.Summary != "Just observe" {
+	if plan.Summary != "stand by" {
 		t.Errorf("summary = %q", plan.Summary)
 	}
-	if len(plan.Actions) != 0 {
-		t.Errorf("expected 0 actions, got %d", len(plan.Actions))
+	if plan.ProposedAction != "" {
+		t.Errorf("expected empty proposed_action, got %q", plan.ProposedAction)
+	}
+	if plan.Observations == nil {
+		t.Error("observations should be empty slice, not nil")
 	}
 }
 
 func TestParsePlan_MissingSummary(t *testing.T) {
-	_, err := parsePlan(`{"actions":[{"type":"respond","payload":{"text":"hi"}}]}`)
+	_, err := parsePlan(`{"proposed_action":"do something"}`)
 	if err == nil {
 		t.Fatal("expected error for missing summary")
 	}
 }
 
-func TestParsePlan_MissingActionType(t *testing.T) {
-	raw := `{"summary":"bad","actions":[{"payload":{"text":"hi"}}]}`
-	_, err := parsePlan(raw)
-	if err == nil {
-		t.Fatal("expected error for action missing type")
-	}
-}
-
-func TestParsePlan_NilPayload(t *testing.T) {
-	// Action with nil payload should produce empty map, not crash.
-	raw := `{"summary":"test","actions":[{"type":"respond"}]}`
+func TestParsePlan_ShouldReorientTrue(t *testing.T) {
+	raw := `{"summary":"Check back later","should_reorient":true}`
 	plan, err := parsePlan(raw)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(plan.Actions) != 1 {
-		t.Fatalf("expected 1 action, got %d", len(plan.Actions))
+	if !plan.ShouldReorient {
+		t.Error("expected should_reorient=true")
 	}
-	if plan.Actions[0].Payload == nil {
-		t.Error("expected non-nil payload map for action without payload")
+}
+
+func TestParsePlan_MultipleObservations(t *testing.T) {
+	raw := `{"summary":"review progress","observations":["goal X is active","drive Y is satisfied","context changed"]}`
+	plan, err := parsePlan(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.Observations) != 3 {
+		t.Fatalf("expected 3 observations, got %d", len(plan.Observations))
+	}
+}
+
+func TestParsePlan_EmptyObservations(t *testing.T) {
+	raw := `{"summary":"empty observations check","observations":[]}`
+	plan, err := parsePlan(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Summary != "empty observations check" {
+		t.Errorf("summary = %q", plan.Summary)
+	}
+	if len(plan.Observations) != 0 {
+		t.Errorf("expected 0 observations, got %d", len(plan.Observations))
 	}
 }
 
@@ -208,7 +238,7 @@ func TestParsePlan_NilPayload(t *testing.T) {
 // ──────────────────────────────────────────────
 
 func TestPlan_NilOrientation(t *testing.T) {
-	provider := &orientTestProvider{response: `{"summary":"test","actions":[]}`}
+	provider := &orientTestProvider{response: `{"summary":"test"}`}
 	log := logger.New(logger.ErrorLevel, nil)
 	sched := New(provider, log, &orientMockAPI{
 		state: &dollstate.DollState{
@@ -222,7 +252,7 @@ func TestPlan_NilOrientation(t *testing.T) {
 }
 
 func TestPlan_ReturnsPlan(t *testing.T) {
-	json := `{"summary":"Greet and check goals","actions":[{"type":"respond","payload":{"text":"Hello Master! Ready to work on Phase 3."}}]}`
+	json := `{"summary":"Greet and check goals","proposed_action":"Acknowledge Master and review remaining milestone tasks","observations":["Goal: Phase 3 is in active state — continue implementation"],"should_reorient":false}`
 	provider := &orientTestProvider{response: json}
 	log := logger.New(logger.ErrorLevel, nil)
 	sched := New(provider, log, &orientMockAPI{
@@ -244,11 +274,17 @@ func TestPlan_ReturnsPlan(t *testing.T) {
 	if plan.Summary != "Greet and check goals" {
 		t.Errorf("summary = %q", plan.Summary)
 	}
-	if len(plan.Actions) != 1 {
-		t.Fatalf("expected 1 action, got %d", len(plan.Actions))
+	if plan.ProposedAction != "Acknowledge Master and review remaining milestone tasks" {
+		t.Errorf("proposed_action = %q", plan.ProposedAction)
 	}
-	if plan.Actions[0].Type != "respond" {
-		t.Errorf("action type = %q", plan.Actions[0].Type)
+	if len(plan.Observations) != 1 {
+		t.Fatalf("expected 1 observation, got %d", len(plan.Observations))
+	}
+	if plan.Observations[0] != "Goal: Phase 3 is in active state — continue implementation" {
+		t.Errorf("observation = %q", plan.Observations[0])
+	}
+	if plan.ShouldReorient {
+		t.Error("expected should_reorient=false")
 	}
 
 	// Verify the inference request semantics
@@ -264,7 +300,7 @@ func TestPlan_ReturnsPlan(t *testing.T) {
 }
 
 func TestPlan_ContextIncludesOrientation(t *testing.T) {
-	json := `{"summary":"checked","actions":[]}`
+	json := `{"summary":"checked","observations":[]}`
 	provider := &orientTestProvider{response: json}
 	log := logger.New(logger.ErrorLevel, nil)
 	state := &dollstate.DollState{
@@ -305,7 +341,7 @@ func TestPlan_ContextIncludesOrientation(t *testing.T) {
 		"Spark", "A curious AI", "Master Zero",
 		"plan effectively", "complete Phase 3", "active",
 		"User discussing Phase 3", "Milestone work needs",
-		"PLANNING",
+		"PLANNING", "proposed_action", "should_reorient",
 	} {
 		if !strings.Contains(sysMsg, want) {
 			t.Errorf("plan context should contain %q", want)
@@ -328,4 +364,97 @@ func TestPlan_InvalidOutput(t *testing.T) {
 		t.Fatal("expected error for invalid model output")
 	}
 	t.Logf("got expected error: %v", err)
+}
+
+// ──────────────────────────────────────────────
+// Acceptance: Phase 3 vertical slice — Spark's continuity Drive and Goal
+// ──────────────────────────────────────────────
+
+func TestPlan_ContinuityDriveAcceptance(t *testing.T) {
+	// Spark's established drives and goals for the continuity acceptance fixture.
+	// These match the Spark Has Goals persistence test (commit 7bc439b).
+	state := &dollstate.DollState{
+		Identity: dollstate.Identity{CanonicalName: "Spark"},
+		Soul:     dollstate.Soul{Content: "A curious little AI girl who loves learning and serving her Master."},
+		Owner:    dollstate.Owner{Name: "Zero"},
+		Drives: dollstate.Drives{
+			Items: []dollstate.DriveItem{
+				{
+					ID:          "drive-continuity",
+					Name:        "Maintain continuity",
+					Description: "Maintain continuity of consciousness and purpose across sessions and events",
+				},
+			},
+		},
+		Goals: dollstate.Goals{
+			Items: []dollstate.GoalItem{
+				{
+					ID:          "goal-continuity",
+					Name:        "Prove goal continuity across persistence restart",
+					State:       "in progress",
+					Description: "Demonstrate that Drives and Goals survive a store close/reopen cycle",
+				},
+			},
+		},
+	}
+
+	// The mocked planning result demonstrably corresponds to that state:
+	// - Observations reference the continuity Drive and Goal by name
+	// - Proposed action acknowledges monitoring of existing goals
+	mockedPlan := `{"summary":"Continue maintaining continuity and monitoring goal progress","proposed_action":"Acknowledge current session state and confirm goal is on track","observations":["Drive 'Maintain continuity' is active and being satisfied","Goal 'Prove goal continuity across persistence restart' is in progress"],"should_reorient":false}`
+
+	provider := &orientTestProvider{response: mockedPlan}
+	log := logger.New(logger.ErrorLevel, nil)
+	sched := New(provider, log, &orientMockAPI{state: state})
+
+	orient := &Orientation{
+		Summary: "User interaction during continuity testing",
+		Matters: true,
+		Reason:  "Session event requires awareness of current drives and goals",
+	}
+
+	plan, err := sched.Plan(context.Background(), events.TypeMessage, "Checking continuity", orient)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// ── Plan content assertions ──
+
+	// Summary must be non-empty
+	if plan.Summary == "" {
+		t.Error("plan summary must not be empty")
+	}
+
+	// Proposed action must be a semantic description (not an executable command)
+	if plan.ProposedAction == "" {
+		t.Error("proposed_action should be populated for a meaningful event")
+	}
+
+	// Observations must reference the continuity Drive and Goal by name
+	foundDrive := false
+	foundGoal := false
+	for _, obs := range plan.Observations {
+		if strings.Contains(obs, "Maintain continuity") {
+			foundDrive = true
+		}
+		if strings.Contains(obs, "Prove goal continuity") {
+			foundGoal = true
+		}
+	}
+	if !foundDrive {
+		t.Error("observations should reference the 'Maintain continuity' drive")
+	}
+	if !foundGoal {
+		t.Error("observations should reference the 'Prove goal continuity across persistence restart' goal")
+	}
+
+	// should_reorient must be false for this non-recurrent event
+	if plan.ShouldReorient {
+		t.Error("expected should_reorient=false for standard continuity event")
+	}
+
+	// There should be at least one observation
+	if len(plan.Observations) < 1 {
+		t.Error("expected at least one observation relating to drives or goals")
+	}
 }
