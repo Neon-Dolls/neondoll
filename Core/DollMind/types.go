@@ -106,8 +106,8 @@ func (s *Scheduler) Run(ctx context.Context, level Level, input string) (*Result
 		map[string]any{"level": level.String(), "input_len": len(input)})
 
 	resp, err := s.provider.Infer(ctx, inference.Request{
-		Model:    "default",
 		Messages: []inference.Message{{Role: "user", Content: input}},
+		Purpose:  inference.PurposeRespond,
 	})
 	if err != nil {
 		return nil, err

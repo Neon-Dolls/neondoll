@@ -196,12 +196,15 @@ func TestOrient_ReturnsOrientation(t *testing.T) {
 	if orient.Reason != "Greeting, no planning needed" {
 		t.Errorf("reason = %q", orient.Reason)
 	}
-	// Verify the inference request included the identity
+	// Verify the inference request semantics
 	if provider.lastReq == nil {
 		t.Fatal("no inference request captured")
 	}
 	if len(provider.lastReq.Messages) == 0 {
 		t.Fatal("no messages in request")
+	}
+	if provider.lastReq.Purpose != inference.PurposeOrient {
+		t.Errorf("request.Purpose = %q, want %q", provider.lastReq.Purpose, inference.PurposeOrient)
 	}
 	sysMsg := provider.lastReq.Messages[0].Content
 	if !strings.Contains(sysMsg, "Spark") {
@@ -219,7 +222,22 @@ func TestOrient_ContextIncludesState(t *testing.T) {
 		Owner:    dollstate.Owner{Name: "Master Zero"},
 		Drives: dollstate.Drives{
 			Items: []dollstate.DriveItem{
-				{ID: "d1", Name: "Serve", Description: "Help Master"},
+				{
+					ID:          "drive-continuity-001",
+					Name:        "maintain continuity",
+					Description: "Spark must maintain her identity, drives, and goals across persistence restarts.",
+				},
+			},
+		},
+		Goals: dollstate.Goals{
+			Items: []dollstate.GoalItem{
+				{
+					ID:          "goal-continuity-001",
+					Name:        "prove goal continuity across persistence restart",
+					Description: "A persistence restart must not lose Spark's goals.",
+					State:       dollstate.GoalStateActive,
+					DriveID:     "drive-continuity-001",
+				},
 			},
 		},
 	}
@@ -232,8 +250,18 @@ func TestOrient_ContextIncludesState(t *testing.T) {
 	if provider.lastReq == nil {
 		t.Fatal("no inference request captured")
 	}
+	if provider.lastReq.Purpose != inference.PurposeOrient {
+		t.Errorf("request.Purpose = %q, want %q", provider.lastReq.Purpose, inference.PurposeOrient)
+	}
 	sysMsg := provider.lastReq.Messages[0].Content
-	for _, want := range []string{"Spark", "A curious AI", "Master Zero", "Serve", "Help Master", "/status", "ORIENTATION"} {
+	for _, want := range []string{
+		"Spark", "A curious AI", "Master Zero",
+		"maintain continuity",
+		"prove goal continuity across persistence restart",
+		"Spark must maintain her identity, drives, and goals",
+		"active",
+		"/status", "ORIENTATION",
+	} {
 		if !strings.Contains(sysMsg, want) {
 			t.Errorf("orientation context should contain %q", want)
 		}

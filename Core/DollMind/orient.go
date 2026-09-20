@@ -146,9 +146,6 @@ func parseOrientation(raw string) (*Orientation, error) {
 //
 // Orient does NOT mutate state. The caller uses the returned Orientation
 // to decide whether L2 planning is warranted.
-//
-// The orientation purpose is encoded in the system message prompt — no new
-// API surface on the Inference Provider is required.
 func (s *Scheduler) Orient(ctx context.Context, eventType events.Type, input string) (*Orientation, error) {
 	if s.mindAPI == nil {
 		return nil, fmt.Errorf("mind API not set: cannot access state")
@@ -158,12 +155,12 @@ func (s *Scheduler) Orient(ctx context.Context, eventType events.Type, input str
 	prompt := buildOrientPrompt(state, eventType, input)
 
 	resp, err := s.provider.Infer(ctx, inference.Request{
-		Model: state.Identity.DollID,
 		Messages: []inference.Message{
 			{Role: "system", Content: prompt},
 		},
 		Temperature: 0.3,
 		MaxTokens:   512,
+		Purpose:     inference.PurposeOrient,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("orient inference: %w", err)

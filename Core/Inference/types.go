@@ -5,12 +5,24 @@ import "context"
 // ProviderID identifies an inference provider.
 type ProviderID string
 
+// Purpose signals why a request is being made — the semantic orientation of
+// the inference call. The smallest possible contract between cognition and
+// infrastructure: the provider knows what kind of response context is needed,
+// but model selection and routing remain infrastructure concerns.
+type Purpose string
+
+const (
+	PurposeOrient  Purpose = "orient"  // L1: interpret situation, decide if it matters
+	PurposeRespond Purpose = "respond" // L2+: generate a response to the user/event
+)
+
 // Request is a generic inference request.
 type Request struct {
 	Model       string
 	Messages    []Message
 	Temperature float64
 	MaxTokens   int
+	Purpose     Purpose
 }
 
 // Message in a conversation.
