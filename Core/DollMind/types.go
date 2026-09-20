@@ -22,6 +22,10 @@ const (
 	LevelDream   Level = 4
 )
 
+// DefaultRetryDuration is the default WakeTime bump applied when
+// cognition decides a due intention does not warrant action.
+const DefaultRetryDuration = 1 * time.Hour
+
 func (l Level) String() string {
 	switch l {
 	case LevelReflex:
@@ -127,10 +131,38 @@ func (s *Scheduler) Enter(ctx context.Context, eventType events.Type, input stri
 
 // EnterWake is the cognition entry boundary for internal wake events.
 //
-// It accepts a structured IntentionWakePayload and derives the
-// inference-facing text from its fields (Subject, Description, IntentionID),
-// freeing callers from having to manufacture an ad-hoc wake string.
+// It accepts a structured IntentionWakePayload and:
+//  1. Marks the intention as InProgress in durable state
+//  2. Derives inference-facing text from payload fields
+//  3. Enters cognition (L0 → L1 → optional L2)
+//  4. Transitions intention state based on outcome:
+//     - matters=false → re-schedule (Pending + bumped WakeTime)
+//     - L2 completed → mark Completed
+//     - cognition failure → re-schedule
+//  5. Persists final state via MindAPI.Save()
 func (s *Scheduler) EnterWake(ctx context.Context, payload events.IntentionWakePayload) (*Result, error) {
+	if s.mindAPI == nil {
+		return nil, fmt.Errorf("enter wake: mind API not set")
+	}
+
+	// 1. Mark intention as InProgress and persist.
+	state := s.mindAPI.State()
+	found := false
+	for i := range state.Intentions.Items {
+		if state.Intentions.Items[i].ID == payload.IntentionID {
+			state.Intentions.Items[i].State = dollstate.IntentionStateInProgress
+			found = true
+			break
+		}
+	}
+	if !found {
+		return nil, fmt.Errorf("enter wake: intention %q not found in state", payload.IntentionID)
+	}
+	if err := s.mindAPI.Save(); err != nil {
+		return nil, fmt.Errorf("enter wake: persist in-progress state: %w", err)
+	}
+
+	// 2. Build inference-facing text from payload fields.
 	text := payload.Subject
 	if payload.Description != "" {
 		text += "\n" + payload.Description
@@ -138,7 +170,52 @@ func (s *Scheduler) EnterWake(ctx context.Context, payload events.IntentionWakeP
 	if payload.IntentionID != "" {
 		text += "\nIntentionID: " + payload.IntentionID
 	}
-	return s.Enter(ctx, events.TypeInternalWake, text)
+
+	// 3. Enter cognition.
+	result, err := s.Enter(ctx, events.TypeInternalWake, text)
+	if err != nil {
+		s.rescheduleIntention(payload.IntentionID)
+		return nil, fmt.Errorf("enter wake: cognition failed: %w", err)
+	}
+
+	// 4. Transition intention state based on cognition outcome.
+	if result.Level == LevelOrient && result.Orientation != nil && !result.Orientation.Matters {
+		s.rescheduleIntention(payload.IntentionID)
+	} else if result.Level >= LevelPlan {
+		s.completeIntention(payload.IntentionID)
+	}
+
+	// 5. Persist final state.
+	if err := s.mindAPI.Save(); err != nil {
+		return nil, fmt.Errorf("enter wake: persist final state: %w", err)
+	}
+
+	return result, nil
+}
+
+// rescheduleIntention sets an intention back to Pending and bumps its
+// WakeTime by DefaultRetryDuration so the recognition loop will rediscover it.
+func (s *Scheduler) rescheduleIntention(id string) {
+	state := s.mindAPI.State()
+	for i := range state.Intentions.Items {
+		if state.Intentions.Items[i].ID == id {
+			state.Intentions.Items[i].State = dollstate.IntentionStatePending
+			state.Intentions.Items[i].WakeTime = s.timeProvider().Add(DefaultRetryDuration).Format(time.RFC3339)
+			return
+		}
+	}
+}
+
+// completeIntention marks an intention as Completed — it will not be
+// rediscovered as due by any future recognition loop.
+func (s *Scheduler) completeIntention(id string) {
+	state := s.mindAPI.State()
+	for i := range state.Intentions.Items {
+		if state.Intentions.Items[i].ID == id {
+			state.Intentions.Items[i].State = dollstate.IntentionStateCompleted
+			return
+		}
+	}
 }
 
 // Run executes a cognition cycle at the given level, always calling the provider.

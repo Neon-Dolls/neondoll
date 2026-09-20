@@ -5,6 +5,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/Neon-Dolls/neondoll/Core/Inference"
 	"github.com/Neon-Dolls/neondoll/DollLink/Events"
@@ -334,6 +335,15 @@ func TestScheduler_Enter_InternalWake_OrientReturnsOrientation(t *testing.T) {
 	log := logger.New(logger.DebugLevel, nil)
 	mindAPI := &enterMockAPI{s: &dollstate.DollState{
 		Identity: dollstate.Identity{CanonicalName: "TestDoll"},
+		Intentions: dollstate.Intentions{
+			Items: []dollstate.IntentionItem{{
+				ID:          "wake-001",
+				Subject:     "review goal progress",
+				Description: "Time to check on active goals",
+				WakeTime:    "2006-01-02T15:04:05Z",
+				State:       dollstate.IntentionStatePending,
+			}},
+		},
 	}}
 	sched := New(spy, log, mindAPI)
 
@@ -384,6 +394,30 @@ func TestScheduler_Enter_InternalWake_OrientReturnsOrientation(t *testing.T) {
 	if strings.Contains(prompt, "Event type: message") {
 		t.Error("orient prompt must not fabricate a message event type")
 	}
+
+	// Phase 3: matters=false → intention must be rescheduled (Pending, bumped WakeTime)
+	state := mindAPI.State()
+	var intention *dollstate.IntentionItem
+	for i := range state.Intentions.Items {
+		if state.Intentions.Items[i].ID == "wake-001" {
+			intention = &state.Intentions.Items[i]
+			break
+		}
+	}
+	if intention == nil {
+		t.Fatal("intention wake-001 must exist in state")
+	}
+	if intention.State != dollstate.IntentionStatePending {
+		t.Errorf("rescheduling on matters=false should keep Pending, got %s", intention.State)
+	}
+	origT, _ := time.Parse(time.RFC3339, "2006-01-02T15:04:05Z")
+	newT, err := time.Parse(time.RFC3339, intention.WakeTime)
+	if err != nil {
+		t.Fatalf("parse rescheduled WakeTime: %v", err)
+	}
+	if !newT.After(origT) {
+		t.Error("rescheduled WakeTime must be after the original")
+	}
 }
 
 func TestScheduler_Enter_InternalWake_CascadeToL2(t *testing.T) {
@@ -391,6 +425,15 @@ func TestScheduler_Enter_InternalWake_CascadeToL2(t *testing.T) {
 	log := logger.New(logger.DebugLevel, nil)
 	mindAPI := &enterMockAPI{s: &dollstate.DollState{
 		Identity: dollstate.Identity{CanonicalName: "TestDoll"},
+		Intentions: dollstate.Intentions{
+			Items: []dollstate.IntentionItem{{
+				ID:          "wake-007",
+				Subject:     "review goal progress",
+				Description: "Time to check on active goals",
+				WakeTime:    "2006-01-02T15:04:05Z",
+				State:       dollstate.IntentionStatePending,
+			}},
+		},
 	}}
 	sched := New(spy, log, mindAPI)
 
@@ -424,6 +467,22 @@ func TestScheduler_Enter_InternalWake_CascadeToL2(t *testing.T) {
 	if calls := int(spy.calls.Load()); calls != 2 {
 		t.Errorf("expected 2 inference calls (orient + plan), got %d", calls)
 	}
+
+	// Phase 3: matters=true + L2 completed → intention must be Completed
+	state := mindAPI.State()
+	var intention *dollstate.IntentionItem
+	for i := range state.Intentions.Items {
+		if state.Intentions.Items[i].ID == "wake-007" {
+			intention = &state.Intentions.Items[i]
+			break
+		}
+	}
+	if intention == nil {
+		t.Fatal("intention wake-007 must exist in state")
+	}
+	if intention.State != dollstate.IntentionStateCompleted {
+		t.Errorf("expected Completed after plan materialisation, got %s", intention.State)
+	}
 }
 
 func TestScheduler_Enter_InternalWake_NoHumanMessageFabricated(t *testing.T) {
@@ -432,6 +491,15 @@ func TestScheduler_Enter_InternalWake_NoHumanMessageFabricated(t *testing.T) {
 	mindAPI := &enterMockAPI{s: &dollstate.DollState{
 		Identity: dollstate.Identity{CanonicalName: "TestDoll"},
 		Owner:    dollstate.Owner{Name: "Zero"},
+		Intentions: dollstate.Intentions{
+			Items: []dollstate.IntentionItem{{
+				ID:          "wake-ctx",
+				Subject:     "review goals",
+				Description: "Check active goals state",
+				WakeTime:    "2006-01-02T15:04:05Z",
+				State:       dollstate.IntentionStatePending,
+			}},
+		},
 	}}
 	sched := New(spy, log, mindAPI)
 
@@ -471,6 +539,30 @@ func TestScheduler_Enter_InternalWake_NoHumanMessageFabricated(t *testing.T) {
 		if !strings.Contains(sysPrompt, want) {
 			t.Errorf("wake prompt should contain %q", want)
 		}
+	}
+
+	// Phase 3: matters=false → intention rescheduled (Pending, bumped WakeTime)
+	state := mindAPI.State()
+	var intention *dollstate.IntentionItem
+	for i := range state.Intentions.Items {
+		if state.Intentions.Items[i].ID == "wake-ctx" {
+			intention = &state.Intentions.Items[i]
+			break
+		}
+	}
+	if intention == nil {
+		t.Fatal("intention wake-ctx must exist in state")
+	}
+	if intention.State != dollstate.IntentionStatePending {
+		t.Errorf("rescheduling on matters=false should keep Pending, got %s", intention.State)
+	}
+	origT, _ := time.Parse(time.RFC3339, "2006-01-02T15:04:05Z")
+	newT, err := time.Parse(time.RFC3339, intention.WakeTime)
+	if err != nil {
+		t.Fatalf("parse rescheduled WakeTime: %v", err)
+	}
+	if !newT.After(origT) {
+		t.Error("rescheduled WakeTime must be after the original")
 	}
 }
 
