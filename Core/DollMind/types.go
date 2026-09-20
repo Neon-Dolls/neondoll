@@ -2,6 +2,7 @@ package dollmind
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/Neon-Dolls/neondoll/Core/Inference"
 	"github.com/Neon-Dolls/neondoll/DollLink/Events"
@@ -45,9 +46,10 @@ type MindAPI interface {
 
 // Result from a cognition cycle.
 type Result struct {
-	Level      Level
-	Actions    []Action
-	StateDirty bool
+	Level       Level
+	Actions     []Action
+	StateDirty  bool
+	Orientation *Orientation // set when Level is LevelOrient
 }
 
 // Action represents something the Doll should do.
@@ -69,15 +71,13 @@ func New(provider inference.Provider, log *logger.Logger, mindAPI MindAPI) *Sche
 
 // Enter is the cognition entry boundary.
 //
-// It runs L0 Reflex to determine whether inference is needed.  The method
-// stops at the L0 decision and NEVER calls the inference provider:
+// It runs L0 Reflex to determine whether inference is needed:
 //
 //   - PathSleep  → LevelReflex result (deterministic, handled at L0).
-//   - PathOrient → LevelOrient result ("L1 orientation required").
+//   - PathOrient → LevelOrient result with structured Orientation
+//                  produced by L1 Orient via the Inference Provider.
 //
-// Phase 2 will implement L1 orientation; until then, Enter signals the path
-// without executing it.  Callers that need the legacy inference path should
-// use Run directly.
+// Enter does NOT mutate state.
 func (s *Scheduler) Enter(ctx context.Context, eventType events.Type, input string) (*Result, error) {
 	path := L0Reflex(eventType)
 
@@ -87,9 +87,13 @@ func (s *Scheduler) Enter(ctx context.Context, eventType events.Type, input stri
 			map[string]any{"event_type": string(eventType)})
 		return &Result{Level: LevelReflex}, nil
 	case PathOrient:
-		s.log.Info("cognition blocked — L1 orientation required",
+		s.log.Info("cognition orient — L1 orientation requested",
 			map[string]any{"event_type": string(eventType)})
-		return &Result{Level: LevelOrient}, nil
+		orient, err := s.Orient(ctx, eventType, input)
+		if err != nil {
+			return nil, fmt.Errorf("enter orient: %w", err)
+		}
+		return &Result{Level: LevelOrient, Orientation: orient}, nil
 	default:
 		// Defensive: unknown mind paths fall back to sleep.
 		return &Result{Level: LevelReflex}, nil

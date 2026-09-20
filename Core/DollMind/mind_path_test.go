@@ -129,7 +129,9 @@ func TestMindPath_String(t *testing.T) {
 func TestScheduler_Enter_SleepNoActions(t *testing.T) {
 	spy := newSpy("spy", "SHOULD NOT MATTER")
 	log := logger.New(logger.DebugLevel, nil)
-	mindAPI := &enterMockAPI{s: &dollstate.DollState{}}
+	mindAPI := &enterMockAPI{s: &dollstate.DollState{
+		Identity: dollstate.Identity{CanonicalName: "TestDoll"},
+	}}
 	sched := New(spy, log, mindAPI)
 
 	result, err := sched.Enter(context.Background(), events.TypePresence, "hello")
@@ -142,12 +144,23 @@ func TestScheduler_Enter_SleepNoActions(t *testing.T) {
 	if len(result.Actions) != 0 {
 		t.Errorf("expected 0 actions for sleep, got %d", len(result.Actions))
 	}
+	if result.Orientation != nil {
+		t.Error("expected nil Orientation for sleep")
+	}
+	if result.StateDirty {
+		t.Error("expected StateDirty=false for sleep")
+	}
+	if calls := int(spy.calls.Load()); calls != 0 {
+		t.Errorf("expected 0 inference calls for sleep, got %d", calls)
+	}
 }
 
-func TestScheduler_Enter_OrientSignalsLevelWithoutInference(t *testing.T) {
-	spy := newSpy("spy", "SHOULD NOT MATTER")
+func TestScheduler_Enter_OrientReturnsOrientation(t *testing.T) {
+	spy := newSpy("spy", `{"summary":"user sent a message","matters":false,"reason":"routine chat"}`)
 	log := logger.New(logger.DebugLevel, nil)
-	mindAPI := &enterMockAPI{s: &dollstate.DollState{}}
+	mindAPI := &enterMockAPI{s: &dollstate.DollState{
+		Identity: dollstate.Identity{CanonicalName: "TestDoll"},
+	}}
 	sched := New(spy, log, mindAPI)
 
 	result, err := sched.Enter(context.Background(), events.TypeMessage, "Hello, Spark!")
@@ -155,19 +168,38 @@ func TestScheduler_Enter_OrientSignalsLevelWithoutInference(t *testing.T) {
 		t.Fatalf("Enter: %v", err)
 	}
 
-	// Must signal that L1 orientation is needed — NOT produce a response.
 	if result.Level != LevelOrient {
 		t.Errorf("expected LevelOrient, got %v", result.Level)
 	}
+	if result.Orientation == nil {
+		t.Fatal("expected Orientation to be set")
+	}
+	if result.Orientation.Summary != "user sent a message" {
+		t.Errorf("summary = %q", result.Orientation.Summary)
+	}
+	if result.Orientation.Matters {
+		t.Error("expected matters=false")
+	}
+	if result.Orientation.Reason != "routine chat" {
+		t.Errorf("reason = %q", result.Orientation.Reason)
+	}
 	if len(result.Actions) != 0 {
-		t.Errorf("expected 0 actions (Phase 1 signals path, does not execute), got %d", len(result.Actions))
+		t.Errorf("expected 0 actions from orient, got %d", len(result.Actions))
+	}
+	if result.StateDirty {
+		t.Error("expected StateDirty=false")
+	}
+	if calls := int(spy.calls.Load()); calls != 1 {
+		t.Errorf("expected 1 inference call, got %d", calls)
 	}
 }
 
-func TestScheduler_Enter_CommandSignalsLevelWithoutInference(t *testing.T) {
-	spy := newSpy("spy", "SHOULD NOT MATTER")
+func TestScheduler_Enter_CommandReturnsOrientation(t *testing.T) {
+	spy := newSpy("spy", `{"summary":"status requested","matters":true,"reason":"needs planning"}`)
 	log := logger.New(logger.DebugLevel, nil)
-	mindAPI := &enterMockAPI{s: &dollstate.DollState{}}
+	mindAPI := &enterMockAPI{s: &dollstate.DollState{
+		Identity: dollstate.Identity{CanonicalName: "TestDoll"},
+	}}
 	sched := New(spy, log, mindAPI)
 
 	result, err := sched.Enter(context.Background(), events.TypeCommand, "/status")
@@ -177,8 +209,26 @@ func TestScheduler_Enter_CommandSignalsLevelWithoutInference(t *testing.T) {
 	if result.Level != LevelOrient {
 		t.Errorf("expected LevelOrient for command, got %v", result.Level)
 	}
+	if result.Orientation == nil {
+		t.Fatal("expected Orientation to be set")
+	}
+	if !result.Orientation.Matters {
+		t.Error("expected matters=true for status command")
+	}
+	if result.Orientation.Summary != "status requested" {
+		t.Errorf("summary = %q", result.Orientation.Summary)
+	}
+	if result.Orientation.Reason != "needs planning" {
+		t.Errorf("reason = %q", result.Orientation.Reason)
+	}
 	if len(result.Actions) != 0 {
-		t.Errorf("expected 0 actions for command orient, got %d", len(result.Actions))
+		t.Errorf("expected 0 actions from command orient, got %d", len(result.Actions))
+	}
+	if result.StateDirty {
+		t.Error("expected StateDirty=false")
+	}
+	if calls := int(spy.calls.Load()); calls != 1 {
+		t.Errorf("expected 1 inference call, got %d", calls)
 	}
 }
 
@@ -186,15 +236,15 @@ func TestScheduler_Enter_CommandSignalsLevelWithoutInference(t *testing.T) {
 // Inference-never-called proof — both L0 paths
 // ──────────────────────────────────────────────
 
-func TestScheduler_Enter_InferenceNeverCalled(t *testing.T) {
-	// A single spy shared across both paths proves Enter never touches
-	// the inference provider regardless of the L0 decision.
-	spy := newSpy("spy", "SHOULD NEVER APPEAR")
+func TestScheduler_Enter_InferenceOnlyForPathOrient(t *testing.T) {
+	spy := newSpy("spy", `{"summary":"cognition needed","matters":true,"reason":"user interaction"}`)
 	log := logger.New(logger.DebugLevel, nil)
-	mindAPI := &enterMockAPI{s: &dollstate.DollState{}}
+	mindAPI := &enterMockAPI{s: &dollstate.DollState{
+		Identity: dollstate.Identity{CanonicalName: "TestDoll"},
+	}}
 	sched := New(spy, log, mindAPI)
 
-	// PathSleep — deterministic event
+	// PathSleep — deterministic, no inference
 	result, err := sched.Enter(context.Background(), events.TypePresence, "ping")
 	if err != nil {
 		t.Fatalf("Enter(sleep): %v", err)
@@ -202,8 +252,11 @@ func TestScheduler_Enter_InferenceNeverCalled(t *testing.T) {
 	if result.Level != LevelReflex {
 		t.Errorf("sleep path → LevelReflex, got %v", result.Level)
 	}
+	if result.Orientation != nil {
+		t.Error("expected nil Orientation for sleep")
+	}
 
-	// PathOrient — cognition-required event
+	// PathOrient — cognition-required, must call inference
 	result, err = sched.Enter(context.Background(), events.TypeMessage, "Hello!")
 	if err != nil {
 		t.Fatalf("Enter(orient): %v", err)
@@ -211,9 +264,15 @@ func TestScheduler_Enter_InferenceNeverCalled(t *testing.T) {
 	if result.Level != LevelOrient {
 		t.Errorf("orient path → LevelOrient, got %v", result.Level)
 	}
+	if result.Orientation == nil {
+		t.Fatal("expected Orientation for orient path")
+	}
+	if !result.Orientation.Matters {
+		t.Error("expected matters=true for user message")
+	}
 
-	if calls := spy.calls.Load(); calls != 0 {
-		t.Errorf("Infer called %d times via Enter; expected 0 — Phase 1 must not invoke inference", calls)
+	if calls := int(spy.calls.Load()); calls != 1 {
+		t.Errorf("expected exactly 1 inference call (orient path only), got %d", calls)
 	}
 }
 
