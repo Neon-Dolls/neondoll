@@ -13,7 +13,7 @@ const (
 func TestIntentionAllCanonicalFields(t *testing.T) {
 	it := IntentionItem{
 		ID:          sparkIntentionID,
-		Goal:        "Reconsider purpose and direction",
+		Subject:     "Reconsider purpose and direction",
 		Description: "Spark decided during L2 planning that this question deserves future attention.",
 		WakeTime:    sparkIntentionWakeTime,
 		State:       IntentionStatePending,
@@ -21,8 +21,8 @@ func TestIntentionAllCanonicalFields(t *testing.T) {
 	if it.ID != sparkIntentionID {
 		t.Errorf("expected ID %q, got %q", sparkIntentionID, it.ID)
 	}
-	if it.Goal != "Reconsider purpose and direction" {
-		t.Errorf("expected Goal %q, got %q", "Reconsider purpose and direction", it.Goal)
+	if it.Subject != "Reconsider purpose and direction" {
+		t.Errorf("expected Subject %q, got %q", "Reconsider purpose and direction", it.Subject)
 	}
 	if it.Description == "" {
 		t.Error("expected non-empty Description")
@@ -38,7 +38,7 @@ func TestIntentionAllCanonicalFields(t *testing.T) {
 func TestIntentionJSONRoundTrip(t *testing.T) {
 	original := IntentionItem{
 		ID:          sparkIntentionID,
-		Goal:        "Reconsider purpose and direction",
+		Subject:     "Reconsider purpose and direction",
 		Description: "Spark decided this deserves future attention.",
 		WakeTime:    sparkIntentionWakeTime,
 		State:       IntentionStatePending,
@@ -57,8 +57,8 @@ func TestIntentionJSONRoundTrip(t *testing.T) {
 	if restored.ID != original.ID {
 		t.Errorf("ID lost in round-trip: expected %q, got %q", original.ID, restored.ID)
 	}
-	if restored.Goal != original.Goal {
-		t.Errorf("Goal lost in round-trip: expected %q, got %q", original.Goal, restored.Goal)
+	if restored.Subject != original.Subject {
+		t.Errorf("Subject lost in round-trip: expected %q, got %q", original.Subject, restored.Subject)
 	}
 	if restored.Description != original.Description {
 		t.Errorf("Description lost in round-trip: expected %q, got %q", original.Description, restored.Description)
@@ -74,7 +74,7 @@ func TestIntentionJSONRoundTrip(t *testing.T) {
 func TestIntentionPendingExplicitlySerialized(t *testing.T) {
 	it := IntentionItem{
 		ID:       sparkIntentionID,
-		Goal:     "Reconsider purpose",
+		Subject:  "Reconsider purpose",
 		WakeTime: sparkIntentionWakeTime,
 		State:    IntentionStatePending,
 	}
@@ -98,9 +98,9 @@ func TestIntentionPendingExplicitlySerialized(t *testing.T) {
 		t.Errorf("expected wake_time=%q in JSON, got %v", sparkIntentionWakeTime, raw["wake_time"])
 	}
 
-	// Verify goal is present
-	if g, ok := raw["goal"].(string); !ok || g != "Reconsider purpose" {
-		t.Errorf("expected goal=\"Reconsider purpose\" in JSON, got %v", raw["goal"])
+	// Verify subject is present
+	if g, ok := raw["subject"].(string); !ok || g != "Reconsider purpose" {
+		t.Errorf("expected subject=\"Reconsider purpose\" in JSON, got %v", raw["subject"])
 	}
 
 	// Verify no non-portable runtime fields leak into JSON
@@ -116,7 +116,7 @@ func TestIntentionMinimalFields(t *testing.T) {
 	// An Intention with only required fields should serialize and deserialize cleanly.
 	it := IntentionItem{
 		ID:       "intention-minimal",
-		Goal:     "Minimal intention",
+		Subject:  "Minimal intention",
 		WakeTime: "2026-10-01T00:00:00Z",
 		State:    IntentionStatePending,
 	}
@@ -134,8 +134,8 @@ func TestIntentionMinimalFields(t *testing.T) {
 	if restored.ID != it.ID {
 		t.Errorf("ID: expected %q, got %q", it.ID, restored.ID)
 	}
-	if restored.Goal != it.Goal {
-		t.Errorf("Goal: expected %q, got %q", it.Goal, restored.Goal)
+	if restored.Subject != it.Subject {
+		t.Errorf("Subject: expected %q, got %q", it.Subject, restored.Subject)
 	}
 	if restored.WakeTime != it.WakeTime {
 		t.Errorf("WakeTime: expected %q, got %q", it.WakeTime, restored.WakeTime)
@@ -170,13 +170,13 @@ func TestMultipleIntentionsCoexist(t *testing.T) {
 		Items: []IntentionItem{
 			{
 				ID:       "intention-first",
-				Goal:     "First intention",
+				Subject:  "First intention",
 				WakeTime: "2026-10-01T00:00:00Z",
 				State:    IntentionStatePending,
 			},
 			{
 				ID:       "intention-second",
-				Goal:     "Second intention",
+				Subject:  "Second intention",
 				WakeTime: "2026-10-02T00:00:00Z",
 				State:    IntentionStatePending,
 			},
@@ -230,7 +230,7 @@ func TestIntentionsInDollStateRoundTrip(t *testing.T) {
 		Items: []IntentionItem{
 			{
 				ID:          sparkIntentionID,
-				Goal:        "Reconsider purpose and direction",
+				Subject:     "Reconsider purpose and direction",
 				Description: "Spark decided this deserves future attention.",
 				WakeTime:    sparkIntentionWakeTime,
 				State:       IntentionStatePending,
@@ -254,8 +254,8 @@ func TestIntentionsInDollStateRoundTrip(t *testing.T) {
 	if restored.Intentions.Items[0].ID != sparkIntentionID {
 		t.Errorf("Intention ID: expected %q, got %q", sparkIntentionID, restored.Intentions.Items[0].ID)
 	}
-	if restored.Intentions.Items[0].Goal != "Reconsider purpose and direction" {
-		t.Errorf("Intention Goal: expected %q, got %q", "Reconsider purpose and direction", restored.Intentions.Items[0].Goal)
+	if restored.Intentions.Items[0].Subject != "Reconsider purpose and direction" {
+		t.Errorf("Intention Subject: expected %q, got %q", "Reconsider purpose and direction", restored.Intentions.Items[0].Subject)
 	}
 	if restored.Intentions.Items[0].Description != "Spark decided this deserves future attention." {
 		t.Errorf("Intention Description mismatch")

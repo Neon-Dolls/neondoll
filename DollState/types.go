@@ -161,10 +161,10 @@ type Intentions struct {
 
 // IntentionItem represents a single future cognitive obligation.
 //
-// ID provides stable identity. Goal is what Spark intends to reconsider
-// or do cognitively. Description may carry why the Intention exists.
-// WakeTime is an RFC3339 UTC timestamp representing when this cognition
-// becomes due.
+// ID provides stable identity. Subject is what Spark intends to
+// reconsider or do cognitively. Description may carry why this
+// Intention exists. WakeTime is an RFC3339 UTC timestamp
+// representing when this cognition becomes due.
 //
 // State marks lifecycle explicitly. For Core 1, "pending" is the only
 // required state — it means the Intention exists and has not yet been
@@ -175,7 +175,7 @@ type Intentions struct {
 // semantic Doll State that survives without any particular Core runtime.
 type IntentionItem struct {
 	ID          string `json:"id"`
-	Goal        string `json:"goal"`
+	Subject     string `json:"subject"`
 	Description string `json:"description,omitempty"`
 	WakeTime    string `json:"wake_time"`
 	State       string `json:"state"`
