@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/Neon-Dolls/neondoll/Core/Inference"
+	"github.com/Neon-Dolls/neondoll/DollLink/Events"
 	"github.com/Neon-Dolls/neondoll/pkg/logger"
 	"github.com/Neon-Dolls/neondoll/DollState"
 )
@@ -64,6 +65,30 @@ type Scheduler struct {
 
 func New(provider inference.Provider, log *logger.Logger, mindAPI MindAPI) *Scheduler {
 	return &Scheduler{provider: provider, log: log, mindAPI: mindAPI}
+}
+
+// Enter is the cognition entry boundary.
+//
+// It runs L0 Reflex first to determine whether inference is needed.  If L0
+// returns PathSleep, a deterministic result (LevelReflex) is returned without
+// calling any inference provider.  If L0 returns PathOrient, execution is
+// delegated to the inference provider at LevelOrient.
+//
+// This method is the canonical entry point for Doll Mind cognition.  Callers
+// should prefer it over Run unless they have a specific reason to bypass L0.
+func (s *Scheduler) Enter(ctx context.Context, eventType events.Type, input string) (*Result, error) {
+	path := L0Reflex(eventType)
+
+	if path == PathSleep {
+		s.log.Info("cognition sleep — L0 handled deterministically",
+			map[string]any{"event_type": string(eventType)})
+		return &Result{
+			Level: LevelReflex,
+		}, nil
+	}
+
+	// PathOrient — delegate to inference at LevelOrient.
+	return s.Run(ctx, LevelOrient, input)
 }
 
 // Run executes a cognition cycle at the given level, always calling the provider.
