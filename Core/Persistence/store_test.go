@@ -993,10 +993,11 @@ func TestSparkGoalContinuity(t *testing.T) {
 	}
 	spark.Goals.Items = []dollstate.GoalItem{
 		{
-			ID:      "goal-continuity-001",
-			Name:    "prove goal continuity across persistence restart",
-			State:   dollstate.GoalStateActive,
-			DriveID: "drive-continuity-001",
+			ID:          "goal-continuity-001",
+			Name:        "prove goal continuity across persistence restart",
+			Description: "A persistence restart must not lose Spark's goals.",
+			State:       dollstate.GoalStateActive,
+			DriveID:     "drive-continuity-001",
 		},
 	}
 
@@ -1062,9 +1063,12 @@ func TestSparkGoalContinuity(t *testing.T) {
 		t.Errorf("Goal.ID = %q, want %q", loaded.Goals.Items[0].ID, "goal-continuity-001")
 	}
 
-	// 9. Every canonical Goal field preserved (Name, State).
+	// 9. Every canonical Goal field preserved (Name, Description, State).
 	if loaded.Goals.Items[0].Name != "prove goal continuity across persistence restart" {
 		t.Errorf("Goal.Name = %q, want %q", loaded.Goals.Items[0].Name, "prove goal continuity across persistence restart")
+	}
+	if loaded.Goals.Items[0].Description != "A persistence restart must not lose Spark's goals." {
+		t.Errorf("Goal.Description = %q, want %q", loaded.Goals.Items[0].Description, "A persistence restart must not lose Spark's goals.")
 	}
 	if loaded.Goals.Items[0].State != dollstate.GoalStateActive {
 		t.Errorf("Goal.State = %q, want %q", loaded.Goals.Items[0].State, dollstate.GoalStateActive)
