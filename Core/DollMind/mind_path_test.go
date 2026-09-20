@@ -337,10 +337,13 @@ func TestScheduler_Enter_InternalWake_OrientReturnsOrientation(t *testing.T) {
 	}}
 	sched := New(spy, log, mindAPI)
 
-	result, err := sched.Enter(context.Background(), events.TypeInternalWake,
-		"review goal progress — Time to check on active goals")
+	result, err := sched.EnterWake(context.Background(), events.IntentionWakePayload{
+		IntentionID: "wake-001",
+		Subject:     "review goal progress",
+		Description: "Time to check on active goals",
+	})
 	if err != nil {
-		t.Fatalf("Enter: %v", err)
+		t.Fatalf("EnterWake: %v", err)
 	}
 
 	if result.Level != LevelOrient {
@@ -358,6 +361,29 @@ func TestScheduler_Enter_InternalWake_OrientReturnsOrientation(t *testing.T) {
 	if calls := int(spy.calls.Load()); calls != 1 {
 		t.Errorf("expected 1 inference call (orient only), got %d", calls)
 	}
+
+	// Prove structured fields reached the cognition context
+	reqs := spy.capturedReqs()
+	if len(reqs) == 0 {
+		t.Fatal("no inference requests captured")
+	}
+	prompt := ""
+	for _, m := range reqs[0].Messages {
+		prompt += m.Content
+	}
+	for _, want := range []string{
+		"review goal progress",
+		"Time to check on active goals",
+		"wake-001",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("wake prompt should contain %q", want)
+		}
+	}
+	// Must not say "Event type: message"
+	if strings.Contains(prompt, "Event type: message") {
+		t.Error("orient prompt must not fabricate a message event type")
+	}
 }
 
 func TestScheduler_Enter_InternalWake_CascadeToL2(t *testing.T) {
@@ -368,10 +394,13 @@ func TestScheduler_Enter_InternalWake_CascadeToL2(t *testing.T) {
 	}}
 	sched := New(spy, log, mindAPI)
 
-	result, err := sched.Enter(context.Background(), events.TypeInternalWake,
-		"review goal progress — Time to check on active goals")
+	result, err := sched.EnterWake(context.Background(), events.IntentionWakePayload{
+		IntentionID: "wake-007",
+		Subject:     "review goal progress",
+		Description: "Time to check on active goals",
+	})
 	if err != nil {
-		t.Fatalf("Enter: %v", err)
+		t.Fatalf("EnterWake: %v", err)
 	}
 
 	if result.Level != LevelPlan {
@@ -406,10 +435,13 @@ func TestScheduler_Enter_InternalWake_NoHumanMessageFabricated(t *testing.T) {
 	}}
 	sched := New(spy, log, mindAPI)
 
-	_, err := sched.Enter(context.Background(), events.TypeInternalWake,
-		"review goals — Check active goals state")
+	_, err := sched.EnterWake(context.Background(), events.IntentionWakePayload{
+		IntentionID: "wake-ctx",
+		Subject:     "review goals",
+		Description: "Check active goals state",
+	})
 	if err != nil {
-		t.Fatalf("Enter: %v", err)
+		t.Fatalf("EnterWake: %v", err)
 	}
 
 	// Infer was called exactly once (orient only, matters=false)
@@ -433,6 +465,12 @@ func TestScheduler_Enter_InternalWake_NoHumanMessageFabricated(t *testing.T) {
 	// Must say "within your own mind" for self-origin
 	if !strings.Contains(sysPrompt, "within your own mind") {
 		t.Error("orient prompt must say 'within your own mind' for self-origin")
+	}
+	// Prove structured fields reach the context
+	for _, want := range []string{"review goals", "Check active goals state", "wake-ctx"} {
+		if !strings.Contains(sysPrompt, want) {
+			t.Errorf("wake prompt should contain %q", want)
+		}
 	}
 }
 

@@ -125,6 +125,22 @@ func (s *Scheduler) Enter(ctx context.Context, eventType events.Type, input stri
 	}
 }
 
+// EnterWake is the cognition entry boundary for internal wake events.
+//
+// It accepts a structured IntentionWakePayload and derives the
+// inference-facing text from its fields (Subject, Description, IntentionID),
+// freeing callers from having to manufacture an ad-hoc wake string.
+func (s *Scheduler) EnterWake(ctx context.Context, payload events.IntentionWakePayload) (*Result, error) {
+	text := payload.Subject
+	if payload.Description != "" {
+		text += "\n" + payload.Description
+	}
+	if payload.IntentionID != "" {
+		text += "\nIntentionID: " + payload.IntentionID
+	}
+	return s.Enter(ctx, events.TypeInternalWake, text)
+}
+
 // Run executes a cognition cycle at the given level, always calling the provider.
 func (s *Scheduler) Run(ctx context.Context, level Level, input string) (*Result, error) {
 	s.log.Info("cognition run starting",
