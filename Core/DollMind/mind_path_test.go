@@ -2,6 +2,7 @@ package dollmind
 
 import (
 	"context"
+	"sync/atomic"
 	"testing"
 
 	"github.com/Neon-Dolls/neondoll/Core/Inference"
@@ -11,11 +12,45 @@ import (
 )
 
 // ──────────────────────────────────────────────
+// spyProvider — call-counting inference spy
+// ──────────────────────────────────────────────
+
+// spyProvider records the number of Infer calls without making assertions.
+// Tests use spy.calls to prove the provider was (or was not) consulted.
+type spyProvider struct {
+	name     string
+	response string
+	calls    atomic.Int64
+}
+
+func newSpy(name, response string) *spyProvider {
+	return &spyProvider{name: name, response: response}
+}
+
+func (s *spyProvider) Infer(_ context.Context, _ inference.Request) (*inference.Response, error) {
+	s.calls.Add(1)
+	return &inference.Response{Content: s.response, TokensUsed: 1}, nil
+}
+
+func (s *spyProvider) Name() string             { return s.name }
+func (s *spyProvider) ID() inference.ProviderID { return inference.ProviderID("spy") }
+
+// ──────────────────────────────────────────────
+// enterMockAPI — minimal MindAPI for Scheduler test harness
+// ──────────────────────────────────────────────
+
+type enterMockAPI struct {
+	s *dollstate.DollState
+}
+
+func (m *enterMockAPI) Inference() inference.Provider { return nil }
+func (m *enterMockAPI) State() *dollstate.DollState   { return m.s }
+
+// ──────────────────────────────────────────────
 // L0Reflex — unit tests
 // ──────────────────────────────────────────────
 
 func TestL0Reflex_Deterministic(t *testing.T) {
-	// Same input must always produce the same output.
 	r1 := L0Reflex(events.TypeMessage)
 	r2 := L0Reflex(events.TypeMessage)
 	if r1 != r2 {
@@ -91,27 +126,16 @@ func TestMindPath_String(t *testing.T) {
 // Scheduler.Enter — integration with L0
 // ──────────────────────────────────────────────
 
-type enterMockAPI struct {
-	s *dollstate.DollState
-}
-
-func (m *enterMockAPI) Inference() inference.Provider { return nil }
-func (m *enterMockAPI) State() *dollstate.DollState   { return m.s }
-
-func TestScheduler_Enter_SleepNoInference(t *testing.T) {
-	// Arrange: a presence event — L0 must sleep without touching the provider.
-	provider := inference.NewMockProvider("mock", "SHOULD NOT BE CALLED")
+func TestScheduler_Enter_SleepNoActions(t *testing.T) {
+	spy := newSpy("spy", "SHOULD NOT MATTER")
 	log := logger.New(logger.DebugLevel, nil)
 	mindAPI := &enterMockAPI{s: &dollstate.DollState{}}
-	sched := New(provider, log, mindAPI)
+	sched := New(spy, log, mindAPI)
 
-	// Act: enter with a sleep event type.
 	result, err := sched.Enter(context.Background(), events.TypePresence, "hello")
 	if err != nil {
 		t.Fatalf("Enter: %v", err)
 	}
-
-	// Assert: LevelReflex, no actions.
 	if result.Level != LevelReflex {
 		t.Errorf("expected LevelReflex, got %v", result.Level)
 	}
@@ -120,51 +144,81 @@ func TestScheduler_Enter_SleepNoInference(t *testing.T) {
 	}
 }
 
-func TestScheduler_Enter_OrientCallsInference(t *testing.T) {
-	// Arrange: a message event — L0 says orient, so provider must be called.
-	provider := inference.NewMockProvider("mock", "Orient response")
+func TestScheduler_Enter_OrientSignalsLevelWithoutInference(t *testing.T) {
+	spy := newSpy("spy", "SHOULD NOT MATTER")
 	log := logger.New(logger.DebugLevel, nil)
 	mindAPI := &enterMockAPI{s: &dollstate.DollState{}}
-	sched := New(provider, log, mindAPI)
+	sched := New(spy, log, mindAPI)
 
 	result, err := sched.Enter(context.Background(), events.TypeMessage, "Hello, Spark!")
 	if err != nil {
 		t.Fatalf("Enter: %v", err)
 	}
 
+	// Must signal that L1 orientation is needed — NOT produce a response.
 	if result.Level != LevelOrient {
 		t.Errorf("expected LevelOrient, got %v", result.Level)
 	}
-	if len(result.Actions) == 0 {
-		t.Fatal("expected at least one action")
-	}
-	if result.Actions[0].Type != "respond" {
-		t.Errorf("expected action type 'respond', got %q", result.Actions[0].Type)
-	}
-	text, ok := result.Actions[0].Payload["text"].(string)
-	if !ok || text != "Orient response" {
-		t.Errorf("expected payload text 'Orient response', got %v", result.Actions[0].Payload["text"])
+	if len(result.Actions) != 0 {
+		t.Errorf("expected 0 actions (Phase 1 signals path, does not execute), got %d", len(result.Actions))
 	}
 }
 
-func TestScheduler_Enter_CommandOrients(t *testing.T) {
-	provider := inference.NewMockProvider("mock", "Command handled")
+func TestScheduler_Enter_CommandSignalsLevelWithoutInference(t *testing.T) {
+	spy := newSpy("spy", "SHOULD NOT MATTER")
 	log := logger.New(logger.DebugLevel, nil)
 	mindAPI := &enterMockAPI{s: &dollstate.DollState{}}
-	sched := New(provider, log, mindAPI)
+	sched := New(spy, log, mindAPI)
 
 	result, err := sched.Enter(context.Background(), events.TypeCommand, "/status")
 	if err != nil {
 		t.Fatalf("Enter: %v", err)
 	}
-
 	if result.Level != LevelOrient {
 		t.Errorf("expected LevelOrient for command, got %v", result.Level)
+	}
+	if len(result.Actions) != 0 {
+		t.Errorf("expected 0 actions for command orient, got %d", len(result.Actions))
 	}
 }
 
 // ──────────────────────────────────────────────
-// Existing Run still works unchanged
+// Inference-never-called proof — both L0 paths
+// ──────────────────────────────────────────────
+
+func TestScheduler_Enter_InferenceNeverCalled(t *testing.T) {
+	// A single spy shared across both paths proves Enter never touches
+	// the inference provider regardless of the L0 decision.
+	spy := newSpy("spy", "SHOULD NEVER APPEAR")
+	log := logger.New(logger.DebugLevel, nil)
+	mindAPI := &enterMockAPI{s: &dollstate.DollState{}}
+	sched := New(spy, log, mindAPI)
+
+	// PathSleep — deterministic event
+	result, err := sched.Enter(context.Background(), events.TypePresence, "ping")
+	if err != nil {
+		t.Fatalf("Enter(sleep): %v", err)
+	}
+	if result.Level != LevelReflex {
+		t.Errorf("sleep path → LevelReflex, got %v", result.Level)
+	}
+
+	// PathOrient — cognition-required event
+	result, err = sched.Enter(context.Background(), events.TypeMessage, "Hello!")
+	if err != nil {
+		t.Fatalf("Enter(orient): %v", err)
+	}
+	if result.Level != LevelOrient {
+		t.Errorf("orient path → LevelOrient, got %v", result.Level)
+	}
+
+	if calls := spy.calls.Load(); calls != 0 {
+		t.Errorf("Infer called %d times via Enter; expected 0 — Phase 1 must not invoke inference", calls)
+	}
+}
+
+// ──────────────────────────────────────────────
+// Legacy Run backward compat
 // ──────────────────────────────────────────────
 
 func TestEnterDoesNotBreakExistingRun(t *testing.T) {
@@ -173,7 +227,7 @@ func TestEnterDoesNotBreakExistingRun(t *testing.T) {
 	mindAPI := &enterMockAPI{s: &dollstate.DollState{}}
 	sched := New(provider, log, mindAPI)
 
-	// Existing Run API must still work.
+	// Existing Run API must still work — bypasses Enter entirely.
 	result, err := sched.Run(context.Background(), LevelReflex, "test legacy")
 	if err != nil {
 		t.Fatalf("Run: %v", err)

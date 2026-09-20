@@ -69,26 +69,31 @@ func New(provider inference.Provider, log *logger.Logger, mindAPI MindAPI) *Sche
 
 // Enter is the cognition entry boundary.
 //
-// It runs L0 Reflex first to determine whether inference is needed.  If L0
-// returns PathSleep, a deterministic result (LevelReflex) is returned without
-// calling any inference provider.  If L0 returns PathOrient, execution is
-// delegated to the inference provider at LevelOrient.
+// It runs L0 Reflex to determine whether inference is needed.  The method
+// stops at the L0 decision and NEVER calls the inference provider:
 //
-// This method is the canonical entry point for Doll Mind cognition.  Callers
-// should prefer it over Run unless they have a specific reason to bypass L0.
+//   - PathSleep  → LevelReflex result (deterministic, handled at L0).
+//   - PathOrient → LevelOrient result ("L1 orientation required").
+//
+// Phase 2 will implement L1 orientation; until then, Enter signals the path
+// without executing it.  Callers that need the legacy inference path should
+// use Run directly.
 func (s *Scheduler) Enter(ctx context.Context, eventType events.Type, input string) (*Result, error) {
 	path := L0Reflex(eventType)
 
-	if path == PathSleep {
+	switch path {
+	case PathSleep:
 		s.log.Info("cognition sleep — L0 handled deterministically",
 			map[string]any{"event_type": string(eventType)})
-		return &Result{
-			Level: LevelReflex,
-		}, nil
+		return &Result{Level: LevelReflex}, nil
+	case PathOrient:
+		s.log.Info("cognition blocked — L1 orientation required",
+			map[string]any{"event_type": string(eventType)})
+		return &Result{Level: LevelOrient}, nil
+	default:
+		// Defensive: unknown mind paths fall back to sleep.
+		return &Result{Level: LevelReflex}, nil
 	}
-
-	// PathOrient — delegate to inference at LevelOrient.
-	return s.Run(ctx, LevelOrient, input)
 }
 
 // Run executes a cognition cycle at the given level, always calling the provider.
