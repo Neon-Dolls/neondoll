@@ -13,6 +13,7 @@ type Purpose string
 
 const (
 	PurposeOrient  Purpose = "orient"  // L1: interpret situation, decide if it matters
+	PurposePlan    Purpose = "plan"    // L2: produce an actionable plan from orientation
 	PurposeRespond Purpose = "respond" // L2+: generate a response to the user/event
 )
 

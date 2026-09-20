@@ -50,6 +50,7 @@ type Result struct {
 	Actions     []Action
 	StateDirty  bool
 	Orientation *Orientation // set when Level is LevelOrient
+	Plan        *Plan        // set when Level is LevelPlan
 }
 
 // Action represents something the Doll should do.
@@ -74,8 +75,10 @@ func New(provider inference.Provider, log *logger.Logger, mindAPI MindAPI) *Sche
 // It runs L0 Reflex to determine whether inference is needed:
 //
 //   - PathSleep  → LevelReflex result (deterministic, handled at L0).
-//   - PathOrient → LevelOrient result with structured Orientation
-//                  produced by L1 Orient via the Inference Provider.
+//   - PathOrient → L1 Orient; if the event matters, L2 Plan produces a
+//                  structured plan. Returns LevelPlan when both L1 and L2
+//                  complete, LevelOrient when L1 decides the event does not
+//                  warrant planning.
 //
 // Enter does NOT mutate state.
 func (s *Scheduler) Enter(ctx context.Context, eventType events.Type, input string) (*Result, error) {
@@ -93,7 +96,17 @@ func (s *Scheduler) Enter(ctx context.Context, eventType events.Type, input stri
 		if err != nil {
 			return nil, fmt.Errorf("enter orient: %w", err)
 		}
-		return &Result{Level: LevelOrient, Orientation: orient}, nil
+		if !orient.Matters {
+			return &Result{Level: LevelOrient, Orientation: orient}, nil
+		}
+		// Event matters — proceed to L2 planning
+		s.log.Info("cognition plan — L2 planning requested",
+			map[string]any{"event_type": string(eventType), "orientation": orient.Summary})
+		plan, err := s.Plan(ctx, eventType, input, orient)
+		if err != nil {
+			return nil, fmt.Errorf("enter plan: %w", err)
+		}
+		return &Result{Level: LevelPlan, Orientation: orient, Plan: plan}, nil
 	default:
 		// Defensive: unknown mind paths fall back to sleep.
 		return &Result{Level: LevelReflex}, nil

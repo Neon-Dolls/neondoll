@@ -15,21 +15,31 @@ import (
 // spyProvider — call-counting inference spy
 // ──────────────────────────────────────────────
 
-// spyProvider records the number of Infer calls without making assertions.
-// Tests use spy.calls to prove the provider was (or was not) consulted.
+// spyProvider records the number of Infer calls and returns different
+// JSON depending on the request Purpose so the same spy works for both
+// L1 Orient and L2 Plan tests without manual per-test formatting.
 type spyProvider struct {
-	name     string
-	response string
-	calls    atomic.Int64
+	name       string
+	orientResp string
+	planResp   string
+	calls      atomic.Int64
 }
 
-func newSpy(name, response string) *spyProvider {
-	return &spyProvider{name: name, response: response}
+func newSpy(name, orientResp string) *spyProvider {
+	return &spyProvider{
+		name:       name,
+		orientResp: orientResp,
+		planResp:   `{"summary":"auto-generated plan","actions":[{"type":"respond","payload":{"text":"ok"}}]}`,
+	}
 }
 
-func (s *spyProvider) Infer(_ context.Context, _ inference.Request) (*inference.Response, error) {
+func (s *spyProvider) Infer(_ context.Context, req inference.Request) (*inference.Response, error) {
 	s.calls.Add(1)
-	return &inference.Response{Content: s.response, TokensUsed: 1}, nil
+	resp := s.orientResp
+	if req.Purpose == inference.PurposePlan {
+		resp = s.planResp
+	}
+	return &inference.Response{Content: resp, TokensUsed: 1}, nil
 }
 
 func (s *spyProvider) Name() string             { return s.name }
@@ -206,8 +216,8 @@ func TestScheduler_Enter_CommandReturnsOrientation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Enter: %v", err)
 	}
-	if result.Level != LevelOrient {
-		t.Errorf("expected LevelOrient for command, got %v", result.Level)
+	if result.Level != LevelPlan {
+		t.Errorf("expected LevelPlan for command (matters=true → cascades to L2), got %v", result.Level)
 	}
 	if result.Orientation == nil {
 		t.Fatal("expected Orientation to be set")
@@ -221,14 +231,26 @@ func TestScheduler_Enter_CommandReturnsOrientation(t *testing.T) {
 	if result.Orientation.Reason != "needs planning" {
 		t.Errorf("reason = %q", result.Orientation.Reason)
 	}
+	if result.Plan == nil {
+		t.Fatal("expected Plan to be set (matters=true → L2 cascade)")
+	}
+	if result.Plan.Summary != "auto-generated plan" {
+		t.Errorf("Plan.Summary = %q", result.Plan.Summary)
+	}
+	if len(result.Plan.Actions) != 1 {
+		t.Errorf("expected 1 Plan action, got %d", len(result.Plan.Actions))
+	}
+	if result.Plan.Actions[0].Type != "respond" {
+		t.Errorf("Plan action type = %q", result.Plan.Actions[0].Type)
+	}
 	if len(result.Actions) != 0 {
 		t.Errorf("expected 0 actions from command orient, got %d", len(result.Actions))
 	}
 	if result.StateDirty {
 		t.Error("expected StateDirty=false")
 	}
-	if calls := int(spy.calls.Load()); calls != 1 {
-		t.Errorf("expected 1 inference call, got %d", calls)
+	if calls := int(spy.calls.Load()); calls != 2 {
+		t.Errorf("expected 2 inference calls (orient + plan), got %d", calls)
 	}
 }
 
@@ -256,13 +278,14 @@ func TestScheduler_Enter_InferenceOnlyForPathOrient(t *testing.T) {
 		t.Error("expected nil Orientation for sleep")
 	}
 
-	// PathOrient — cognition-required, must call inference
+	// PathOrient — cognition-required, must call inference. Matters=true
+	// cascades through to L2 Plan.
 	result, err = sched.Enter(context.Background(), events.TypeMessage, "Hello!")
 	if err != nil {
 		t.Fatalf("Enter(orient): %v", err)
 	}
-	if result.Level != LevelOrient {
-		t.Errorf("orient path → LevelOrient, got %v", result.Level)
+	if result.Level != LevelPlan {
+		t.Errorf("orient path (matters=true) → LevelPlan, got %v", result.Level)
 	}
 	if result.Orientation == nil {
 		t.Fatal("expected Orientation for orient path")
@@ -270,9 +293,12 @@ func TestScheduler_Enter_InferenceOnlyForPathOrient(t *testing.T) {
 	if !result.Orientation.Matters {
 		t.Error("expected matters=true for user message")
 	}
+	if result.Plan == nil {
+		t.Fatal("expected Plan to be set via L2 cascade")
+	}
 
-	if calls := int(spy.calls.Load()); calls != 1 {
-		t.Errorf("expected exactly 1 inference call (orient path only), got %d", calls)
+	if calls := int(spy.calls.Load()); calls != 2 {
+		t.Errorf("expected exactly 2 inference calls (orient + plan), got %d", calls)
 	}
 }
 
