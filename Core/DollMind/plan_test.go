@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Neon-Dolls/neondoll/Core/Inference"
 	"github.com/Neon-Dolls/neondoll/DollLink/Events"
@@ -245,7 +246,7 @@ func TestPlan_NilOrientation(t *testing.T) {
 			Identity: dollstate.Identity{CanonicalName: "Spark"},
 		},
 	})
-	_, err := sched.Plan(context.Background(), events.TypeMessage, "hello", nil)
+	_, _, err := sched.Plan(context.Background(), events.TypeMessage, "hello", nil)
 	if err == nil {
 		t.Fatal("expected error for nil orientation")
 	}
@@ -267,7 +268,7 @@ func TestPlan_ReturnsPlan(t *testing.T) {
 		Reason:  "This is our next milestone, requires planning",
 	}
 
-	plan, err := sched.Plan(context.Background(), events.TypeMessage, "Phase 3 time!", orient)
+	plan, _, err := sched.Plan(context.Background(), events.TypeMessage, "Phase 3 time!", orient)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -326,7 +327,7 @@ func TestPlan_ContextIncludesOrientation(t *testing.T) {
 		Reason:  "Milestone work needs concrete actions and goals",
 	}
 
-	_, err := sched.Plan(context.Background(), events.TypeCommand, "/status", orient)
+	_, _, err := sched.Plan(context.Background(), events.TypeCommand, "/status", orient)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -359,7 +360,7 @@ func TestPlan_InvalidOutput(t *testing.T) {
 	})
 
 	orient := &Orientation{Summary: "test", Matters: true, Reason: "testing"}
-	_, err := sched.Plan(context.Background(), events.TypeMessage, "test", orient)
+	_, _, err := sched.Plan(context.Background(), events.TypeMessage, "test", orient)
 	if err == nil {
 		t.Fatal("expected error for invalid model output")
 	}
@@ -413,7 +414,7 @@ func TestPlan_ContinuityDriveAcceptance(t *testing.T) {
 		Reason:  "Session event requires awareness of current drives and goals",
 	}
 
-	plan, err := sched.Plan(context.Background(), events.TypeMessage, "Checking continuity", orient)
+	plan, _, err := sched.Plan(context.Background(), events.TypeMessage, "Checking continuity", orient)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -456,5 +457,202 @@ func TestPlan_ContinuityDriveAcceptance(t *testing.T) {
 	// There should be at least one observation
 	if len(plan.Observations) < 1 {
 		t.Error("expected at least one observation relating to drives or goals")
+	}
+}
+
+// ──────────────────────────────────────────────
+// Phase 3: Planning creates Intention tests
+// ──────────────────────────────────────────────
+
+func TestPlan_NoFutureCognition_NoIntention(t *testing.T) {
+	// Plan without request_future_cognition → no Intention, state not dirty
+	json := `{"summary":"acknowledge","observations":[],"should_reorient":false}`
+	provider := &orientTestProvider{response: json}
+	log := logger.New(logger.ErrorLevel, nil)
+	state := &dollstate.DollState{
+		Identity: dollstate.Identity{CanonicalName: "Spark"},
+	}
+	sched := New(provider, log, &orientMockAPI{state: state})
+
+	orient := &Orientation{
+		Summary: "user said hello",
+		Matters: true,
+		Reason:  "requires attention",
+	}
+
+	plan, dirty, err := sched.Plan(context.Background(), events.TypeMessage, "hello", orient)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Summary != "acknowledge" {
+		t.Errorf("summary = %q", plan.Summary)
+	}
+	if dirty {
+		t.Error("expected StateDirty=false when no future cognition requested")
+	}
+	if len(state.Intentions.Items) != 0 {
+		t.Errorf("expected 0 intentions, got %d", len(state.Intentions.Items))
+	}
+	if plan.RequestFutureCognition {
+		t.Error("plan should not have request_future_cognition set")
+	}
+}
+
+func TestPlan_FutureCognition_CreatesIntention(t *testing.T) {
+	wakeTime := "2035-06-15T14:30:00Z"
+	json := `{"summary":"need to reconsider later","observations":["something needs attention later"],"should_reorient":false,"request_future_cognition":true,"future_subject":"review Phase 4 progress","future_reason":"milestone deadline approaching","future_wake_time":"` + wakeTime + `"}`
+	provider := &orientTestProvider{response: json}
+	log := logger.New(logger.ErrorLevel, nil)
+	state := &dollstate.DollState{
+		Identity: dollstate.Identity{CanonicalName: "Spark"},
+	}
+	sched := New(provider, log, &orientMockAPI{state: state})
+
+	orient := &Orientation{
+		Summary: "Master discussed Phase 3 completion",
+		Matters: true,
+		Reason:  "needs decision about future attention",
+	}
+
+	plan, dirty, err := sched.Plan(context.Background(), events.TypeMessage, "Phase 3 done", orient)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !plan.RequestFutureCognition {
+		t.Error("expected request_future_cognition=true")
+	}
+	if plan.FutureSubject != "review Phase 4 progress" {
+		t.Errorf("FutureSubject = %q", plan.FutureSubject)
+	}
+	if plan.FutureReason != "milestone deadline approaching" {
+		t.Errorf("FutureReason = %q", plan.FutureReason)
+	}
+	if plan.FutureWakeTime != wakeTime {
+		t.Errorf("FutureWakeTime = %q, want %q", plan.FutureWakeTime, wakeTime)
+	}
+
+	if !dirty {
+		t.Error("expected StateDirty=true when intention created")
+	}
+
+	if len(state.Intentions.Items) != 1 {
+		t.Fatalf("expected 1 intention in state, got %d", len(state.Intentions.Items))
+	}
+
+	intention := state.Intentions.Items[0]
+	if intention.ID == "" {
+		t.Error("expected non-empty Intention ID")
+	}
+	if _, err := time.Parse(time.RFC3339, intention.WakeTime); err != nil {
+		t.Errorf("intention WakeTime is not valid RFC3339: %q — %v", intention.WakeTime, err)
+	}
+	if intention.Subject != "review Phase 4 progress" {
+		t.Errorf("intention Subject = %q", intention.Subject)
+	}
+	if intention.Description != "milestone deadline approaching" {
+		t.Errorf("intention Description = %q", intention.Description)
+	}
+	if intention.State != dollstate.IntentionStatePending {
+		t.Errorf("intention State = %q, want %q", intention.State, dollstate.IntentionStatePending)
+	}
+}
+
+func TestPlan_FutureCognition_MalformedWakeTime(t *testing.T) {
+	json := `{"summary":"bad wake","observations":[],"should_reorient":false,"request_future_cognition":true,"future_subject":"test","future_reason":"testing","future_wake_time":"not-a-timestamp"}`
+	provider := &orientTestProvider{response: json}
+	log := logger.New(logger.ErrorLevel, nil)
+	state := &dollstate.DollState{
+		Identity: dollstate.Identity{CanonicalName: "Spark"},
+	}
+	sched := New(provider, log, &orientMockAPI{state: state})
+
+	orient := &Orientation{
+		Summary: "test invalids",
+		Matters: true,
+		Reason:  "testing error handling",
+	}
+
+	_, _, err := sched.Plan(context.Background(), events.TypeMessage, "bad wake", orient)
+	if err == nil {
+		t.Fatal("expected error for malformed wake time")
+	}
+	if !strings.Contains(err.Error(), "future_wake_time") {
+		t.Errorf("error should mention future_wake_time, got: %v", err)
+	}
+
+	// No intention should be created
+	if len(state.Intentions.Items) != 0 {
+		t.Errorf("expected 0 intentions after parse failure, got %d", len(state.Intentions.Items))
+	}
+}
+
+func TestPlan_FutureCognition_PastWakeTime(t *testing.T) {
+	json := `{"summary":"past wake","observations":[],"should_reorient":false,"request_future_cognition":true,"future_subject":"test","future_reason":"testing","future_wake_time":"2000-01-01T00:00:00Z"}`
+	provider := &orientTestProvider{response: json}
+	log := logger.New(logger.ErrorLevel, nil)
+	state := &dollstate.DollState{
+		Identity: dollstate.Identity{CanonicalName: "Spark"},
+	}
+	sched := New(provider, log, &orientMockAPI{state: state})
+
+	orient := &Orientation{
+		Summary: "test past",
+		Matters: true,
+		Reason:  "testing past time rejection",
+	}
+
+	_, _, err := sched.Plan(context.Background(), events.TypeMessage, "past wake", orient)
+	if err == nil {
+		t.Fatal("expected error for past wake time")
+	}
+	if !strings.Contains(err.Error(), "not in the future") {
+		t.Errorf("error should mention 'not in the future', got: %v", err)
+	}
+
+	// No intention should be created
+	if len(state.Intentions.Items) != 0 {
+		t.Errorf("expected 0 intentions after past-time rejection, got %d", len(state.Intentions.Items))
+	}
+}
+
+func TestPlan_FutureCognition_PreservesMultipleIntentions(t *testing.T) {
+	// Verify that creating a new intention appends to existing intentions
+	wakeTime := "2035-06-15T14:30:00Z"
+	json := `{"summary":"second intention","observations":[],"should_reorient":false,"request_future_cognition":true,"future_subject":"check progress","future_reason":"scheduled review","future_wake_time":"` + wakeTime + `"}`
+	provider := &orientTestProvider{response: json}
+	log := logger.New(logger.ErrorLevel, nil)
+	state := &dollstate.DollState{
+		Identity: dollstate.Identity{CanonicalName: "Spark"},
+		Intentions: dollstate.Intentions{
+			Items: []dollstate.IntentionItem{
+				{ID: "existing-1", Subject: "original", WakeTime: "2035-01-01T00:00:00Z", State: dollstate.IntentionStatePending},
+			},
+		},
+	}
+	sched := New(provider, log, &orientMockAPI{state: state})
+
+	orient := &Orientation{
+		Summary: "append test",
+		Matters: true,
+		Reason:  "testing append behavior",
+	}
+
+	_, dirty, err := sched.Plan(context.Background(), events.TypeMessage, "append", orient)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !dirty {
+		t.Error("expected StateDirty=true")
+	}
+	if len(state.Intentions.Items) != 2 {
+		t.Fatalf("expected 2 intentions (1 existing + 1 new), got %d", len(state.Intentions.Items))
+	}
+	// Existing intention is preserved
+	if state.Intentions.Items[0].ID != "existing-1" {
+		t.Errorf("first intention should be the original, got ID %q", state.Intentions.Items[0].ID)
+	}
+	// New intention has the right subject
+	if state.Intentions.Items[1].Subject != "check progress" {
+		t.Errorf("new intention Subject = %q", state.Intentions.Items[1].Subject)
 	}
 }

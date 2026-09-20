@@ -6,8 +6,8 @@ import (
 
 	"github.com/Neon-Dolls/neondoll/Core/Inference"
 	"github.com/Neon-Dolls/neondoll/DollLink/Events"
-	"github.com/Neon-Dolls/neondoll/pkg/logger"
 	"github.com/Neon-Dolls/neondoll/DollState"
+	"github.com/Neon-Dolls/neondoll/pkg/logger"
 )
 
 // Level maps to the Doll Mind cognition hierarchy.
@@ -51,6 +51,10 @@ type Result struct {
 	StateDirty  bool
 	Orientation *Orientation // set when Level is LevelOrient
 	Plan        *Plan        // set when Level is LevelPlan
+
+	// CreatedIntention is set when L2 Plan materialised a pending Intention
+	// into Doll State during the cognition cycle.
+	CreatedIntention *dollstate.IntentionItem
 }
 
 // Action represents something the Doll should do.
@@ -80,7 +84,8 @@ func New(provider inference.Provider, log *logger.Logger, mindAPI MindAPI) *Sche
 //                  complete, LevelOrient when L1 decides the event does not
 //                  warrant planning.
 //
-// Enter does NOT mutate state.
+// Enter may mutate Doll State through L2 Plan when the plan requests
+// future cognition, materialising a pending Intention into state.
 func (s *Scheduler) Enter(ctx context.Context, eventType events.Type, input string) (*Result, error) {
 	path := L0Reflex(eventType)
 
@@ -102,11 +107,16 @@ func (s *Scheduler) Enter(ctx context.Context, eventType events.Type, input stri
 		// Event matters — proceed to L2 planning
 		s.log.Info("cognition plan — L2 planning requested",
 			map[string]any{"event_type": string(eventType), "orientation": orient.Summary})
-		plan, err := s.Plan(ctx, eventType, input, orient)
+		plan, dirty, err := s.Plan(ctx, eventType, input, orient)
 		if err != nil {
 			return nil, fmt.Errorf("enter plan: %w", err)
 		}
-		return &Result{Level: LevelPlan, Orientation: orient, Plan: plan}, nil
+		result := &Result{Level: LevelPlan, Orientation: orient, Plan: plan, StateDirty: dirty}
+		if dirty && len(s.mindAPI.State().Intentions.Items) > 0 {
+			items := s.mindAPI.State().Intentions.Items
+			result.CreatedIntention = &items[len(items)-1]
+		}
+		return result, nil
 	default:
 		// Defensive: unknown mind paths fall back to sleep.
 		return &Result{Level: LevelReflex}, nil

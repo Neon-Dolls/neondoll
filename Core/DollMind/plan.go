@@ -11,6 +11,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
+
+	"github.com/google/uuid"
 
 	"github.com/Neon-Dolls/neondoll/Core/Inference"
 	"github.com/Neon-Dolls/neondoll/DollLink/Events"
@@ -32,6 +35,14 @@ type Plan struct {
 	ProposedAction string   `json:"proposed_action"`  // semantic description of course of action
 	Observations   []string `json:"observations"`     // noticed things about goals, drives, context
 	ShouldReorient bool     `json:"should_reorient"`  // whether to re-evaluate later
+
+	// Future cognition — set when Spark decides that future cognitive
+	// attention is warranted. The Core materialises these into a pending
+	// IntentionItem in Doll State after parsing.
+	RequestFutureCognition bool   `json:"request_future_cognition"`
+	FutureSubject          string `json:"future_subject,omitempty"`
+	FutureReason           string `json:"future_reason,omitempty"`
+	FutureWakeTime         string `json:"future_wake_time,omitempty"`
 }
 
 // planJSON is the strictly parsed JSON shape expected from model output.
@@ -40,6 +51,11 @@ type planJSON struct {
 	ProposedAction string   `json:"proposed_action"`
 	Observations   []string `json:"observations"`
 	ShouldReorient bool     `json:"should_reorient"`
+
+	RequestFutureCognition bool   `json:"request_future_cognition"`
+	FutureSubject          string `json:"future_subject,omitempty"`
+	FutureReason           string `json:"future_reason,omitempty"`
+	FutureWakeTime         string `json:"future_wake_time,omitempty"`
 }
 
 // buildPlanPrompt constructs the full planning context from the Doll's
@@ -121,10 +137,14 @@ func buildPlanPrompt(state *dollstate.DollState, eventType events.Type, input st
   "summary": "what you think should happen next",
   "proposed_action": "semantic description of the course of action you recommend",
   "observations": ["relevant observation about goals, drives, or context", "another observation, if any"],
-  "should_reorient": false
+  "should_reorient": false,
+  "request_future_cognition": false,
+  "future_subject": "",
+  "future_reason": "",
+  "future_wake_time": ""
 }
 
-All fields are optional except "summary". "observations" may be empty. "should_reorient" indicates whether you want to re-evaluate this situation later. Describe what should happen semantically rather than issuing commands.`)
+All fields are optional except "summary". "observations" may be empty. "should_reorient" indicates whether you want to re-evaluate this situation later. "request_future_cognition" indicates whether future cognitive attention is warranted — set to true only when the Doll should specifically reconsider something at a future time. When true, "future_subject" describes what to reconsider, "future_reason" explains why, and "future_wake_time" is the RFC 3339 UTC timestamp when this cognition should occur. Describe what should happen semantically rather than issuing commands.`)
 
 	return strings.Join(parts, "\n\n")
 }
@@ -161,6 +181,11 @@ func parsePlan(raw string) (*Plan, error) {
 		ProposedAction: parsed.ProposedAction,
 		Observations:   parsed.Observations,
 		ShouldReorient: parsed.ShouldReorient,
+
+		RequestFutureCognition: parsed.RequestFutureCognition,
+		FutureSubject:          parsed.FutureSubject,
+		FutureReason:           parsed.FutureReason,
+		FutureWakeTime:         parsed.FutureWakeTime,
 	}, nil
 }
 
@@ -168,14 +193,16 @@ func parsePlan(raw string) (*Plan, error) {
 // canonical state, current event, and L1 orientation, then sends an inference
 // request with purpose "plan" and parses the structured plan output.
 //
-// Plan does NOT mutate state. The returned Plan is purely semantic — the
-// caller interprets what Spark thinks should happen next.
-func (s *Scheduler) Plan(ctx context.Context, eventType events.Type, input string, orientation *Orientation) (*Plan, error) {
+// Plan may mutate Doll State: when the parsed Plan requests future cognition,
+// Core validates the wake time and materialises a canonical pending
+// IntentionItem into the Doll's state. The boolean return indicates whether
+// state was mutated.
+func (s *Scheduler) Plan(ctx context.Context, eventType events.Type, input string, orientation *Orientation) (*Plan, bool, error) {
 	if s.mindAPI == nil {
-		return nil, fmt.Errorf("mind API not set: cannot access state")
+		return nil, false, fmt.Errorf("mind API not set: cannot access state")
 	}
 	if orientation == nil {
-		return nil, fmt.Errorf("plan requires a non-nil orientation")
+		return nil, false, fmt.Errorf("plan requires a non-nil orientation")
 	}
 
 	state := s.mindAPI.State()
@@ -190,12 +217,12 @@ func (s *Scheduler) Plan(ctx context.Context, eventType events.Type, input strin
 		Purpose:     inference.PurposePlan,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("plan inference: %w", err)
+		return nil, false, fmt.Errorf("plan inference: %w", err)
 	}
 
 	plan, err := parsePlan(resp.Content)
 	if err != nil {
-		return nil, fmt.Errorf("plan parse: %w", err)
+		return nil, false, fmt.Errorf("plan parse: %w", err)
 	}
 
 	s.log.Info("plan complete",
@@ -203,7 +230,64 @@ func (s *Scheduler) Plan(ctx context.Context, eventType events.Type, input strin
 			"event_type":       eventType,
 			"summary":          plan.Summary,
 			"should_reorient":  plan.ShouldReorient,
+			"request_future":   plan.RequestFutureCognition,
 		})
 
-	return plan, nil
+	dirty, err := s.materialiseIntention(plan)
+	if err != nil {
+		return nil, false, fmt.Errorf("plan intention: %w", err)
+	}
+	return plan, dirty, nil
+}
+
+// materialiseIntention converts a Plan's future cognition request into a
+// canonical pending IntentionItem stored in Doll State.
+//
+// It returns true if state was mutated, and an error if the intention request
+// is rejected. Validation rules:
+//   - RequestFutureCognition must be true
+//   - FutureSubject must be non-empty
+//   - FutureWakeTime must be a valid RFC 3339 timestamp in the future
+//
+// If validation fails, the intention is not created and an error is returned
+// so the caller can decide how to handle the rejected request.
+func (s *Scheduler) materialiseIntention(plan *Plan) (bool, error) {
+	if !plan.RequestFutureCognition {
+		return false, nil
+	}
+
+	// Validate subject
+	if plan.FutureSubject == "" {
+		return false, fmt.Errorf("intention rejected: future_subject is empty")
+	}
+
+	// Validate wake time
+	wakeTime, err := time.Parse(time.RFC3339, plan.FutureWakeTime)
+	if err != nil {
+		return false, fmt.Errorf("intention rejected: invalid future_wake_time %q: %w", plan.FutureWakeTime, err)
+	}
+	if !wakeTime.After(time.Now()) {
+		return false, fmt.Errorf("intention rejected: future_wake_time %q is not in the future", plan.FutureWakeTime)
+	}
+
+	// Create and store the canonical IntentionItem
+	intention := dollstate.IntentionItem{
+		ID:          uuid.New().String(),
+		Subject:     plan.FutureSubject,
+		Description: plan.FutureReason,
+		WakeTime:    plan.FutureWakeTime,
+		State:       dollstate.IntentionStatePending,
+	}
+
+	state := s.mindAPI.State()
+	state.Intentions.Items = append(state.Intentions.Items, intention)
+
+	s.log.Info("intention materialised",
+		map[string]any{
+			"id":        intention.ID,
+			"subject":   intention.Subject,
+			"wake_time": intention.WakeTime,
+		})
+
+	return true, nil
 }
