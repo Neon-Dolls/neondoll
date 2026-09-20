@@ -151,7 +151,8 @@ type SkillItem struct {
 
 // Intention lifecycle state constants.
 const (
-	IntentionStatePending = "pending"
+	IntentionStatePending   = "pending"
+	IntentionStateCompleted = "completed"
 )
 
 // Intentions — Spark's durable future cognitive obligations.
