@@ -967,3 +967,122 @@ func TestPrePhase2Migration(t *testing.T) {
 		t.Errorf("Second open: Goals.Items = %v, want nil", loaded2.Goals.Items)
 	}
 }
+
+// TestSparkGoalContinuity is the Phase 3 acceptance test.
+//
+//	Phase A: decode spark.dollcard → establish continuity Drive and test Goal
+//	         → SaveDoll → close Store A
+//	Phase B: new Store B (same DB, no card re-read) → LoadDoll(SparkID)
+//	         → continuity Drive and test Goal survive with 10+ assertions
+//
+// After the restart boundary the test MUST NOT reread the Doll Card.
+func TestSparkGoalContinuity(t *testing.T) {
+	path, cleanup := tempDB(t)
+	defer cleanup()
+
+	ctx := context.Background()
+
+	// === Phase A: Decode, set drives/goals, persist, close ===
+	spark := decodeSpark(t)
+	spark.Drives.Items = []dollstate.DriveItem{
+		{
+			ID:          "drive-continuity-001",
+			Name:        "maintain continuity",
+			Description: "Spark must maintain her identity, drives, and goals across persistence restarts to prove the NeonDoll architecture works correctly.",
+		},
+	}
+	spark.Goals.Items = []dollstate.GoalItem{
+		{
+			ID:      "goal-continuity-001",
+			Name:    "prove goal continuity across persistence restart",
+			State:   dollstate.GoalStateActive,
+			DriveID: "drive-continuity-001",
+		},
+	}
+
+	s1 := openStore(t, path)
+	if err := s1.SaveDoll(ctx, spark); err != nil {
+		t.Fatalf("SaveDoll (Phase A): %v", err)
+	}
+	if err := s1.Close(); err != nil {
+		t.Fatalf("Close (Phase A): %v", err)
+	}
+
+	// === Phase B: New store on the same DB — NO doll card re-read ===
+	s2 := openStore(t, path)
+	defer s2.Close()
+
+	loaded, err := s2.LoadDoll(ctx, spark.Identity.DollID)
+	if err != nil {
+		t.Fatalf("LoadDoll (Phase B): %v", err)
+	}
+
+	// ---- 11 Assertions ----
+
+	// 1. Stable DollID preserved.
+	if loaded.Identity.DollID != spark.Identity.DollID {
+		t.Errorf("DollID = %q, want %q", loaded.Identity.DollID, spark.Identity.DollID)
+	}
+
+	// 2. Drives.Items is non-nil (continuity Drive exists).
+	if loaded.Drives.Items == nil {
+		t.Fatal("Drives.Items is nil — continuity Drive lost")
+	}
+
+	// 3. Exactly 1 DriveItem.
+	if len(loaded.Drives.Items) != 1 {
+		t.Fatalf("Drives.Items = %d entries, want 1", len(loaded.Drives.Items))
+	}
+
+	// 4. Drive.ID matches the same semantic ID as before restart.
+	if loaded.Drives.Items[0].ID != "drive-continuity-001" {
+		t.Errorf("Drive.ID = %q, want %q", loaded.Drives.Items[0].ID, "drive-continuity-001")
+	}
+
+	// 5. Every canonical Drive field has the same semantic value.
+	if loaded.Drives.Items[0].Name != "maintain continuity" {
+		t.Errorf("Drive.Name = %q, want %q", loaded.Drives.Items[0].Name, "maintain continuity")
+	}
+	if loaded.Drives.Items[0].Description != spark.Drives.Items[0].Description {
+		t.Errorf("Drive.Description mismatch")
+	}
+
+	// 6. Goals.Items is non-nil (test Goal exists).
+	if loaded.Goals.Items == nil {
+		t.Fatal("Goals.Items is nil — test Goal lost")
+	}
+
+	// 7. Exactly 1 GoalItem.
+	if len(loaded.Goals.Items) != 1 {
+		t.Fatalf("Goals.Items = %d entries, want 1", len(loaded.Goals.Items))
+	}
+
+	// 8. Goal.ID matches the same semantic ID as before restart.
+	if loaded.Goals.Items[0].ID != "goal-continuity-001" {
+		t.Errorf("Goal.ID = %q, want %q", loaded.Goals.Items[0].ID, "goal-continuity-001")
+	}
+
+	// 9. Every canonical Goal field preserved (Name, State).
+	if loaded.Goals.Items[0].Name != "prove goal continuity across persistence restart" {
+		t.Errorf("Goal.Name = %q, want %q", loaded.Goals.Items[0].Name, "prove goal continuity across persistence restart")
+	}
+	if loaded.Goals.Items[0].State != dollstate.GoalStateActive {
+		t.Errorf("Goal.State = %q, want %q", loaded.Goals.Items[0].State, dollstate.GoalStateActive)
+	}
+
+	// 10. Goal-to-Drive relationship preserved.
+	if loaded.Goals.Items[0].DriveID != "drive-continuity-001" {
+		t.Errorf("Goal.DriveID = %q, want %q", loaded.Goals.Items[0].DriveID, "drive-continuity-001")
+	}
+
+	// 11. Core state also survived alongside drives/goals (supplementary check).
+	if loaded.Identity.CanonicalName != "Spark" {
+		t.Errorf("CanonicalName = %q, want %q", loaded.Identity.CanonicalName, "Spark")
+	}
+	if loaded.Soul.Content != spark.Soul.Content {
+		t.Errorf("Soul.Content mismatch")
+	}
+	if loaded.Owner.Content != spark.Owner.Content {
+		t.Errorf("Owner.Content mismatch")
+	}
+}
