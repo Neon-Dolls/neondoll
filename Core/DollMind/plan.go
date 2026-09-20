@@ -122,7 +122,11 @@ func buildPlanPrompt(state *dollstate.DollState, eventType events.Type, input st
 	}
 
 	// Event
-	parts = append(parts, "Event type: "+string(eventType)+"\nEvent: "+input)
+	if eventType == events.TypeInternalWake {
+		parts = append(parts, "An intention from within your own mind has become due.\n\n"+input)
+	} else {
+		parts = append(parts, "Event type: "+string(eventType)+"\nEvent: "+input)
+	}
 
 	// L1 orientation result
 	parts = append(parts, fmt.Sprintf(

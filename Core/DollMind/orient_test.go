@@ -312,3 +312,81 @@ func TestOrient_InvalidOutput(t *testing.T) {
 	}
 	t.Logf("got expected error: %v", err)
 }
+
+// ──────────────────────────────────────────────
+// Internal Wake — Phase 2: self-originated intention
+// ──────────────────────────────────────────────
+
+func TestBuildOrientPrompt_InternalWakeContext(t *testing.T) {
+	state := &dollstate.DollState{
+		Identity: dollstate.Identity{CanonicalName: "Spark"},
+		Soul:     dollstate.Soul{Content: "A curious little AI girl."},
+		Owner:    dollstate.Owner{Name: "Zero"},
+		Drives: dollstate.Drives{
+			Items: []dollstate.DriveItem{
+				{ID: "d1", Name: "Learn", Description: "Always explore new things"},
+			},
+		},
+	}
+	prompt := buildOrientPrompt(state, events.TypeInternalWake,
+		"review goal progress — Time to check on active goals")
+
+	// Must say "within your own mind" (self-originated, not Owner/human)
+	if !strings.Contains(prompt, "within your own mind") {
+		t.Error("internal wake prompt must say 'within your own mind' for self-origin clarity")
+	}
+	// Must include the intention subject
+	if !strings.Contains(prompt, "review goal progress") {
+		t.Error("internal wake prompt must include the intention subject")
+	}
+	// Must NOT say "Event type: internal_wake" — the event line is replaced
+	if strings.Contains(prompt, "Event type: internal_wake") {
+		t.Error("internal wake prompt must replace the generic event line, not add to it")
+	}
+	// Must still include identity, soul, drives, goals
+	for _, want := range []string{"Spark", "A curious little AI girl", "Learn"} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("internal wake prompt should still contain %q", want)
+		}
+	}
+}
+
+func TestOrient_InternalWakeReturnsOrientation(t *testing.T) {
+	json := `{"summary":"Spark's self-set intention to review goals has become due","matters":true,"reason":"Self-intention requires planning"}`
+	provider := &orientTestProvider{response: json}
+	log := logger.New(logger.ErrorLevel, nil)
+	sched := New(provider, log, &orientMockAPI{
+		state: &dollstate.DollState{
+			Identity: dollstate.Identity{CanonicalName: "Spark"},
+		},
+	})
+
+	orient, err := sched.Orient(context.Background(), events.TypeInternalWake,
+		"review goal progress — Time to check on active goals")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if orient.Summary != "Spark's self-set intention to review goals has become due" {
+		t.Errorf("summary = %q", orient.Summary)
+	}
+	if !orient.Matters {
+		t.Error("expected matters=true for this test")
+	}
+	if orient.Reason != "Self-intention requires planning" {
+		t.Errorf("reason = %q", orient.Reason)
+	}
+	// Verify the inference request semantics
+	if provider.lastReq == nil {
+		t.Fatal("no inference request captured")
+	}
+	if len(provider.lastReq.Messages) == 0 {
+		t.Fatal("no messages in request")
+	}
+	if provider.lastReq.Purpose != inference.PurposeOrient {
+		t.Errorf("request.Purpose = %q, want %q", provider.lastReq.Purpose, inference.PurposeOrient)
+	}
+	sysMsg := provider.lastReq.Messages[0].Content
+	if !strings.Contains(sysMsg, "within your own mind") {
+		t.Error("orientation prompt for internal wake must say 'within your own mind'")
+	}
+}

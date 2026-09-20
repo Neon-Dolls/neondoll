@@ -98,7 +98,13 @@ func buildOrientPrompt(state *dollstate.DollState, eventType events.Type, input 
 	}
 
 	// Event
-	parts = append(parts, "Event type: "+string(eventType)+"\nEvent: "+input)
+	var eventLine string
+	if eventType == events.TypeInternalWake {
+		eventLine = "An intention from within your own mind has become due.\n\n" + input
+	} else {
+		eventLine = "Event type: " + string(eventType) + "\nEvent: " + input
+	}
+	parts = append(parts, eventLine)
 
 	// Task instruction — purpose "orientation"
 	parts = append(parts, `Your task is ORIENTATION: interpret what is happening, decide whether it matters (requires further planning), and explain why. Return ONLY valid JSON with no markdown formatting or code blocks around it. Use this exact format: {"summary":"...","matters":true,"reason":"..."}`)

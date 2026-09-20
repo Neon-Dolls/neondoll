@@ -54,6 +54,9 @@ func L0Reflex(eventType events.Type) MindPath {
 		// Commands may have known-knowns, but without content inspection
 		// they belong to L1.
 		return PathOrient
+	case events.TypeInternalWake:
+		// A self-set intention has become due — Spark must reconsider it.
+		return PathOrient
 	default:
 		// Presence, system, and unknown events are handled deterministically
 		// at the Reflex layer without inference.

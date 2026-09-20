@@ -2,6 +2,7 @@ package dollmind
 
 import (
 	"context"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -23,6 +24,7 @@ type spyProvider struct {
 	orientResp string
 	planResp   string
 	calls      atomic.Int64
+	reqs       []inference.Request
 }
 
 func newSpy(name, orientResp string) *spyProvider {
@@ -33,8 +35,9 @@ func newSpy(name, orientResp string) *spyProvider {
 	}
 }
 
-func (s *spyProvider) Infer(_ context.Context, req inference.Request) (*inference.Response, error) {
+func (s *spyProvider) Infer(ctx context.Context, req inference.Request) (*inference.Response, error) {
 	s.calls.Add(1)
+	s.reqs = append(s.reqs, req)
 	resp := s.orientResp
 	if req.Purpose == inference.PurposePlan {
 		resp = s.planResp
@@ -42,7 +45,9 @@ func (s *spyProvider) Infer(_ context.Context, req inference.Request) (*inferenc
 	return &inference.Response{Content: resp, TokensUsed: 1}, nil
 }
 
-func (s *spyProvider) Name() string             { return s.name }
+func (s *spyProvider) capturedReqs() []inference.Request {
+	return s.reqs
+}
 func (s *spyProvider) ID() inference.ProviderID { return inference.ProviderID("spy") }
 
 // ──────────────────────────────────────────────
@@ -104,9 +109,25 @@ func TestL0Reflex_UnknownHandledWithoutInference(t *testing.T) {
 	}
 }
 
+func TestL0Reflex_InternalWakeRequiresCognition(t *testing.T) {
+	path := L0Reflex(events.TypeInternalWake)
+	if path != PathOrient {
+		t.Errorf("TypeInternalWake → %v, want PathOrient", path)
+	}
+}
+
+func TestL0Reflex_InternalWakeDeterministic(t *testing.T) {
+	// Internal wake must be as deterministic as any other event
+	r1 := L0Reflex(events.TypeInternalWake)
+	r2 := L0Reflex(events.TypeInternalWake)
+	if r1 != r2 {
+		t.Fatal("L0Reflex(TypeInternalWake) is not deterministic")
+	}
+}
+
 func TestL0Reflex_StructuredResult(t *testing.T) {
 	// MindPath is a typed constant — not free-form prose.
-	paths := []MindPath{L0Reflex(events.TypeMessage), L0Reflex(events.TypePresence)}
+	paths := []MindPath{L0Reflex(events.TypeMessage), L0Reflex(events.TypePresence), L0Reflex(events.TypeInternalWake)}
 	for i, p := range paths {
 		switch p {
 		case PathSleep, PathOrient:
@@ -303,6 +324,117 @@ func TestScheduler_Enter_InferenceOnlyForPathOrient(t *testing.T) {
 // ──────────────────────────────────────────────
 // Legacy Run backward compat
 // ──────────────────────────────────────────────
+
+// ──────────────────────────────────────────────
+// Internal Wake — Phase 2: self-originated intention
+// ──────────────────────────────────────────────
+
+func TestScheduler_Enter_InternalWake_OrientReturnsOrientation(t *testing.T) {
+	spy := newSpy("spy", `{"summary":"Spark's own intention has become due","matters":false,"reason":"self-check"}`)
+	log := logger.New(logger.DebugLevel, nil)
+	mindAPI := &enterMockAPI{s: &dollstate.DollState{
+		Identity: dollstate.Identity{CanonicalName: "TestDoll"},
+	}}
+	sched := New(spy, log, mindAPI)
+
+	result, err := sched.Enter(context.Background(), events.TypeInternalWake,
+		"review goal progress — Time to check on active goals")
+	if err != nil {
+		t.Fatalf("Enter: %v", err)
+	}
+
+	if result.Level != LevelOrient {
+		t.Errorf("expected LevelOrient for matters=false wake, got %v", result.Level)
+	}
+	if result.Orientation == nil {
+		t.Fatal("expected Orientation to be set")
+	}
+	if result.Orientation.Matters {
+		t.Error("expected matters=false")
+	}
+	if result.StateDirty {
+		t.Error("expected StateDirty=false")
+	}
+	if calls := int(spy.calls.Load()); calls != 1 {
+		t.Errorf("expected 1 inference call (orient only), got %d", calls)
+	}
+}
+
+func TestScheduler_Enter_InternalWake_CascadeToL2(t *testing.T) {
+	spy := newSpy("spy", `{"summary":"intention requires planning","matters":true,"reason":"wake intention needs action"}`)
+	log := logger.New(logger.DebugLevel, nil)
+	mindAPI := &enterMockAPI{s: &dollstate.DollState{
+		Identity: dollstate.Identity{CanonicalName: "TestDoll"},
+	}}
+	sched := New(spy, log, mindAPI)
+
+	result, err := sched.Enter(context.Background(), events.TypeInternalWake,
+		"review goal progress — Time to check on active goals")
+	if err != nil {
+		t.Fatalf("Enter: %v", err)
+	}
+
+	if result.Level != LevelPlan {
+		t.Errorf("expected LevelPlan for matters=true wake → L2 cascade, got %v", result.Level)
+	}
+	if result.Orientation == nil {
+		t.Fatal("expected Orientation to be set")
+	}
+	if !result.Orientation.Matters {
+		t.Error("expected matters=true")
+	}
+	if result.Orientation.Summary != "intention requires planning" {
+		t.Errorf("summary = %q", result.Orientation.Summary)
+	}
+	if result.Plan == nil {
+		t.Fatal("expected Plan to be set (matters=true → L2 cascade)")
+	}
+	if result.Plan.Summary != "acknowledge and continue" {
+		t.Errorf("Plan.Summary = %q", result.Plan.Summary)
+	}
+	if calls := int(spy.calls.Load()); calls != 2 {
+		t.Errorf("expected 2 inference calls (orient + plan), got %d", calls)
+	}
+}
+
+func TestScheduler_Enter_InternalWake_NoHumanMessageFabricated(t *testing.T) {
+	spy := newSpy("spy", `{"summary":"internal wake","matters":false,"reason":"routine"}`)
+	log := logger.New(logger.DebugLevel, nil)
+	mindAPI := &enterMockAPI{s: &dollstate.DollState{
+		Identity: dollstate.Identity{CanonicalName: "TestDoll"},
+		Owner:    dollstate.Owner{Name: "Zero"},
+	}}
+	sched := New(spy, log, mindAPI)
+
+	_, err := sched.Enter(context.Background(), events.TypeInternalWake,
+		"review goals — Check active goals state")
+	if err != nil {
+		t.Fatalf("Enter: %v", err)
+	}
+
+	// Infer was called exactly once (orient only, matters=false)
+	if calls := int(spy.calls.Load()); calls != 1 {
+		t.Errorf("expected 1 inference call, got %d", calls)
+	}
+	// The orient prompt must not fabricate a human message
+	sysPrompt := ""
+	for _, call := range spy.capturedReqs() {
+		for _, m := range call.Messages {
+			sysPrompt += m.Content
+		}
+	}
+	if sysPrompt == "" {
+		t.Fatal("no inference requests captured")
+	}
+	// Must not say "Event type: message" — should be internal_wake context
+	if strings.Contains(sysPrompt, "Event type: message") {
+		t.Error("orient prompt must not fabricate a message event type")
+	}
+	// Must say "within your own mind" for self-origin
+	if !strings.Contains(sysPrompt, "within your own mind") {
+		t.Error("orient prompt must say 'within your own mind' for self-origin")
+	}
+}
 
 func TestEnterDoesNotBreakExistingRun(t *testing.T) {
 	provider := inference.NewMockProvider("mock", "Legacy response")

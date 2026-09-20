@@ -6,11 +6,12 @@ import "time"
 type Type string
 
 const (
-	TypeMessage  Type = "message"
-	TypeCommand  Type = "command"
-	TypeSystem   Type = "system"
-	TypePresence Type = "presence"
-	TypeUnknown  Type = "unknown"
+	TypeMessage      Type = "message"
+	TypeCommand      Type = "command"
+	TypeSystem       Type = "system"
+	TypePresence     Type = "presence"
+	TypeInternalWake Type = "internal_wake"
+	TypeUnknown      Type = "unknown"
 )
 
 // Event is the generic inbound event envelope.
@@ -50,6 +51,14 @@ type SystemPayload struct {
 type PresencePayload struct {
 	UserID string `json:"user_id"`
 	Status string `json:"status"`
+}
+
+// IntentionWakePayload for internal wake events — a pending Intention
+// has become due and Spark should reconsider it.
+type IntentionWakePayload struct {
+	IntentionID string `json:"intention_id"`
+	Subject     string `json:"subject"`
+	Description string `json:"description,omitempty"`
 }
 
 // New creates an Event with the current timestamp.
@@ -119,6 +128,8 @@ func ParseType(s string) Type {
 		return TypeSystem
 	case "presence":
 		return TypePresence
+	case "internal_wake":
+		return TypeInternalWake
 	default:
 		return TypeUnknown
 	}
