@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/Neon-Dolls/neondoll/Core/Inference"
 	"github.com/Neon-Dolls/neondoll/Core/Persistence"
@@ -916,5 +917,268 @@ func TestEnterDoesNotBreakExistingRun(t *testing.T) {
 	text, ok := result.Actions[0].Payload["text"].(string)
 	if !ok || text != "Legacy response" {
 		t.Errorf("expected 'Legacy response', got %v", result.Actions[0].Payload["text"])
+	}
+}
+
+// ──────────────────────────────────────────────
+// Phase 4 — Restart Reconstructs Future Wake
+// ──────────────────────────────────────────────
+
+// TestPhase4_RestartReconstructsFutureWake proves that after a genuine
+// persistence restart, Core reconstructs the pending obligation from the
+// loaded Doll State, discovers it when the deterministic reference time
+// advances, dispatches internal wake cognition, persists the consumed
+// state, and does not treat the fulfilled Intention as pending work on a
+// subsequent restart.
+//
+// Acceptance path:
+//   pending future-wake → persist → Store.Close → new Store → LoadDoll →
+//   reconstructed Scheduler knows future Intention → advance refTime →
+//   DueIntentions → EnterWake → cognition marks Completed → persist →
+//   Store.Close → new Store → LoadDoll → DueIntentions returns nothing
+//
+// Two genuine close/reopen cycles prove that:
+//   - Intention identity and semantic fields survive the first restart
+//   - Lifecycle state (Completed) survives the second restart
+//   - No retained state pointer crosses either boundary
+//   - Inference is initiated by internal_wake, not a fabricated message
+func TestPhase4_RestartReconstructsFutureWake(t *testing.T) {
+	path, cleanup := tempDB(t)
+	defer cleanup()
+
+	refTime := time.Date(2035, 6, 15, 12, 0, 0, 0, time.UTC)
+	futureWake := "2035-06-15T14:00:00Z" // 2 hours after refTime
+
+	// ─── Session 1: seed Spark with a future-wake Intention ───
+
+	store1, err := persistence.NewStore(path)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+
+	initState := &dollstate.DollState{
+		Identity: dollstate.Identity{
+			CanonicalName: "Spark",
+			DollID:        "spark-phase4",
+		},
+		Intentions: dollstate.Intentions{
+			Items: []dollstate.IntentionItem{{
+				ID:          "p4-wake-001",
+				Subject:     "rethink purpose",
+				Description: "A future wake to reconsider direction",
+				WakeTime:    futureWake,
+				State:       dollstate.IntentionStatePending,
+			}},
+		},
+	}
+	if err := store1.SaveDoll(context.Background(), initState); err != nil {
+		t.Fatalf("SaveDoll (initial): %v", err)
+	}
+
+	// Verify: at refTime the Intention is NOT due (wake is in the future)
+	var currentTime = refTime
+	spy1 := newSpy("spy",
+		`{"summary":"rethink","matters":false,"reason":"all good"}`)
+	log := logger.New(logger.DebugLevel, nil)
+	mindAPI1 := &persistBackedAPI{state: initState, store: store1}
+	sched1 := &Scheduler{
+		provider:     spy1,
+		log:          log,
+		mindAPI:      mindAPI1,
+		timeProvider: func() time.Time { return currentTime },
+	}
+
+	due, err := sched1.DueIntentions()
+	if err != nil {
+		t.Fatalf("DueIntentions (session 1): %v", err)
+	}
+	if len(due) != 0 {
+		t.Errorf("expected no due intentions (wake in future), got %d", len(due))
+	}
+
+	// Persist and close — genuine persistence boundary. No state retained.
+	if err := store1.Close(); err != nil {
+		t.Fatalf("Close store1: %v", err)
+	}
+
+	// ─── Session 2: reopen, reconstruct obligation, advance time, wake ───
+
+	store2, err := persistence.NewStore(path)
+	if err != nil {
+		t.Fatalf("NewStore (reopen): %v", err)
+	}
+
+	// LoadDoll — the only way to get state back; no pointer/copy from before.
+	reloaded, err := store2.LoadDoll(context.Background(), "spark-phase4")
+	if err != nil {
+		t.Fatalf("LoadDoll (session 2): %v", err)
+	}
+
+	// Prove Intention identity and semantic fields survived the first restart
+	if len(reloaded.Intentions.Items) != 1 {
+		t.Fatalf("expected 1 intention after reload, got %d",
+			len(reloaded.Intentions.Items))
+	}
+	it := reloaded.Intentions.Items[0]
+	if it.ID != "p4-wake-001" {
+		t.Errorf("Intention ID: expected %q, got %q", "p4-wake-001", it.ID)
+	}
+	if it.Subject != "rethink purpose" {
+		t.Errorf("Intention Subject: expected %q, got %q", "rethink purpose", it.Subject)
+	}
+	if it.Description != "A future wake to reconsider direction" {
+		t.Errorf("Intention Description: expected %q, got %q",
+			"A future wake to reconsider direction", it.Description)
+	}
+	if it.WakeTime != futureWake {
+		t.Errorf("Intention WakeTime: expected %q, got %q", futureWake, it.WakeTime)
+	}
+	if it.State != dollstate.IntentionStatePending {
+		t.Errorf("Intention State: expected Pending, got %s", it.State)
+	}
+
+	// Reconstruct the runtime obligation: new Scheduler with loaded state.
+	spy2 := newSpy("spy",
+		`{"summary":"rethink","matters":false,"reason":"all good"}`)
+	mindAPI2 := &persistBackedAPI{state: reloaded, store: store2}
+
+	sched2 := &Scheduler{
+		provider:     spy2,
+		log:          log,
+		mindAPI:      mindAPI2,
+		timeProvider: func() time.Time { return currentTime },
+	}
+
+	// Step A: reference time still at refTime (12:00) — intention is NOT due
+	due, err = sched2.DueIntentions()
+	if err != nil {
+		t.Fatalf("DueIntentions (session 2, before time advance): %v", err)
+	}
+	if len(due) != 0 {
+		t.Errorf("expected 0 due (wake at %s, ref at 12:00), got %d",
+			futureWake, len(due))
+	}
+
+	// Step B: advance reference time past the wake time → Intention becomes due
+	currentTime = time.Date(2035, 6, 15, 15, 0, 0, 0, time.UTC)
+
+	due, err = sched2.DueIntentions()
+	if err != nil {
+		t.Fatalf("DueIntentions (session 2, after time advance): %v", err)
+	}
+	if len(due) != 1 {
+		t.Fatalf("expected 1 due intention after time advance, got %d", len(due))
+	}
+	if due[0].ID != "p4-wake-001" {
+		t.Errorf("due intention ID: expected %q, got %q", "p4-wake-001", due[0].ID)
+	}
+
+	// Step C: wake Spark for this due Intention
+	result, err := sched2.EnterWake(context.Background(), events.IntentionWakePayload{
+		IntentionID: due[0].ID,
+		Subject:     due[0].Subject,
+		Description: due[0].Description,
+	})
+	if err != nil {
+		t.Fatalf("EnterWake: %v", err)
+	}
+	if result.Level != LevelOrient {
+		t.Errorf("expected LevelOrient, got %v", result.Level)
+	}
+
+	// Prove inference was initiated by internal Intention wake, not a human message
+	sysPrompt := ""
+	for _, call := range spy2.capturedReqs() {
+		for _, m := range call.Messages {
+			sysPrompt += m.Content
+		}
+	}
+	if sysPrompt == "" {
+		t.Fatal("no inference requests captured — wake did not enter cognition")
+	}
+	if strings.Contains(sysPrompt, "Event type: message") {
+		t.Error("orient prompt must not fabricate a message event type")
+	}
+	if !strings.Contains(sysPrompt, "within your own mind") {
+		t.Error("orient prompt must say 'within your own mind' for self-origin")
+	}
+	// Prove structured Intention fields reach the cognition context
+	for _, want := range []string{"p4-wake-001", "rethink purpose", "A future wake to reconsider direction"} {
+		if !strings.Contains(sysPrompt, want) {
+			t.Errorf("wake prompt should contain Intention field %q", want)
+		}
+	}
+
+	// Verify Intention is Completed in memory
+	var intention *dollstate.IntentionItem
+	for i := range reloaded.Intentions.Items {
+		if reloaded.Intentions.Items[i].ID == "p4-wake-001" {
+			intention = &reloaded.Intentions.Items[i]
+			break
+		}
+	}
+	if intention == nil {
+		t.Fatal("intention p4-wake-001 must exist in state after wake")
+	}
+	if intention.State != dollstate.IntentionStateCompleted {
+		t.Errorf("after wake: expected Completed, got %s", intention.State)
+	}
+	if intention.WakeTime != futureWake {
+		t.Errorf("WakeTime must be preserved after completion, got %q", intention.WakeTime)
+	}
+
+	// Persist consumed state and close
+	if err := store2.Close(); err != nil {
+		t.Fatalf("Close store2: %v", err)
+	}
+
+	// ─── Session 3: second reopen — fulfilled Intention is not pending work ───
+
+	store3, err := persistence.NewStore(path)
+	if err != nil {
+		t.Fatalf("NewStore (third session): %v", err)
+	}
+	defer store3.Close()
+
+	reloaded2, err := store3.LoadDoll(context.Background(), "spark-phase4")
+	if err != nil {
+		t.Fatalf("LoadDoll (session 3): %v", err)
+	}
+
+	mindAPI3 := &persistBackedAPI{state: reloaded2, store: store3}
+	sched3 := &Scheduler{
+		provider:     spy2,
+		log:          log,
+		mindAPI:      mindAPI3,
+		timeProvider: func() time.Time { return currentTime },
+	}
+
+	// The fulfilled Intention must be Completed and not returned by DueIntentions
+	var after *dollstate.IntentionItem
+	for i := range reloaded2.Intentions.Items {
+		if reloaded2.Intentions.Items[i].ID == "p4-wake-001" {
+			after = &reloaded2.Intentions.Items[i]
+			break
+		}
+	}
+	if after == nil {
+		t.Fatal("intention p4-wake-001 must still exist after second restart")
+	}
+	if after.State != dollstate.IntentionStateCompleted {
+		t.Errorf("after second restart: expected Completed, got %s", after.State)
+	}
+	if after.WakeTime != futureWake {
+		t.Errorf("WakeTime preserved across second restart: expected %q, got %q",
+			futureWake, after.WakeTime)
+	}
+
+	due, err = sched3.DueIntentions()
+	if err != nil {
+		t.Fatalf("DueIntentions (session 3): %v", err)
+	}
+	for _, d := range due {
+		if d.ID == "p4-wake-001" {
+			t.Error("fulfilled Intention must not be returned by DueIntentions")
+		}
 	}
 }
