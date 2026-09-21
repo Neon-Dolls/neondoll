@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"sort"
 	"strings"
 
 	"github.com/Neon-Dolls/neondoll/DollState"
@@ -176,27 +177,39 @@ func decodeZip(zr *zip.Reader) (*dollstate.DollState, error) {
 	return &state, nil
 }
 
-// decodeMemories reads all memories/memories-*.jsonl segment files and returns
-// the combined Memories, or nil if no memory segments exist.
+// decodeMemories reads all memories/memories-*.jsonl segment files in
+// lexicographic filename order (per Doll Card v1 contract) and returns the
+// combined Memories, or nil if no memory segments exist.
 func decodeMemories(files map[string][]byte) (*dollstate.Memories, error) {
-	var items []dollstate.MemoryItem
-	for name, data := range files {
+	// Collect and sort segment names — map iteration is nondeterministic.
+	var segNames []string
+	for name := range files {
 		if strings.HasPrefix(name, "memories/") && strings.HasSuffix(name, ".jsonl") {
-			scanner := bufio.NewScanner(bytes.NewReader(data))
-			for scanner.Scan() {
-				line := strings.TrimSpace(scanner.Text())
-				if line == "" {
-					continue
-				}
-				var item dollstate.MemoryItem
-				if err := json.Unmarshal([]byte(line), &item); err != nil {
-					return nil, fmt.Errorf("dollcard: %q: %w", name, err)
-				}
-				items = append(items, item)
+			segNames = append(segNames, name)
+		}
+	}
+	if segNames == nil {
+		return nil, nil
+	}
+	sort.Strings(segNames)
+
+	var items []dollstate.MemoryItem
+	for _, name := range segNames {
+		data := files[name]
+		scanner := bufio.NewScanner(bytes.NewReader(data))
+		for scanner.Scan() {
+			line := strings.TrimSpace(scanner.Text())
+			if line == "" {
+				continue
 			}
-			if err := scanner.Err(); err != nil {
-				return nil, fmt.Errorf("dollcard: %q: scanner: %w", name, err)
+			var item dollstate.MemoryItem
+			if err := json.Unmarshal([]byte(line), &item); err != nil {
+				return nil, fmt.Errorf("dollcard: %q: %w", name, err)
 			}
+			items = append(items, item)
+		}
+		if err := scanner.Err(); err != nil {
+			return nil, fmt.Errorf("dollcard: %q: scanner: %w", name, err)
 		}
 	}
 	if items == nil {

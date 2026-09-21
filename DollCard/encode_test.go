@@ -229,6 +229,77 @@ func TestRoundTrip_EncodeDecode(t *testing.T) {
 	}
 }
 
+// TestDecodeMultiSegment_Ordering proves that memories/memories-*.jsonl segments
+// are consumed in lexicographic filename order, not ZIP insertion order.
+//
+// The ZIP is constructed with segments inserted in reverse numeric order
+// (000003 → 000002 → 000001). Decode must return items in filename order
+// (000001 → 000002 → 000003).
+func TestDecodeMultiSegment_Ordering(t *testing.T) {
+	// Build a ZIP with segments inserted in REVERSE order.
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+
+	addSeg := func(name, content string) {
+		w, err := zw.Create(name)
+		if err != nil {
+			t.Fatalf("create %q: %v", name, err)
+		}
+		if _, err := w.Write([]byte(content)); err != nil {
+			t.Fatalf("write %q: %v", name, err)
+		}
+	}
+
+	// card.json, identity.json, soul.md, owner/owner.md — minimal required files.
+	addSeg("card.json", `{"version":1}`)
+	addSeg("identity.json", `{"doll_id":"test","canonical_name":"OrderTest"}`)
+	addSeg("soul.md", "# Test\n\nOrder test.")
+	addSeg("owner/owner.md", "# Owner\n\nTester.")
+
+	// Insert memory segments in REVERSE numeric order.
+	addSeg("memories/memories-000003.jsonl", `{"id":"mem-3","interaction_id":"i3","kind":"test","content":"Segment 3","sequence":3,"timestamp":"2026-01-01T00:00:03Z"}`+"\n")
+	addSeg("memories/memories-000002.jsonl", `{"id":"mem-2","interaction_id":"i2","kind":"test","content":"Segment 2","sequence":2,"timestamp":"2026-01-01T00:00:02Z"}`+"\n")
+	addSeg("memories/memories-000001.jsonl", `{"id":"mem-1","interaction_id":"i1","kind":"test","content":"Segment 1","sequence":1,"timestamp":"2026-01-01T00:00:01Z"}`+"\n")
+
+	if err := zw.Close(); err != nil {
+		t.Fatalf("close ZIP: %v", err)
+	}
+
+	// Decode the ZIP.
+	decoded, err := DecodeFromReader(bytes.NewReader(buf.Bytes()), int64(buf.Len()))
+	if err != nil {
+		t.Fatalf("DecodeFromReader: %v", err)
+	}
+
+	// Must have 3 memories.
+	if len(decoded.Memories.Items) != 3 {
+		t.Fatalf("got %d memories, want 3", len(decoded.Memories.Items))
+	}
+
+	// Items must be in FILENAME order (000001 → 000002 → 000003), not
+	// insertion order (000003 → 000002 → 000001).
+	if decoded.Memories.Items[0].ID != "mem-1" {
+		t.Errorf("Item[0].ID = %q, want mem-1 (should be from first segment in filename order)", decoded.Memories.Items[0].ID)
+	}
+	if decoded.Memories.Items[0].Content != "Segment 1" {
+		t.Errorf("Item[0].Content = %q, want Segment 1", decoded.Memories.Items[0].Content)
+	}
+	if decoded.Memories.Items[1].ID != "mem-2" {
+		t.Errorf("Item[1].ID = %q, want mem-2", decoded.Memories.Items[1].ID)
+	}
+	if decoded.Memories.Items[2].ID != "mem-3" {
+		t.Errorf("Item[2].ID = %q, want mem-3", decoded.Memories.Items[2].ID)
+	}
+
+	// Verify sequence numbers are in order.
+	for i, item := range decoded.Memories.Items {
+		wantSeq := i + 1
+		if item.Sequence != wantSeq {
+			t.Errorf("Item[%d].Sequence = %d, want %d", i, item.Sequence, wantSeq)
+		}
+	}
+}
+
 // TestMemoryIsJSONL proves AC10: Memory is represented as JSONL in the Card,
 // not as a dump of the Core persistence JSON/SQLite representation.
 func TestMemoryIsJSONL(t *testing.T) {

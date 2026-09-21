@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"strings"
 
 	"github.com/Neon-Dolls/neondoll/DollState"
 )
@@ -17,7 +16,6 @@ import (
 // runtime fields, database IDs, or scheduler machinery.
 func Encode(state *dollstate.DollState, dst io.Writer) error {
 	zw := zip.NewWriter(dst)
-	defer zw.Close()
 
 	// ── card.json — format version ──
 	if err := writeJSON(zw, "card.json", cardHeader{Version: currentCardVersion}); err != nil {
@@ -81,7 +79,8 @@ func Encode(state *dollstate.DollState, dst io.Writer) error {
 		}
 	}
 
-	return nil
+	// Close (finalise) the ZIP — discard deferred close so errors are surfaced.
+	return zw.Close()
 }
 
 // writeJSON marshals v and writes it as a file entry in the ZIP.
@@ -144,27 +143,4 @@ func EncodeToBytes(state *dollstate.DollState) ([]byte, error) {
 		return nil, err
 	}
 	return buf.Bytes(), nil
-}
-
-// decodeFileNames returns the set of ZIP entry names normalised to forward slashes
-// with leading slashes trimmed, and their contents.
-func decodeFileNames(zr *zip.Reader) (map[string][]byte, error) {
-	files := make(map[string][]byte, len(zr.File))
-	for _, f := range zr.File {
-		name := strings.TrimLeft(strings.ReplaceAll(f.Name, "\\", "/"), "/")
-		if f.FileInfo().IsDir() {
-			continue
-		}
-		rc, err := f.Open()
-		if err != nil {
-			return nil, fmt.Errorf("dollcard: read %q: %w", name, err)
-		}
-		data, err := io.ReadAll(rc)
-		rc.Close()
-		if err != nil {
-			return nil, fmt.Errorf("dollcard: read %q: %w", name, err)
-		}
-		files[name] = data
-	}
-	return files, nil
 }
