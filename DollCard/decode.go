@@ -2,6 +2,8 @@ package dollcard
 
 import (
 	"archive/zip"
+	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -37,9 +39,8 @@ func DecodeFromReader(r io.ReaderAt, size int64) (*dollstate.DollState, error) {
 	return decodeZip(zr)
 }
 
-// decodeZip is the shared implementation for both public Decode functions.
-func decodeZip(zr *zip.Reader) (*dollstate.DollState, error) {
-	// Index files by name (normalised to forward slashes).
+// indexZIP extracts and normalises all file entries from a ZIP reader.
+func indexZIP(zr *zip.Reader) (map[string][]byte, error) {
 	files := make(map[string][]byte, len(zr.File))
 	for _, f := range zr.File {
 		name := strings.TrimLeft(strings.ReplaceAll(f.Name, "\\", "/"), "/")
@@ -56,6 +57,15 @@ func decodeZip(zr *zip.Reader) (*dollstate.DollState, error) {
 			return nil, fmt.Errorf("dollcard: read %q: %w", name, err)
 		}
 		files[name] = data
+	}
+	return files, nil
+}
+
+// decodeZip is the shared implementation for both public Decode functions.
+func decodeZip(zr *zip.Reader) (*dollstate.DollState, error) {
+	files, err := indexZIP(zr)
+	if err != nil {
+		return nil, err
 	}
 
 	// Validate required files exist.
@@ -78,6 +88,7 @@ func decodeZip(zr *zip.Reader) (*dollstate.DollState, error) {
 	type identityFields struct {
 		DollID        string `json:"doll_id"`
 		CanonicalName string `json:"canonical_name"`
+		TemplateRef   string `json:"template_ref,omitempty"`
 	}
 	ident, err := parseJSON[identityFields](files["identity.json"])
 	if err != nil {
@@ -102,11 +113,12 @@ func decodeZip(zr *zip.Reader) (*dollstate.DollState, error) {
 		return nil, fmt.Errorf("dollcard: owner/owner.md: empty")
 	}
 
-	// Build DollState.
+	// Build DollState with required fields.
 	state := dollstate.NewDollState()
 	state.Identity = dollstate.Identity{
 		DollID:        ident.DollID,
 		CanonicalName: ident.CanonicalName,
+		TemplateRef:   ident.TemplateRef,
 	}
 	state.Soul = dollstate.Soul{
 		Revision: 1,
@@ -116,7 +128,81 @@ func decodeZip(zr *zip.Reader) (*dollstate.DollState, error) {
 		Content: ownerContent,
 	}
 
+	// 5. self/self.json — optional structured Self.
+	if data, ok := files["self/self.json"]; ok {
+		self, err := parseJSON[dollstate.Self](data)
+		if err != nil {
+			return nil, fmt.Errorf("dollcard: self/self.json: %w", err)
+		}
+		state.Self = self
+	}
+
+	// 6. memories/memories-*.jsonl — optional Memory items as JSONL.
+	memories, err := decodeMemories(files)
+	if err != nil {
+		return nil, err
+	}
+	if memories != nil {
+		state.Memories = *memories
+	}
+
+	// 7. drives/drives.json — optional Drives.
+	if data, ok := files["drives/drives.json"]; ok {
+		drives, err := parseJSON[dollstate.Drives](data)
+		if err != nil {
+			return nil, fmt.Errorf("dollcard: drives/drives.json: %w", err)
+		}
+		state.Drives = drives
+	}
+
+	// 8. goals/goals.json — optional Goals.
+	if data, ok := files["goals/goals.json"]; ok {
+		goals, err := parseJSON[dollstate.Goals](data)
+		if err != nil {
+			return nil, fmt.Errorf("dollcard: goals/goals.json: %w", err)
+		}
+		state.Goals = goals
+	}
+
+	// 9. intentions/intentions.json — optional Intentions.
+	if data, ok := files["intentions/intentions.json"]; ok {
+		intentions, err := parseJSON[dollstate.Intentions](data)
+		if err != nil {
+			return nil, fmt.Errorf("dollcard: intentions/intentions.json: %w", err)
+		}
+		state.Intentions = intentions
+	}
+
 	return &state, nil
+}
+
+// decodeMemories reads all memories/memories-*.jsonl segment files and returns
+// the combined Memories, or nil if no memory segments exist.
+func decodeMemories(files map[string][]byte) (*dollstate.Memories, error) {
+	var items []dollstate.MemoryItem
+	for name, data := range files {
+		if strings.HasPrefix(name, "memories/") && strings.HasSuffix(name, ".jsonl") {
+			scanner := bufio.NewScanner(bytes.NewReader(data))
+			for scanner.Scan() {
+				line := strings.TrimSpace(scanner.Text())
+				if line == "" {
+					continue
+				}
+				var item dollstate.MemoryItem
+				if err := json.Unmarshal([]byte(line), &item); err != nil {
+					return nil, fmt.Errorf("dollcard: %q: %w", name, err)
+				}
+				items = append(items, item)
+			}
+			if err := scanner.Err(); err != nil {
+				return nil, fmt.Errorf("dollcard: %q: scanner: %w", name, err)
+			}
+		}
+	}
+	if items == nil {
+		return nil, nil
+	}
+	return &dollstate.Memories{Items: items}, nil
 }
 
 // parseJSON unmarshals data into T from raw bytes.
