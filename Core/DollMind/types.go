@@ -66,6 +66,25 @@ type Action struct {
 	Payload map[string]any
 }
 
+// ActionKind identifies the kind of outbound action Spark may propose.
+// Each kind maps to a deterministic Core-mapped action in Doll Link.
+type ActionKind string
+
+const (
+	// ActionKindSendText means Spark wants to send text content to
+	// a connected Body / client through Doll Link.
+	ActionKindSendText ActionKind = "send_text"
+)
+
+// OutboundAction is a purely semantic proposal of an action Spark wants
+// to take. It does NOT contain transport details, connection IDs,
+// WebSocket frames, or implementation specifics — those are Core's
+// responsibility to resolve in Phase 2.
+type OutboundAction struct {
+	Kind    ActionKind `json:"kind"`
+	Content string     `json:"content"`
+}
+
 // Scheduler manages cognition cycles.
 type Scheduler struct {
 	provider     inference.Provider

@@ -43,6 +43,12 @@ type Plan struct {
 	FutureSubject          string `json:"future_subject,omitempty"`
 	FutureReason           string `json:"future_reason,omitempty"`
 	FutureWakeTime         string `json:"future_wake_time,omitempty"`
+
+	// OutboundAction is an optional semantic proposal of an action Spark
+	// wants to take. nil means no action is proposed. When set, the Core
+	// validates the action kind and maps it to a deterministic Doll Link
+	// action — see Phase 2.
+	OutboundAction *OutboundAction `json:"outbound_action,omitempty"`
 }
 
 // planJSON is the strictly parsed JSON shape expected from model output.
@@ -56,6 +62,16 @@ type planJSON struct {
 	FutureSubject          string `json:"future_subject,omitempty"`
 	FutureReason           string `json:"future_reason,omitempty"`
 	FutureWakeTime         string `json:"future_wake_time,omitempty"`
+
+	OutboundAction *outboundActionJSON `json:"outbound_action,omitempty"`
+}
+
+// outboundActionJSON is the raw JSON shape for strict parsing before
+// validation. Kind uses string (not ActionKind) so malformed kinds
+// survive JSON decode and are caught by parsePlan validation.
+type outboundActionJSON struct {
+	Kind    string `json:"kind"`
+	Content string `json:"content"`
 }
 
 // buildPlanPrompt constructs the full planning context from the Doll's
@@ -145,10 +161,21 @@ func buildPlanPrompt(state *dollstate.DollState, eventType events.Type, input st
   "request_future_cognition": false,
   "future_subject": "",
   "future_reason": "",
-  "future_wake_time": ""
+  "future_wake_time": "",
+  "outbound_action": null
 }
 
-All fields are optional except "summary". "observations" may be empty. "should_reorient" indicates whether you want to re-evaluate this situation later. "request_future_cognition" indicates whether future cognitive attention is warranted — set to true only when the Doll should specifically reconsider something at a future time. When true, "future_subject" describes what to reconsider, "future_reason" explains why, and "future_wake_time" is the RFC 3339 UTC timestamp when this cognition should occur. Describe what should happen semantically rather than issuing commands.`)
+All fields are optional except "summary". "observations" may be empty. "should_reorient" indicates whether you want to re-evaluate this situation later. "request_future_cognition" indicates whether future cognitive attention is warranted — set to true only when the Doll should specifically reconsider something at a future time. When true, "future_subject" describes what to reconsider, "future_reason" explains why, and "future_wake_time" is the RFC 3339 UTC timestamp when this cognition should occur.
+
+"outbound_action" is an optional field used when you want to initiate an outbound action to your connected Body/client. When set, it must be an object with:
+  - "kind": the action type, currently only "send_text" is supported
+  - "content": the text content of the action (required for "send_text")
+
+Examples:
+  {"outbound_action": null}
+  {"outbound_action": {"kind": "send_text", "content": "Hello world"}}
+
+If you do not want to take any outbound action, omit the field or set it to null. Describe what should happen semantically rather than issuing commands.`)
 
 	return strings.Join(parts, "\n\n")
 }
@@ -180,7 +207,7 @@ func parsePlan(raw string) (*Plan, error) {
 		parsed.Observations = []string{}
 	}
 
-	return &Plan{
+	plan := &Plan{
 		Summary:        parsed.Summary,
 		ProposedAction: parsed.ProposedAction,
 		Observations:   parsed.Observations,
@@ -190,7 +217,26 @@ func parsePlan(raw string) (*Plan, error) {
 		FutureSubject:          parsed.FutureSubject,
 		FutureReason:           parsed.FutureReason,
 		FutureWakeTime:         parsed.FutureWakeTime,
-	}, nil
+	}
+
+	// Validate outbound_action if present
+	if parsed.OutboundAction != nil {
+		switch parsed.OutboundAction.Kind {
+		case string(ActionKindSendText):
+			if parsed.OutboundAction.Content == "" {
+				return nil, fmt.Errorf("outbound action kind %q requires non-empty content", ActionKindSendText)
+			}
+		default:
+			return nil, fmt.Errorf("unsupported outbound action kind: %q", parsed.OutboundAction.Kind)
+		}
+
+		plan.OutboundAction = &OutboundAction{
+			Kind:    ActionKind(parsed.OutboundAction.Kind),
+			Content: parsed.OutboundAction.Content,
+		}
+	}
+
+	return plan, nil
 }
 
 // Plan executes L2 planning: it constructs a full context from the Doll's

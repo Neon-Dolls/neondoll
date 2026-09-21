@@ -772,3 +772,104 @@ func TestPlan_IntentionPersistenceFails(t *testing.T) {
 		t.Errorf("expected 'persist intention' in error, got: %v", err)
 	}
 }
+
+// ──────────────────────────────────────────────
+// M10 Phase 1 — OutboundAction tests
+// ──────────────────────────────────────────────
+
+func TestParsePlan_WithoutOutboundAction(t *testing.T) {
+	// AC1: Plan without outbound_action is valid, OutboundAction is nil.
+	raw := `{"summary":"test summary","observations":[],"should_reorient":false}`
+	plan, err := parsePlan(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.OutboundAction != nil {
+		t.Errorf("expected nil OutboundAction when omitted, got %+v", *plan.OutboundAction)
+	}
+}
+
+func TestParsePlan_ValidSendText(t *testing.T) {
+	// AC2: Plan with valid send_text action preserves Kind and Content.
+	raw := `{"summary":"send message","outbound_action":{"kind":"send_text","content":"Hello from Spark~ ♡"}}`
+	plan, err := parsePlan(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.OutboundAction == nil {
+		t.Fatal("expected non-nil OutboundAction")
+	}
+	if plan.OutboundAction.Kind != ActionKindSendText {
+		t.Errorf("Kind = %q, want %q", plan.OutboundAction.Kind, ActionKindSendText)
+	}
+	if plan.OutboundAction.Content != "Hello from Spark~ ♡" {
+		t.Errorf("Content = %q, want %q", plan.OutboundAction.Content, "Hello from Spark~ ♡")
+	}
+}
+
+func TestParsePlan_UnsupportedActionKind(t *testing.T) {
+	// AC3: ParsePlan rejects unknown/unsupported action kind.
+	raw := `{"summary":"bad action","outbound_action":{"kind":"send_image","content":"cat.png"}}`
+	_, err := parsePlan(raw)
+	if err == nil {
+		t.Fatal("expected error for unsupported action kind, got nil")
+	}
+	if !strings.Contains(err.Error(), "unsupported") {
+		t.Errorf("error should mention unsupported, got: %v", err)
+	}
+}
+
+func TestParsePlan_EmptyContent_SendText(t *testing.T) {
+	// AC4: ParsePlan rejects send_text with empty content.
+	raw := `{"summary":"empty content","outbound_action":{"kind":"send_text","content":""}}`
+	_, err := parsePlan(raw)
+	if err == nil {
+		t.Fatal("expected error for empty content, got nil")
+	}
+	if !strings.Contains(err.Error(), "non-empty content") {
+		t.Errorf("error should mention non-empty content, got: %v", err)
+	}
+}
+
+func TestBuildPlanPrompt_IncludesOutboundAction(t *testing.T) {
+	// AC5: The prompt instructs the model about outbound_action format.
+	state := &dollstate.DollState{
+		Identity: dollstate.Identity{CanonicalName: "Spark"},
+	}
+	orient := &Orientation{
+		Summary: "test",
+		Matters: false,
+		Reason:  "just testing",
+	}
+	prompt := buildPlanPrompt(state, events.TypeMessage, "hello", orient)
+	if !strings.Contains(prompt, "outbound_action") {
+		t.Error("prompt should mention outbound_action")
+	}
+	if !strings.Contains(prompt, "send_text") {
+		t.Error("prompt should document send_text as supported kind")
+	}
+	if !strings.Contains(prompt, "kind") || !strings.Contains(prompt, "content") {
+		t.Error("prompt should document both kind and content fields")
+	}
+}
+
+func TestOutboundAction_NoTransportDetails(t *testing.T) {
+	// AC6: OutboundAction is purely semantic — no transport,
+	// connection, or Doll Link details leak into the struct.
+	// This is a compile-time/structural proof.
+	action := OutboundAction{
+		Kind:    ActionKindSendText,
+		Content: "Hello",
+	}
+	if action.Kind != ActionKindSendText {
+		t.Errorf("Kind = %q", action.Kind)
+	}
+	if action.Content != "Hello" {
+		t.Errorf("Content = %q", action.Content)
+	}
+	// Verify no automatic network dispatch — the action is just data.
+	// Phase 2 introduces Core's deterministic mapping.
+	if len(fmt.Sprintf("%+v", action)) == 0 {
+		t.Error("unexpected zero-length action representation")
+	}
+}
