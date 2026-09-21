@@ -1182,3 +1182,98 @@ func TestPhase4_RestartReconstructsFutureWake(t *testing.T) {
 		}
 	}
 }
+
+// ──────────────────────────────────────────────
+// M10 Phase 2 — Enter dispatch error boundary
+// ──────────────────────────────────────────────
+
+// dispatcherSpy implements Dispatcher with a configurable error.
+type dispatcherSpy struct {
+	err error
+}
+
+func (d *dispatcherSpy) Dispatch(_ context.Context, _ OutboundAction) error {
+	return d.err
+}
+
+// TestEnter_OutboundActionDispatchFailure proves that when L2 Plan produces
+// an OutboundAction and the Dispatcher returns an error, Enter() returns a
+// wrapped non-nil error through the normal error boundary — not a nil-error
+// result with a buried field.
+func TestEnter_OutboundActionDispatchFailure(t *testing.T) {
+	spy := newSpy("spy",
+		`{"summary":"send message","matters":true,"reason":"needs to act"}`,
+	)
+	// Override plan response to include an outbound_action
+	spy.planResp = `{"summary":"send","observations":[],"outbound_action":{"kind":"send_text","content":"Hello"}}`
+
+	log := logger.New(logger.DebugLevel, nil)
+	mindAPI := &enterMockAPI{s: &dollstate.DollState{Identity: dollstate.Identity{CanonicalName: "TestDoll"}}}
+	disp := &dispatcherSpy{err: fmt.Errorf("connection lost")}
+
+	sched := New(spy, log, mindAPI, WithDispatcher(disp))
+
+	_, err := sched.Enter(context.Background(), events.TypeMessage, "Hello")
+	if err == nil {
+		t.Fatal("expected non-nil error when dispatch fails, got nil")
+	}
+	if !strings.Contains(err.Error(), "enter dispatch") {
+		t.Errorf("error must wrap 'enter dispatch', got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "connection lost") {
+		t.Errorf("error must contain original dispatch error, got: %v", err)
+	}
+}
+
+// TestEnter_OutboundActionDispatchSuccess proves that when dispatch succeeds,
+// Enter() returns a successful result (LevelPlan) with no error.
+func TestEnter_OutboundActionDispatchSuccess(t *testing.T) {
+	spy := newSpy("spy",
+		`{"summary":"send message","matters":true,"reason":"needs to act"}`,
+	)
+	spy.planResp = `{"summary":"send","observations":[],"outbound_action":{"kind":"send_text","content":"Hello"}}`
+
+	log := logger.New(logger.DebugLevel, nil)
+	mindAPI := &enterMockAPI{s: &dollstate.DollState{Identity: dollstate.Identity{CanonicalName: "TestDoll"}}}
+	disp := &dispatcherSpy{err: nil} // success
+
+	sched := New(spy, log, mindAPI, WithDispatcher(disp))
+
+	result, err := sched.Enter(context.Background(), events.TypeMessage, "Hello")
+	if err != nil {
+		t.Fatalf("expected nil error on successful dispatch, got: %v", err)
+	}
+	if result == nil {
+		t.Fatal("expected non-nil result")
+	}
+	if result.Level != LevelPlan {
+		t.Errorf("expected LevelPlan when L2 succeeds, got %v", result.Level)
+	}
+}
+
+// TestEnter_OutboundAction_NoDispatcher proves that Enter succeeds normally
+// when Plan has an OutboundAction but no Dispatcher is configured — the action
+// is silently dropped (no transport is set up so there's nothing to dispatch).
+func TestEnter_OutboundAction_NoDispatcher(t *testing.T) {
+	spy := newSpy("spy",
+		`{"summary":"send message","matters":true,"reason":"needs to act"}`,
+	)
+	spy.planResp = `{"summary":"send","observations":[],"outbound_action":{"kind":"send_text","content":"Hello"}}`
+
+	log := logger.New(logger.DebugLevel, nil)
+	mindAPI := &enterMockAPI{s: &dollstate.DollState{Identity: dollstate.Identity{CanonicalName: "TestDoll"}}}
+
+	// No WithDispatcher — dispatcher is nil
+	sched := New(spy, log, mindAPI)
+
+	result, err := sched.Enter(context.Background(), events.TypeMessage, "Hello")
+	if err != nil {
+		t.Fatalf("expected nil error when no dispatcher, got: %v", err)
+	}
+	if result == nil {
+		t.Fatal("expected non-nil result")
+	}
+	if result.Level != LevelPlan {
+		t.Errorf("expected LevelPlan, got %v", result.Level)
+	}
+}

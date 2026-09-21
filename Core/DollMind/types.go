@@ -58,12 +58,6 @@ type Result struct {
 	StateDirty  bool
 	Orientation *Orientation // set when Level is LevelOrient
 	Plan        *Plan        // set when Level is LevelPlan
-
-	// DispatchErr is set when Plan produced an OutboundAction but
-	// the dispatcher failed to deliver it. The Plan itself succeeded —
-	// the action was validated and attempted, but transport delivery
-	// could not be completed.
-	DispatchErr error
 }
 
 // Action represents something the Doll should do.
@@ -168,10 +162,12 @@ func (s *Scheduler) Enter(ctx context.Context, eventType events.Type, input stri
 		result := &Result{Level: LevelPlan, Orientation: orient, Plan: plan, StateDirty: dirty}
 
 		// Dispatch outbound action if present.
+		// A dispatcher failure must be surfaced through the normal error
+		// boundary — not buried in a nil-error result.
 		if plan.OutboundAction != nil && s.dispatcher != nil {
 			if err := s.dispatcher.Dispatch(ctx, *plan.OutboundAction); err != nil {
-				result.DispatchErr = err
 				s.log.Warn("outbound action dispatch failed", map[string]any{"error": err.Error()})
+				return nil, fmt.Errorf("enter dispatch: %w", err)
 			}
 		}
 

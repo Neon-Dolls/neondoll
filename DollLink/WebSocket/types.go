@@ -48,6 +48,10 @@ type Server struct {
 	httpSrv      *http.Server
 	handler      Handler
 	listenerAddr string
+
+	// writeJSONFn is a test hook. When set, writeJSON delegates to it
+	// instead of writing to the real WebSocket connection.
+	writeJSONFn func(cc *clientConn, event events.Event) error
 }
 
 // clientConn tracks a single WebSocket connection.
@@ -223,17 +227,22 @@ func (s *Server) readLoop(cc *clientConn) {
 
 // writeJSON sends a JSON-encoded event to a client connection.
 func (s *Server) writeJSON(cc *clientConn, event events.Event) error {
+	if s.writeJSONFn != nil {
+		return s.writeJSONFn(cc, event)
+	}
 	cc.conn.SetWriteDeadline(time.Now().Add(writeTimeout))
 	return cc.conn.WriteJSON(event)
 }
 
 // SendAction delivers an outbound action to all connected WebSocket clients.
 //
-// Core 1: writes to every connected client. No identity checks beyond
-// "is a client connected?" — the Body has already authenticated and
-// opened a WebSocket. If no clients are connected the action is silently
-// skipped (returning an error would be misleading: the action was dispatched
-// correctly, there's just nobody home to receive it right now).
+// Core 1 delivery rule:
+//   - Zero connected clients → error.
+//   - All writes fail            → error.
+//   - At least one write succeeds → nil (partial success is acceptable).
+//
+// Failed individual writes are logged but do not abort delivery to other
+// clients. No retries, queues, receipts, or multi-Body delivery policy.
 //
 // Implements dispatch.Sender via an adapter in the Core boundary.
 func (s *Server) SendAction(ctx context.Context, action actions.Action) error {
@@ -244,17 +253,33 @@ func (s *Server) SendAction(ctx context.Context, action actions.Action) error {
 	}
 	s.mu.Unlock()
 
+	if len(conns) == 0 {
+		return fmt.Errorf("send action: no connected clients")
+	}
+
 	// Map to an Event that clients can consume the same way as a response.
 	event := actionToEvent(action)
 
+	var (
+		lastErr    error
+		anySuccess bool
+	)
 	for _, cc := range conns {
 		if err := s.writeJSON(cc, event); err != nil {
 			s.log.Warn("send action: write error", map[string]any{
 				"client_id": cc.id,
 				"error":     err.Error(),
 			})
+			lastErr = err
+		} else {
+			anySuccess = true
 		}
 	}
+	if !anySuccess && lastErr != nil {
+		// All writes failed — no client received the action.
+		return fmt.Errorf("send action: all writes failed: %w", lastErr)
+	}
+	// At least one client received the action — partial success is acceptable.
 	return nil
 }
 
