@@ -3,14 +3,18 @@ package dollmind
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 	"sync/atomic"
 	"testing"
 
 	"github.com/Neon-Dolls/neondoll/Core/Inference"
+	"github.com/Neon-Dolls/neondoll/Core/Persistence"
 	"github.com/Neon-Dolls/neondoll/DollLink/Events"
 	"github.com/Neon-Dolls/neondoll/DollState"
 	"github.com/Neon-Dolls/neondoll/pkg/logger"
+
+	_ "modernc.org/sqlite"
 )
 
 // ──────────────────────────────────────────────
@@ -559,6 +563,36 @@ func TestScheduler_Enter_InternalWake_NoHumanMessageFabricated(t *testing.T) {
 }
 
 // ──────────────────────────────────────────────
+// persistBackedAPI — wraps a real persistence.Store as a MindAPI
+// ──────────────────────────────────────────────
+
+// persistBackedAPI provides MindAPI backed by a real SQLite persistence.Store.
+// Save persists to the store; State returns the in-memory state pointer.
+// No state pointer or DollState crosses a close/reopen boundary.
+type persistBackedAPI struct {
+	state *dollstate.DollState
+	store persistence.Store
+}
+
+func (m *persistBackedAPI) Inference() inference.Provider { return nil }
+func (m *persistBackedAPI) State() *dollstate.DollState   { return m.state }
+func (m *persistBackedAPI) Save() error {
+	return m.store.SaveDoll(context.Background(), m.state)
+}
+
+// tempDB creates a temporary SQLite database path and returns a cleanup func.
+func tempDB(t *testing.T) (string, func()) {
+	t.Helper()
+	f, err := os.CreateTemp("", "neondoll-test-*.db")
+	if err != nil {
+		t.Fatalf("tempDB: %v", err)
+	}
+	path := f.Name()
+	f.Close()
+	return path, func() { os.Remove(path) }
+}
+
+// ──────────────────────────────────────────────
 // M9 P3 acceptance tests
 // ──────────────────────────────────────────────
 
@@ -672,15 +706,26 @@ func (m *saveFailAPI) Save() error {
 }
 
 // TestEnterWake_CloseReopenPreservesCompleted proves that a Completed
-// Intention survives a close/reopen cycle: serialising state, reconstructing,
-// and verifying the Completed state is preserved.
+// Intention survives a real SQLite close/reopen cycle. The completed
+// intention must be durably persisted, survive a Store Close + fresh
+// NewStore/LoadDoll, retain its semantic fields and WakeTime, and no
+// longer be returned by DueIntentions(). No state pointer or DollState
+// copy crosses the restart boundary.
 func TestEnterWake_CloseReopenPreservesCompleted(t *testing.T) {
-	spy := newSpy("spy", `{"summary":"check ok","matters":false,"reason":"routine"}`)
-	log := logger.New(logger.DebugLevel, nil)
+	path, cleanup := tempDB(t)
+	defer cleanup()
+
+	store1, err := persistence.NewStore(path)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
 
 	// Initial state with one Pending intention.
-	mindAPI := &enterMockAPI{s: &dollstate.DollState{
-		Identity: dollstate.Identity{CanonicalName: "TestDoll"},
+	initState := &dollstate.DollState{
+		Identity: dollstate.Identity{
+			CanonicalName: "Spark",
+			DollID:        "spark-close-reopen",
+		},
 		Intentions: dollstate.Intentions{
 			Items: []dollstate.IntentionItem{{
 				ID:          "cr-001",
@@ -690,11 +735,20 @@ func TestEnterWake_CloseReopenPreservesCompleted(t *testing.T) {
 				State:       dollstate.IntentionStatePending,
 			}},
 		},
-	}}
-	sched := New(spy, log, mindAPI)
+	}
+	// Persist initial state.
+	if err := store1.SaveDoll(context.Background(), initState); err != nil {
+		t.Fatalf("SaveDoll (initial): %v", err)
+	}
 
-	// Enter wake — matters=false → should complete it.
-	result, err := sched.EnterWake(context.Background(), events.IntentionWakePayload{
+	// MindAPI backed by real persistence.
+	spy := newSpy("spy", `{"summary":"check ok","matters":false,"reason":"routine"}`)
+	log := logger.New(logger.DebugLevel, nil)
+	mindAPI1 := &persistBackedAPI{state: initState, store: store1}
+	sched1 := New(spy, log, mindAPI1)
+
+	// Enter wake — matters=false → complete it.
+	result, err := sched1.EnterWake(context.Background(), events.IntentionWakePayload{
 		IntentionID: "cr-001",
 		Subject:     "periodic review",
 		Description: "Review active state",
@@ -706,24 +760,40 @@ func TestEnterWake_CloseReopenPreservesCompleted(t *testing.T) {
 		t.Errorf("expected LevelOrient, got %v", result.Level)
 	}
 
-	// Snapshot the state (simulates close/deep-save).
-	snapshot := *mindAPI.State()
+	// Verify in-memory state before close.
+	if initState.Intentions.Items[0].State != dollstate.IntentionStateCompleted {
+		t.Errorf("before close: expected Completed, got %s", initState.Intentions.Items[0].State)
+	}
 
-	// Re-open: create a new Scheduler with the snapshot as starting state.
-	reopenAPI := &enterMockAPI{s: &snapshot}
-	reopenSched := New(spy, log, reopenAPI)
+	// Close store1 — the persistence boundary. No state is retained.
+	if err := store1.Close(); err != nil {
+		t.Fatalf("Close store1: %v", err)
+	}
 
-	// Verify the Completed intention is still Completed after "re-open".
-	state := reopenAPI.State()
+	// ─── Genuine close/reopen ───
+
+	store2, err := persistence.NewStore(path)
+	if err != nil {
+		t.Fatalf("NewStore (reopen): %v", err)
+	}
+	defer store2.Close()
+
+	// LoadDoll — the only way to get state back; no pointer/copy from before.
+	reloaded, err := store2.LoadDoll(context.Background(), "spark-close-reopen")
+	if err != nil {
+		t.Fatalf("LoadDoll: %v", err)
+	}
+
+	// Prove the target Intention is still Completed after restart.
 	var intention *dollstate.IntentionItem
-	for i := range state.Intentions.Items {
-		if state.Intentions.Items[i].ID == "cr-001" {
-			intention = &state.Intentions.Items[i]
+	for i := range reloaded.Intentions.Items {
+		if reloaded.Intentions.Items[i].ID == "cr-001" {
+			intention = &reloaded.Intentions.Items[i]
 			break
 		}
 	}
 	if intention == nil {
-		t.Fatal("intention cr-001 must exist after reopen")
+		t.Fatal("intention cr-001 must exist after close/reopen")
 	}
 	if intention.State != dollstate.IntentionStateCompleted {
 		t.Errorf("close/reopen: expected Completed, got %s", intention.State)
@@ -731,8 +801,16 @@ func TestEnterWake_CloseReopenPreservesCompleted(t *testing.T) {
 	if intention.WakeTime != "2006-01-02T15:04:05Z" {
 		t.Errorf("close/reopen: WakeTime must be preserved, got %q", intention.WakeTime)
 	}
+	if intention.Subject != "periodic review" {
+		t.Errorf("close/reopen: Subject must be preserved, got %q", intention.Subject)
+	}
+	if intention.Description != "Review active state" {
+		t.Errorf("close/reopen: Description must be preserved, got %q", intention.Description)
+	}
 
-	// The completed intention must not show up as due.
+	// Verify the completed intention is not returned by DueIntentions().
+	mindAPI2 := &persistBackedAPI{state: reloaded, store: store2}
+	reopenSched := New(spy, log, mindAPI2)
 	due, err := reopenSched.DueIntentions()
 	if err != nil {
 		t.Fatalf("DueIntentions: %v", err)
