@@ -11,6 +11,7 @@ import (
 
 	"github.com/gorilla/websocket"
 
+	"github.com/Neon-Dolls/neondoll/DollLink/Actions"
 	"github.com/Neon-Dolls/neondoll/DollLink/Events"
 )
 
@@ -224,6 +225,64 @@ func (s *Server) readLoop(cc *clientConn) {
 func (s *Server) writeJSON(cc *clientConn, event events.Event) error {
 	cc.conn.SetWriteDeadline(time.Now().Add(writeTimeout))
 	return cc.conn.WriteJSON(event)
+}
+
+// SendAction delivers an outbound action to all connected WebSocket clients.
+//
+// Core 1: writes to every connected client. No identity checks beyond
+// "is a client connected?" — the Body has already authenticated and
+// opened a WebSocket. If no clients are connected the action is silently
+// skipped (returning an error would be misleading: the action was dispatched
+// correctly, there's just nobody home to receive it right now).
+//
+// Implements dispatch.Sender via an adapter in the Core boundary.
+func (s *Server) SendAction(ctx context.Context, action actions.Action) error {
+	s.mu.Lock()
+	conns := make([]*clientConn, 0, len(s.conns))
+	for _, cc := range s.conns {
+		conns = append(conns, cc)
+	}
+	s.mu.Unlock()
+
+	// Map to an Event that clients can consume the same way as a response.
+	event := actionToEvent(action)
+
+	for _, cc := range conns {
+		if err := s.writeJSON(cc, event); err != nil {
+			s.log.Warn("send action: write error", map[string]any{
+				"client_id": cc.id,
+				"error":     err.Error(),
+			})
+		}
+	}
+	return nil
+}
+
+// actionToEvent converts an actions.Action into an events.Event suitable
+// for WebSocket delivery.
+func actionToEvent(action actions.Action) events.Event {
+	switch action.Type {
+	case actions.TypeSendMessage:
+		payload, _ := action.Payload.(actions.SendMessagePayload)
+		return events.Event{
+			Type:      events.TypeMessage,
+			Source:    "core",
+			Timestamp: time.Now().UTC(),
+			Payload: events.MessagePayload{
+				Text: payload.Text,
+			},
+		}
+	default:
+		return events.Event{
+			Type:      events.TypeSystem,
+			Source:    "core",
+			Timestamp: time.Now().UTC(),
+			Payload: events.SystemPayload{
+				Event: string(action.Type),
+				Data:  action.Payload,
+			},
+		}
+	}
 }
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {

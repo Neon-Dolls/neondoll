@@ -58,6 +58,12 @@ type Result struct {
 	StateDirty  bool
 	Orientation *Orientation // set when Level is LevelOrient
 	Plan        *Plan        // set when Level is LevelPlan
+
+	// DispatchErr is set when Plan produced an OutboundAction but
+	// the dispatcher failed to deliver it. The Plan itself succeeded —
+	// the action was validated and attempted, but transport delivery
+	// could not be completed.
+	DispatchErr error
 }
 
 // Action represents something the Doll should do.
@@ -85,21 +91,41 @@ type OutboundAction struct {
 	Content string     `json:"content"`
 }
 
+// Dispatcher dispatches semantic OutboundAction proposals from Plan to
+// their Doll Link transport. The Mind has no direct transport access —
+// all outbound actions go through this interface.
+type Dispatcher interface {
+	Dispatch(ctx context.Context, action OutboundAction) error
+}
+
+// Option configures the Scheduler.
+type Option func(*Scheduler)
+
+// WithDispatcher sets the outbound action dispatcher.
+func WithDispatcher(d Dispatcher) Option {
+	return func(s *Scheduler) { s.dispatcher = d }
+}
+
 // Scheduler manages cognition cycles.
 type Scheduler struct {
 	provider     inference.Provider
 	log          *logger.Logger
 	mindAPI      MindAPI
+	dispatcher   Dispatcher
 	timeProvider func() time.Time
 }
 
-func New(provider inference.Provider, log *logger.Logger, mindAPI MindAPI) *Scheduler {
-	return &Scheduler{
+func New(provider inference.Provider, log *logger.Logger, mindAPI MindAPI, opts ...Option) *Scheduler {
+	s := &Scheduler{
 		provider:     provider,
 		log:          log,
 		mindAPI:      mindAPI,
 		timeProvider: time.Now,
 	}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
 }
 
 // Enter is the cognition entry boundary.
@@ -140,6 +166,15 @@ func (s *Scheduler) Enter(ctx context.Context, eventType events.Type, input stri
 			return nil, fmt.Errorf("enter plan: %w", err)
 		}
 		result := &Result{Level: LevelPlan, Orientation: orient, Plan: plan, StateDirty: dirty}
+
+		// Dispatch outbound action if present.
+		if plan.OutboundAction != nil && s.dispatcher != nil {
+			if err := s.dispatcher.Dispatch(ctx, *plan.OutboundAction); err != nil {
+				result.DispatchErr = err
+				s.log.Warn("outbound action dispatch failed", map[string]any{"error": err.Error()})
+			}
+		}
+
 		return result, nil
 	default:
 		// Defensive: unknown mind paths fall back to sleep.
