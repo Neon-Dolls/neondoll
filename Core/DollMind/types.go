@@ -122,6 +122,13 @@ func New(provider inference.Provider, log *logger.Logger, mindAPI MindAPI, opts 
 	return s
 }
 
+// WithTimeProvider sets the reference time source for DueIntentions and
+// Intention validation. Production defaults to time.Now; tests use a
+// fixed reference time for deterministic behaviour.
+func WithTimeProvider(tp func() time.Time) Option {
+	return func(s *Scheduler) { s.timeProvider = tp }
+}
+
 // Enter is the cognition entry boundary.
 //
 // It runs L0 Reflex to determine whether inference is needed:
