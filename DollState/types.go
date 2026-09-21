@@ -152,7 +152,6 @@ type SkillItem struct {
 // Intention lifecycle state constants.
 const (
 	IntentionStatePending    = "pending"
-	IntentionStateInProgress = "in_progress"
 	IntentionStateCompleted  = "completed"
 )
 

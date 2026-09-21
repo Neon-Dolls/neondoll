@@ -2,10 +2,10 @@ package dollmind
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/Neon-Dolls/neondoll/Core/Inference"
 	"github.com/Neon-Dolls/neondoll/DollLink/Events"
@@ -395,7 +395,8 @@ func TestScheduler_Enter_InternalWake_OrientReturnsOrientation(t *testing.T) {
 		t.Error("orient prompt must not fabricate a message event type")
 	}
 
-	// Phase 3: matters=false → intention must be rescheduled (Pending, bumped WakeTime)
+	// M9 P3: matters=false is fulfillment — Spark woke and reconsidered.
+	// Intention must be Completed, WakeTime unchanged (no automatic rescheduling).
 	state := mindAPI.State()
 	var intention *dollstate.IntentionItem
 	for i := range state.Intentions.Items {
@@ -407,16 +408,11 @@ func TestScheduler_Enter_InternalWake_OrientReturnsOrientation(t *testing.T) {
 	if intention == nil {
 		t.Fatal("intention wake-001 must exist in state")
 	}
-	if intention.State != dollstate.IntentionStatePending {
-		t.Errorf("rescheduling on matters=false should keep Pending, got %s", intention.State)
+	if intention.State != dollstate.IntentionStateCompleted {
+		t.Errorf("matters=false wake is fulfillment → expected Completed, got %s", intention.State)
 	}
-	origT, _ := time.Parse(time.RFC3339, "2006-01-02T15:04:05Z")
-	newT, err := time.Parse(time.RFC3339, intention.WakeTime)
-	if err != nil {
-		t.Fatalf("parse rescheduled WakeTime: %v", err)
-	}
-	if !newT.After(origT) {
-		t.Error("rescheduled WakeTime must be after the original")
+	if intention.WakeTime != "2006-01-02T15:04:05Z" {
+		t.Errorf("WakeTime must be unchanged when completed, got %q", intention.WakeTime)
 	}
 }
 
@@ -541,7 +537,8 @@ func TestScheduler_Enter_InternalWake_NoHumanMessageFabricated(t *testing.T) {
 		}
 	}
 
-	// Phase 3: matters=false → intention rescheduled (Pending, bumped WakeTime)
+	// M9 P3: matters=false is fulfillment — Spark woke and reconsidered.
+	// Intention must be Completed, WakeTime unchanged (no automatic rescheduling).
 	state := mindAPI.State()
 	var intention *dollstate.IntentionItem
 	for i := range state.Intentions.Items {
@@ -553,19 +550,274 @@ func TestScheduler_Enter_InternalWake_NoHumanMessageFabricated(t *testing.T) {
 	if intention == nil {
 		t.Fatal("intention wake-ctx must exist in state")
 	}
-	if intention.State != dollstate.IntentionStatePending {
-		t.Errorf("rescheduling on matters=false should keep Pending, got %s", intention.State)
+	if intention.State != dollstate.IntentionStateCompleted {
+		t.Errorf("matters=false wake is fulfillment → expected Completed, got %s", intention.State)
 	}
-	origT, _ := time.Parse(time.RFC3339, "2006-01-02T15:04:05Z")
-	newT, err := time.Parse(time.RFC3339, intention.WakeTime)
-	if err != nil {
-		t.Fatalf("parse rescheduled WakeTime: %v", err)
-	}
-	if !newT.After(origT) {
-		t.Error("rescheduled WakeTime must be after the original")
+	if intention.WakeTime != "2006-01-02T15:04:05Z" {
+		t.Errorf("WakeTime must be unchanged when completed, got %q", intention.WakeTime)
 	}
 }
 
+// ──────────────────────────────────────────────
+// M9 P3 acceptance tests
+// ──────────────────────────────────────────────
+
+// TestEnterWake_CognitionFailed_RemainsPending proves that when cognition
+// returns an error, the Intention stays Pending with its original WakeTime.
+// Core does not invent a new semantic wake time.
+func TestEnterWake_CognitionFailed_RemainsPending(t *testing.T) {
+	errProvider := &errSpy{errMsg: "inference unavailable"}
+	log := logger.New(logger.DebugLevel, nil)
+	mindAPI := &enterMockAPI{s: &dollstate.DollState{
+		Identity: dollstate.Identity{CanonicalName: "TestDoll"},
+		Intentions: dollstate.Intentions{
+			Items: []dollstate.IntentionItem{{
+				ID:          "fail-001",
+				Subject:     "check system health",
+				Description: "Periodic health check",
+				WakeTime:    "2006-01-02T15:04:05Z",
+				State:       dollstate.IntentionStatePending,
+			}},
+		},
+	}}
+	sched := New(errProvider, log, mindAPI)
+
+	_, err := sched.EnterWake(context.Background(), events.IntentionWakePayload{
+		IntentionID: "fail-001",
+		Subject:     "check system health",
+		Description: "Periodic health check",
+	})
+	if err == nil {
+		t.Fatal("expected error from failed cognition")
+	}
+
+	// Intention must still be Pending with unchanged WakeTime
+	state := mindAPI.State()
+	var intention *dollstate.IntentionItem
+	for i := range state.Intentions.Items {
+		if state.Intentions.Items[i].ID == "fail-001" {
+			intention = &state.Intentions.Items[i]
+			break
+		}
+	}
+	if intention == nil {
+		t.Fatal("intention fail-001 must exist in state")
+	}
+	if intention.State != dollstate.IntentionStatePending {
+		t.Errorf("failed cognition → expected Pending, got %s", intention.State)
+	}
+	if intention.WakeTime != "2006-01-02T15:04:05Z" {
+		t.Errorf("WakeTime must be unchanged after failed cognition, got %q", intention.WakeTime)
+	}
+}
+
+// errSpy returns an error on every Infer call.
+type errSpy struct {
+	errMsg string
+}
+
+func (e *errSpy) Infer(_ context.Context, _ inference.Request) (*inference.Response, error) {
+	return nil, fmt.Errorf("%s", e.errMsg)
+}
+func (e *errSpy) ID() inference.ProviderID { return inference.ProviderID("errSpy") }
+func (e *errSpy) capturedReqs() []inference.Request { return nil }
+
+// TestEnterWake_SaveFailureSurfaced proves that a persistence failure after
+// successful cognition is surfaced as an error, not silently swallowed.
+func TestEnterWake_SaveFailureSurfaced(t *testing.T) {
+	spy := newSpy("spy", `{"summary":"health ok","matters":false,"reason":"all nominal"}`)
+	log := logger.New(logger.DebugLevel, nil)
+	mindAPI := &saveFailAPI{
+		s: &dollstate.DollState{
+			Identity: dollstate.Identity{CanonicalName: "TestDoll"},
+			Intentions: dollstate.Intentions{
+				Items: []dollstate.IntentionItem{{
+					ID:          "save-fail-001",
+					Subject:     "health check",
+					Description: "routine",
+					WakeTime:    "2006-01-02T15:04:05Z",
+					State:       dollstate.IntentionStatePending,
+				}},
+			},
+		},
+		saveErr: fmt.Errorf("disk full"),
+	}
+	sched := New(spy, log, mindAPI)
+
+	_, err := sched.EnterWake(context.Background(), events.IntentionWakePayload{
+		IntentionID: "save-fail-001",
+		Subject:     "health check",
+		Description: "routine",
+	})
+	if err == nil {
+		t.Fatal("expected error from failed persistence")
+	}
+	if !strings.Contains(err.Error(), "persist completed state") {
+		t.Errorf("error must mention persistence failure, got: %v", err)
+	}
+}
+
+// saveFailAPI records save calls and returns a configurable error.
+type saveFailAPI struct {
+	s        *dollstate.DollState
+	saveCalled int
+	saveErr  error
+}
+
+func (m *saveFailAPI) Inference() inference.Provider { return nil }
+func (m *saveFailAPI) State() *dollstate.DollState   { return m.s }
+func (m *saveFailAPI) Save() error {
+	m.saveCalled++
+	return m.saveErr
+}
+
+// TestEnterWake_CloseReopenPreservesCompleted proves that a Completed
+// Intention survives a close/reopen cycle: serialising state, reconstructing,
+// and verifying the Completed state is preserved.
+func TestEnterWake_CloseReopenPreservesCompleted(t *testing.T) {
+	spy := newSpy("spy", `{"summary":"check ok","matters":false,"reason":"routine"}`)
+	log := logger.New(logger.DebugLevel, nil)
+
+	// Initial state with one Pending intention.
+	mindAPI := &enterMockAPI{s: &dollstate.DollState{
+		Identity: dollstate.Identity{CanonicalName: "TestDoll"},
+		Intentions: dollstate.Intentions{
+			Items: []dollstate.IntentionItem{{
+				ID:          "cr-001",
+				Subject:     "periodic review",
+				Description: "Review active state",
+				WakeTime:    "2006-01-02T15:04:05Z",
+				State:       dollstate.IntentionStatePending,
+			}},
+		},
+	}}
+	sched := New(spy, log, mindAPI)
+
+	// Enter wake — matters=false → should complete it.
+	result, err := sched.EnterWake(context.Background(), events.IntentionWakePayload{
+		IntentionID: "cr-001",
+		Subject:     "periodic review",
+		Description: "Review active state",
+	})
+	if err != nil {
+		t.Fatalf("EnterWake: %v", err)
+	}
+	if result.Level != LevelOrient {
+		t.Errorf("expected LevelOrient, got %v", result.Level)
+	}
+
+	// Snapshot the state (simulates close/deep-save).
+	snapshot := *mindAPI.State()
+
+	// Re-open: create a new Scheduler with the snapshot as starting state.
+	reopenAPI := &enterMockAPI{s: &snapshot}
+	reopenSched := New(spy, log, reopenAPI)
+
+	// Verify the Completed intention is still Completed after "re-open".
+	state := reopenAPI.State()
+	var intention *dollstate.IntentionItem
+	for i := range state.Intentions.Items {
+		if state.Intentions.Items[i].ID == "cr-001" {
+			intention = &state.Intentions.Items[i]
+			break
+		}
+	}
+	if intention == nil {
+		t.Fatal("intention cr-001 must exist after reopen")
+	}
+	if intention.State != dollstate.IntentionStateCompleted {
+		t.Errorf("close/reopen: expected Completed, got %s", intention.State)
+	}
+	if intention.WakeTime != "2006-01-02T15:04:05Z" {
+		t.Errorf("close/reopen: WakeTime must be preserved, got %q", intention.WakeTime)
+	}
+
+	// The completed intention must not show up as due.
+	due, err := reopenSched.DueIntentions()
+	if err != nil {
+		t.Fatalf("DueIntentions: %v", err)
+	}
+	for _, d := range due {
+		if d.ID == "cr-001" {
+			t.Error("close/reopen: Completed intention must not be due")
+		}
+	}
+}
+
+// TestEnterWake_UnrelatedIntentionsUntouched proves that waking one Intention
+// does not modify the State of unrelated (non-target) Intentions, regardless
+// of the cognition outcome.
+func TestEnterWake_UnrelatedIntentionsUntouched(t *testing.T) {
+	spy := newSpy("spy", `{"summary":"check","matters":false,"reason":"done"}`)
+	log := logger.New(logger.DebugLevel, nil)
+	mindAPI := &enterMockAPI{s: &dollstate.DollState{
+		Identity: dollstate.Identity{CanonicalName: "TestDoll"},
+		Intentions: dollstate.Intentions{
+			Items: []dollstate.IntentionItem{
+				{
+					ID:          "target-001",
+					Subject:     "target review",
+					Description: "target",
+					WakeTime:    "2006-01-02T15:04:05Z",
+					State:       dollstate.IntentionStatePending,
+				},
+				{
+					ID:          "other-001",
+					Subject:     "something else",
+					Description: "unrelated",
+					WakeTime:    "2006-01-02T20:00:00Z",
+					State:       dollstate.IntentionStatePending,
+				},
+				{
+					ID:          "other-002",
+					Subject:     "completed item",
+					Description: "already done",
+					WakeTime:    "2006-01-01T00:00:00Z",
+					State:       dollstate.IntentionStateCompleted,
+				},
+			},
+		},
+	}}
+	sched := New(spy, log, mindAPI)
+
+	_, err := sched.EnterWake(context.Background(), events.IntentionWakePayload{
+		IntentionID: "target-001",
+		Subject:     "target review",
+		Description: "target",
+	})
+	if err != nil {
+		t.Fatalf("EnterWake: %v", err)
+	}
+
+	state := mindAPI.State()
+
+	// target-001 must be Completed (fulfilled).
+	targetFound := false
+	for i := range state.Intentions.Items {
+		item := state.Intentions.Items[i]
+		switch item.ID {
+		case "target-001":
+			targetFound = true
+			if item.State != dollstate.IntentionStateCompleted {
+				t.Errorf("target: expected Completed, got %s", item.State)
+			}
+		case "other-001":
+			if item.State != dollstate.IntentionStatePending {
+				t.Errorf("other-001: untouched intention changed from Pending to %s", item.State)
+			}
+			if item.WakeTime != "2006-01-02T20:00:00Z" {
+				t.Errorf("other-001: WakeTime changed to %q", item.WakeTime)
+			}
+		case "other-002":
+			if item.State != dollstate.IntentionStateCompleted {
+				t.Errorf("other-002: untouched intention changed from Completed to %s", item.State)
+			}
+		}
+	}
+	if !targetFound {
+		t.Fatal("target-001 not found in state")
+	}
+}
 func TestEnterDoesNotBreakExistingRun(t *testing.T) {
 	provider := inference.NewMockProvider("mock", "Legacy response")
 	log := logger.New(logger.InfoLevel, nil)
