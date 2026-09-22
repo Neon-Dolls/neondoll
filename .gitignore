@@ -27,3 +27,7 @@ Thumbs.db
 
 # Temp
 /tmp/
+
+# Build output
+/build
+/dist

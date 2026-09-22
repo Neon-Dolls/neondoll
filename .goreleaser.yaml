@@ -1,0 +1,124 @@
+# yaml-language-server: $schema=https://goreleaser.com/static/schema.json
+version: 2
+
+project_name: neondoll
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: neondolld
+    main: ./cmd/neondolld
+    binary: neondolld
+    env:
+      - CGO_ENABLED=1
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w -X github.com/Neon-Dolls/neondoll/pkg/version.Version={{ .Version }}
+
+  - id: neondoll-client
+    main: ./cmd/neondoll-client
+    binary: neondoll-client
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w -X github.com/Neon-Dolls/neondoll/pkg/version.Version={{ .Version }}
+
+  - id: printspark
+    main: ./cmd/printspark
+    binary: printspark
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+
+archives:
+  - formats: [tar.gz]
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+    files:
+      - LICENSE
+      - README.md
+
+checksum:
+  name_template: "checksums.txt"
+
+snapshot:
+  version_template: "{{ .Tag }}-SNAPSHOT-{{ .ShortCommit }}"
+
+changelog:
+  use: github
+  filters:
+    exclude:
+      - "^test:"
+      - "^docs:"
+      - "^chore:"
+      - "^ci:"
+      - "merge conflict"
+      - Merge pull request
+      - Merge remote-tracking branch
+  groups:
+    - title: "🚀 Features"
+      regexp: "^feat[:]"
+      order: 1
+    - title: "🐛 Bug Fixes"
+      regexp: "^fix[:]"
+      order: 2
+    - title: "🧹 Maintenance"
+      regexp: "^refactor[:]|^perf[:]"
+      order: 3
+    - title: "📖 Documentation"
+      regexp: "^docs[:]"
+      order: 4
+    - title: "🏗️ Build & CI"
+      regexp: "^ci[:]|^build[:]"
+      order: 5
+    - title: "Other changes"
+      order: 999
+
+release:
+  github:
+    owner: Neon-Dolls
+    name: neondoll
+  header: |
+    ## NeonDoll {{ .Tag }}
+
+    > Core 1 — Spark survives destruction and continues outstanding agency.
+
+    ### Binaries
+
+    Download the archive for your platform below, then extract and run:
+
+    ```
+    tar xzf neondoll_{{ .Tag }}_*.tar.gz
+    ./neondolld
+    ```
+
+    ### What's included
+
+    | Binary | Purpose |
+    |--------|---------|
+    | `neondolld` | Main daemon — run this to serve a Doll |
+    | `neondoll-client` | CLI client — send messages to a running daemon |
+    | `printspark` | Debug tool — print a Doll Card's state |
+
+  footer: |
+    **Full Changelog**: https://github.com/Neon-Dolls/neondoll/compare/{{ .PreviousTag }}...{{ .Tag }}

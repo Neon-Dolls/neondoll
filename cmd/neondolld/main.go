@@ -16,11 +16,12 @@ import (
 	"github.com/Neon-Dolls/neondoll/Core/Persistence"
 	"github.com/Neon-Dolls/neondoll/DollLink/WebSocket"
 	"github.com/Neon-Dolls/neondoll/pkg/logger"
+	"github.com/Neon-Dolls/neondoll/pkg/version"
 )
 
 func main() {
 	log := logger.New(logger.InfoLevel, os.Stdout)
-	log.Info("neondoll starting")
+	log.Info(fmt.Sprintf("neondoll v%s starting — Core 1", version.String()))
 
 	// Load config (optional — use defaults if not found).
 	cfg, err := config.Load("config.json")
