@@ -259,7 +259,7 @@ func TestRestoredSparkContinues(t *testing.T) {
 		t.Errorf("AC6 FAIL: Level=%v — wake did not enter structured cognition", result.Level)
 	}
 	t.Logf("AC6 ✓ — Wake enters cognition through internal-wake path (Level=%v)", result.Level)
-	t.Log("AC7 ✓ — Intention ID, Subject, Description, WakeTime reach the wake path")
+	t.Log("AC7 ✓ — Intention ID, Subject, Description reach the structured wake path")
 
 	// ── AC8: Spark performs new cognition using destination runtime ──
 	if result.Plan == nil || result.Plan.OutboundAction == nil {
@@ -274,7 +274,7 @@ func TestRestoredSparkContinues(t *testing.T) {
 	// ── AC9: M9 lifecycle semantics apply after the wake ──
 	t.Log("AC9 ✓ — M9 lifecycle semantics apply after the wake")
 
-	// ── AC10: Completion is persisted in the destination Store ──
+	// ── AC10: Autonomous action dispatched to destination runtime ──
 	var clientMsg events.Event
 	select {
 	case clientMsg = <-msgCh:
@@ -284,7 +284,7 @@ func TestRestoredSparkContinues(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("AC10 FAIL: timed out waiting for client action")
 	}
-	t.Log("AC10 ✓ — Completion is persisted in the destination Store")
+	t.Log("AC10 ✓ — Autonomous Doll Link action reached the client via destination runtime")
 
 	// ── AC11: After destination Store close/reopen, Intention remains
 	//          completed and is no longer due ──
