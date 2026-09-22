@@ -191,6 +191,12 @@ func TestExportImportBoundary(t *testing.T) {
 	}
 	t.Log("AC2 ✓ — Export loads canonical Doll State and writes a valid Doll Card")
 
+	// ── Close source Store before any destination work ──
+	// The boundary is literal: source Store → DollState → Card → CLOSE SOURCE → Card decode → destination Store.
+	if err := srcStore.Close(); err != nil {
+		t.Fatalf("srcStore.Close: %v", err)
+	}
+
 	// ── AC3: Destination Store begins empty ──
 	dstPath, cleanupDst := tempDB2(t)
 	defer cleanupDst()
@@ -342,10 +348,11 @@ func TestExportImportBoundary(t *testing.T) {
 	}
 	t.Log("AC7 ✓ — Source and destination database files are distinct")
 
-	// ── AC8: Destination import did NOT read from source Store after Card creation ──
-	// Proof: we closed the source store before decoding the card.
-	// The Card was decoded entirely from the byte buffer in memory.
-	t.Log("AC8 ✓ — Destination import decodes from Card bytes, not from source Store")
+	// ── AC8: Source Store was closed before destination import ──
+	// The source Store was closed before the destination Store was even created.
+	// Destination import decodes entirely from Card bytes — the source Store
+	// connection is already closed and cannot be read from.
+	t.Log("AC8 ✓ — Source Store closed, destination import reads only from Card bytes")
 
 	// ── AC9: Outstanding pending Intentions remain pending with same wake time ──
 	for _, wantInt := range original.Intentions.Items {
