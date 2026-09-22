@@ -13,6 +13,22 @@ builds:
     binary: neondolld
     env:
       - CGO_ENABLED=1
+    # zig cc provides the cross-C toolchain for all non-native targets
+    overrides:
+      - goos: linux
+        goarch: arm64
+        env:
+          - CC=aarch64-linux-gnu-gcc
+      - goos: darwin
+        goarch: amd64
+        env:
+          - CC=zig
+          - CGO_CFLAGS=-target x86_64-macos-none
+      - goos: darwin
+        goarch: arm64
+        env:
+          - CC=zig
+          - CGO_CFLAGS=-target aarch64-macos-none
     goos:
       - linux
       - darwin
