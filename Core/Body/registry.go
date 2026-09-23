@@ -67,3 +67,24 @@ func (r *Registry) All() []Body {
 func (r *Registry) Count() int {
 	return len(r.bodies)
 }
+
+// GetCapabilities returns the capabilities declared by the Body with the
+// given ID. Returns an error if no Body with that ID is registered.
+func (r *Registry) GetCapabilities(id BodyID) ([]Capability, error) {
+	b, ok := r.bodies[id]
+	if !ok {
+		return nil, fmt.Errorf("body %q not found", id)
+	}
+	return b.Describe(), nil
+}
+
+// AllCapabilities returns all capabilities across every registered Body,
+// grouped by BodyID. A Body with no capabilities contributes an entry
+// with an empty slice.
+func (r *Registry) AllCapabilities() map[BodyID][]Capability {
+	result := make(map[BodyID][]Capability, len(r.bodies))
+	for id, b := range r.bodies {
+		result[id] = b.Describe()
+	}
+	return result
+}

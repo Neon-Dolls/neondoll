@@ -41,11 +41,14 @@ func TestLocalBody_NameDefault(t *testing.T) {
 	}
 }
 
-func TestLocalBody_DescribeNil(t *testing.T) {
+func TestLocalBody_DescribeReturnsCapabilities(t *testing.T) {
 	b := NewLocal()
 	caps := b.Describe()
-	if len(caps) != 0 {
-		t.Errorf("LocalBody.Describe() = %v, want empty slice", caps)
+	if len(caps) != 1 {
+		t.Fatalf("LocalBody.Describe() returned %d capabilities, want 1", len(caps))
+	}
+	if caps[0].Name != "runtime.info / read" {
+		t.Errorf("capability Name = %q, want %q", caps[0].Name, "runtime.info / read")
 	}
 }
 

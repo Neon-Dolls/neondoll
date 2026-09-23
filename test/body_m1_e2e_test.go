@@ -63,10 +63,13 @@ func TestM1LocalBodyExists(t *testing.T) {
 		t.Errorf("AC4: expected exactly 1 Body, got %d — remote Bodies must not exist in M1", registry.Count())
 	}
 
-	// ── AC5: Local Body has no capabilities in M1 ──
+	// ── AC5: Local Body advertises capabilities in M2 ──
 	caps := localBody.Describe()
-	if len(caps) != 0 {
-		t.Errorf("AC5: M1 LocalBody should have 0 capabilities, got %d", len(caps))
+	if len(caps) != 1 {
+		t.Fatalf("AC5: M2 LocalBody should have 1 capability, got %d", len(caps))
+	}
+	if caps[0].Name != "runtime.info / read" {
+		t.Errorf("AC5: capability Name = %q, want %q", caps[0].Name, "runtime.info / read")
 	}
 
 	// ── AC6: Core stops / starts normally (second Registry creation) ──
