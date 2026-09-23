@@ -5,7 +5,7 @@ import "github.com/Neon-Dolls/neondoll/DollLink/Events"
 // MindPath tells Core what cognition is needed after L0 Reflex has processed
 // an event.
 //
-//   event + relevant Doll State  →  L0 REFLEX  →  MindPath
+//	event + relevant Doll State  →  L0 REFLEX  →  MindPath
 //
 // PathSleep  — L0 handled the event deterministically; no inference needed.
 // PathOrient — the event requires L1 orientation (inference required).
@@ -13,7 +13,7 @@ type MindPath int
 
 const (
 	PathSleep  MindPath = iota // no further cognition — handled by L0
-	PathOrient                  // needs L1 orientation — inference required
+	PathOrient                 // needs L1 orientation — inference required
 )
 
 // String returns the canonical name of the mind path.

@@ -31,10 +31,10 @@ import (
 // All fields except Summary are optional. JSON serialisation is used for
 // model output parsing.
 type Plan struct {
-	Summary        string   `json:"summary"`          // what Spark thinks should happen next
-	ProposedAction string   `json:"proposed_action"`  // semantic description of course of action
-	Observations   []string `json:"observations"`     // noticed things about goals, drives, context
-	ShouldReorient bool     `json:"should_reorient"`  // whether to re-evaluate later
+	Summary        string   `json:"summary"`         // what Spark thinks should happen next
+	ProposedAction string   `json:"proposed_action"` // semantic description of course of action
+	Observations   []string `json:"observations"`    // noticed things about goals, drives, context
+	ShouldReorient bool     `json:"should_reorient"` // whether to re-evaluate later
 
 	// Future cognition — set when Spark decides that future cognitive
 	// attention is warranted. The Core materialises these into a pending
@@ -277,10 +277,10 @@ func (s *Scheduler) Plan(ctx context.Context, eventType events.Type, input strin
 
 	s.log.Info("plan complete",
 		map[string]any{
-			"event_type":       eventType,
-			"summary":          plan.Summary,
-			"should_reorient":  plan.ShouldReorient,
-			"request_future":   plan.RequestFutureCognition,
+			"event_type":      eventType,
+			"summary":         plan.Summary,
+			"should_reorient": plan.ShouldReorient,
+			"request_future":  plan.RequestFutureCognition,
 		})
 
 	dirty, err := s.materialiseIntention(plan)

@@ -58,10 +58,10 @@ type usage struct {
 // OpenAIProvider sends inference requests to any OpenAI-compatible HTTP API
 // (such as llama.cpp server).
 type OpenAIProvider struct {
-	id          ProviderID
-	baseURL     string
-	client      *http.Client
-	maxTokens   int
+	id        ProviderID
+	baseURL   string
+	client    *http.Client
+	maxTokens int
 }
 
 // OpenAIProviderOption configures an OpenAIProvider.

@@ -6,8 +6,8 @@ import (
 )
 
 const (
-	sparkIntentionID         = "intention-reconsider-existence"
-	sparkIntentionWakeTime   = "2026-10-01T12:00:00Z"
+	sparkIntentionID       = "intention-reconsider-existence"
+	sparkIntentionWakeTime = "2026-10-01T12:00:00Z"
 )
 
 func TestIntentionAllCanonicalFields(t *testing.T) {

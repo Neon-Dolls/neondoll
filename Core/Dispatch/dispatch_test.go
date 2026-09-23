@@ -39,8 +39,8 @@ func (f *fakeSink) sent() []actions.Action {
 // quietLogger discards log output during tests.
 type quietLogger struct{}
 
-func (quietLogger) Info(_ string, _ ...map[string]any) {}
-func (quietLogger) Warn(_ string, _ ...map[string]any) {}
+func (quietLogger) Info(_ string, _ ...map[string]any)  {}
+func (quietLogger) Warn(_ string, _ ...map[string]any)  {}
 func (quietLogger) Error(_ string, _ ...map[string]any) {}
 
 func TestDispatch_SendText_Valid(t *testing.T) {

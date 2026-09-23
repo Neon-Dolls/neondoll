@@ -293,11 +293,11 @@ func (s *store) LoadDoll(ctx context.Context, dollID string) (*dollstate.DollSta
 	}
 
 	var (
-		version                             int
-		identityJSON, soulJSON, ownerJSON   string
-		selfJSON                            string
-		drivesJSON, goalsJSON               string
-		intentionsJSON                      string
+		version                           int
+		identityJSON, soulJSON, ownerJSON string
+		selfJSON                          string
+		drivesJSON, goalsJSON             string
+		intentionsJSON                    string
 	)
 	err := s.db.QueryRowContext(ctx,
 		`SELECT version, identity_json, soul_json, owner_json, self_json, drives_json, goals_json, intentions_json

@@ -61,9 +61,9 @@ func TestUpdateStatusPayload(t *testing.T) {
 
 func TestWebhookPayload(t *testing.T) {
 	p := WebhookPayload{
-		URL:    "https://example.com/hook",
-		Method: "POST",
-		Body:   map[string]string{"event": "test"},
+		URL:     "https://example.com/hook",
+		Method:  "POST",
+		Body:    map[string]string{"event": "test"},
 		Headers: map[string]string{"Authorization": "Bearer token"},
 	}
 	if p.URL != "https://example.com/hook" {

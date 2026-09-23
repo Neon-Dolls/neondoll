@@ -135,9 +135,9 @@ func WithTimeProvider(tp func() time.Time) Option {
 //
 //   - PathSleep  → LevelReflex result (deterministic, handled at L0).
 //   - PathOrient → L1 Orient; if the event matters, L2 Plan produces a
-//                  structured plan. Returns LevelPlan when both L1 and L2
-//                  complete, LevelOrient when L1 decides the event does not
-//                  warrant planning.
+//     structured plan. Returns LevelPlan when both L1 and L2
+//     complete, LevelOrient when L1 decides the event does not
+//     warrant planning.
 //
 // Enter may mutate Doll State through L2 Plan when the plan requests
 // future cognition, materialising a pending Intention into state.
@@ -189,7 +189,7 @@ func (s *Scheduler) Enter(ctx context.Context, eventType events.Type, input stri
 //
 // The lifecycle is minimal:
 //
-//   pending → wake cognition → completed → Save
+//	pending → wake cognition → completed → Save
 //
 // A failed cognition leaves the Intention pending with the error surfaced.
 // A successfully completed wake cognition is fulfillment of the Intention

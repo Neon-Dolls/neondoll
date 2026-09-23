@@ -1,6 +1,7 @@
 package body
 
 import (
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -93,8 +94,88 @@ func TestLocalBody_ExecuteNotAvailable(t *testing.T) {
 	}
 }
 
+func TestLocalBody_ExecuteRuntimeInfoRead(t *testing.T) {
+	b := NewLocal()
+	res, err := b.Execute(ExecutionRequest{Capability: "runtime.info", Operation: "read"})
+	if err != nil {
+		t.Fatalf("Execute(runtime.info, read) = %v, want nil", err)
+	}
+	if res == nil {
+		t.Fatal("Execute(runtime.info, read) returned nil result")
+	}
+	if res.Status != StatusSuccess {
+		t.Errorf("status = %q, want %q", res.Status, StatusSuccess)
+	}
+	if res.Output == "" {
+		t.Error("Output must not be empty")
+	}
+
+	// AC13: structured payload with benign runtime facts only.
+	var info RuntimeInfo
+	if err := json.Unmarshal([]byte(res.Output), &info); err != nil {
+		t.Fatalf("Output must be valid JSON: %v", err)
+	}
+	if info.OS == "" {
+		t.Error("RuntimeInfo.OS must not be empty")
+	}
+	if info.Architecture == "" {
+		t.Error("RuntimeInfo.Architecture must not be empty")
+	}
+	if info.GoVersion == "" {
+		t.Error("RuntimeInfo.GoVersion must not be empty")
+	}
+}
+
+func TestLocalBody_ExecuteRuntimeInfoRead_NoSensitiveAmbientData(t *testing.T) {
+	b := NewLocal()
+	res, err := b.Execute(ExecutionRequest{Capability: "runtime.info", Operation: "read"})
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+	if res == nil || res.Output == "" {
+		t.Fatal("no output")
+	}
+
+	// Unmarshal into a flexible map to check keys.
+	var raw map[string]any
+	if err := json.Unmarshal([]byte(res.Output), &raw); err != nil {
+		t.Fatalf("Output must be valid JSON: %v", err)
+	}
+
+	// Only the three benign keys.
+	expected := 3
+	if len(raw) != expected {
+		t.Errorf("expected %d fields in runtime info, got %d: %v", expected, len(raw), raw)
+	}
+	for k := range raw {
+		switch k {
+		case "os", "architecture", "go_version":
+			// allowed
+		default:
+			t.Errorf("unexpected key in runtime info: %q", k)
+		}
+	}
+
+	// Values must be strings.
+	for k, v := range raw {
+		if _, ok := v.(string); !ok {
+			t.Errorf("runtime field %q is %T, want string", k, v)
+		}
+	}
+}
+
+func TestLocalBody_ExecuteUnknownOperationNotAvailable(t *testing.T) {
+	b := NewLocal()
+	_, err := b.Execute(ExecutionRequest{Capability: "runtime.info", Operation: "write"})
+	if err == nil {
+		t.Fatal("expected error for unknown operation")
+	}
+	if !errors.Is(err, ErrExecutionNotAvailable) {
+		t.Errorf("error = %v, want ErrExecutionNotAvailable", err)
+	}
+}
+
 func TestLocalBody_ImplementsBodyInterface(t *testing.T) {
-	// Compile-time check: *LocalBody satisfies Body.
 	var b Body = NewLocal()
 	_ = b.ID()
 	_ = b.Kind()
@@ -105,8 +186,6 @@ func TestLocalBody_ImplementsBodyInterface(t *testing.T) {
 }
 
 func TestLocalBody_IdentityNotTransport(t *testing.T) {
-	// The identity must not reference transport concepts like
-	// websocket, ws, session, tcp, or connection.
 	id := string(NewLocal().ID())
 	transportTerms := []string{"ws", "socket", "tcp", "session", "connection", "transport"}
 	for _, term := range transportTerms {
@@ -117,7 +196,6 @@ func TestLocalBody_IdentityNotTransport(t *testing.T) {
 }
 
 func TestLocalBody_NewLocalIsDeterministic(t *testing.T) {
-	// Two Local Bodies created with defaults must have the same ID.
 	b1 := NewLocal()
 	b2 := NewLocal()
 	if b1.ID() != b2.ID() {

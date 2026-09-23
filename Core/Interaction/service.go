@@ -19,7 +19,7 @@ import (
 // Service handles incoming Doll Link interactions by loading the addressed
 // Doll from persistence and using inference to generate a response.
 //
-//   Doll Link ↔ Interaction ↔ Persistence + Inference
+//	Doll Link ↔ Interaction ↔ Persistence + Inference
 type Service struct {
 	store    persistence.Store
 	provider inference.Provider

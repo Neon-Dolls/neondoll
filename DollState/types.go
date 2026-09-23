@@ -5,26 +5,26 @@ const CurrentStateVersion = 1
 
 // DollState is the top-level portable state container.
 type DollState struct {
-	Version      int              `json:"version"`
-	Identity     Identity         `json:"identity,omitempty"`
-	Soul         Soul             `json:"soul,omitempty"`
-	Owner        Owner            `json:"owner,omitempty"`
-	Self         Self             `json:"self,omitempty"`
-	Memories     Memories         `json:"memories,omitempty"`
-	Drives       Drives           `json:"drives,omitempty"`
-	Goals        Goals            `json:"goals,omitempty"`
-	Skills       Skills           `json:"skills,omitempty"`
-	Intentions   Intentions       `json:"intentions,omitempty"`
-	Auth         Auth             `json:"auth,omitempty"`
-	Secrets      Secrets          `json:"secrets,omitempty"`
-	ExtensionData map[string]any  `json:"extensions,omitempty"`
+	Version       int            `json:"version"`
+	Identity      Identity       `json:"identity,omitempty"`
+	Soul          Soul           `json:"soul,omitempty"`
+	Owner         Owner          `json:"owner,omitempty"`
+	Self          Self           `json:"self,omitempty"`
+	Memories      Memories       `json:"memories,omitempty"`
+	Drives        Drives         `json:"drives,omitempty"`
+	Goals         Goals          `json:"goals,omitempty"`
+	Skills        Skills         `json:"skills,omitempty"`
+	Intentions    Intentions     `json:"intentions,omitempty"`
+	Auth          Auth           `json:"auth,omitempty"`
+	Secrets       Secrets        `json:"secrets,omitempty"`
+	ExtensionData map[string]any `json:"extensions,omitempty"`
 }
 
 // Identity — which Doll is this?
 type Identity struct {
-	DollID       string `json:"doll_id"`
+	DollID        string `json:"doll_id"`
 	CanonicalName string `json:"canonical_name"`
-	TemplateRef  string `json:"template_ref,omitempty"`
+	TemplateRef   string `json:"template_ref,omitempty"`
 }
 
 // Soul — who the Doll fundamentally is (prose)
@@ -69,7 +69,7 @@ const (
 // stream receives a monotonically increasing Sequence value regardless of
 // which interaction it belongs to.
 //
-//   Sequence orders experience. InteractionID groups related experience.
+//	Sequence orders experience. InteractionID groups related experience.
 //
 // Do not rely on SQLite row IDs, Timestamp alone, or Doll Card JSONL line
 // position as the semantic ordering contract. Timestamp records wall-clock
@@ -151,8 +151,8 @@ type SkillItem struct {
 
 // Intention lifecycle state constants.
 const (
-	IntentionStatePending    = "pending"
-	IntentionStateCompleted  = "completed"
+	IntentionStatePending   = "pending"
+	IntentionStateCompleted = "completed"
 )
 
 // Intentions — Spark's durable future cognitive obligations.
