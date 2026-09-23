@@ -46,7 +46,10 @@ func TestRegistry_RegisterAddsBody(t *testing.T) {
 	r := NewRegistry()
 
 	testBody := NewCustomBody(BodyID("test:custom"), BodyKindLocal, "test")
-	r.Register(testBody)
+	err := r.Register(testBody)
+	if err != nil {
+		t.Fatalf("expected nil error, got %v", err)
+	}
 
 	if r.Count() != 2 {
 		t.Fatalf("expected 2 bodies, got %d", r.Count())
@@ -58,6 +61,29 @@ func TestRegistry_RegisterAddsBody(t *testing.T) {
 	}
 	if b.Name() != "test" {
 		t.Errorf("expected name 'test', got %q", b.Name())
+	}
+}
+
+func TestRegistry_RegisterRejectsLocalBodyReplacement(t *testing.T) {
+	r := NewRegistry()
+
+	// Attempt to register another Body claiming LocalBodyID.
+	impostor := NewCustomBody(LocalBodyID, BodyKindLocal, "impostor")
+	err := r.Register(impostor)
+	if err == nil {
+		t.Fatal("expected error when replacing Local Body, got nil")
+	}
+
+	// Prove the original Local Body remains intact.
+	b, ok := r.Local()
+	if !ok {
+		t.Fatal("original Local Body must still be accessible")
+	}
+	if b.Name() != "local" {
+		t.Errorf("original Local Body name = %q, want %q", b.Name(), "local")
+	}
+	if r.Count() != 1 {
+		t.Errorf("registry count = %d, want 1 (no replacement occurred)", r.Count())
 	}
 }
 

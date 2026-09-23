@@ -29,10 +29,16 @@ func NewRegistry() *Registry {
 	return r
 }
 
-// Register adds a Body to the registry. If a Body with the same ID
-// already exists, it is silently replaced.
-func (r *Registry) Register(b Body) {
+// Register adds a Body to the registry. Returns an error if a Body
+// with the same ID is already registered. The mandatory Local Body
+// (LocalBodyID) is always protected: any attempt to register another
+// Body with its ID is rejected.
+func (r *Registry) Register(b Body) error {
+	if _, exists := r.bodies[b.ID()]; exists {
+		return fmt.Errorf("body %q already registered", b.ID())
+	}
 	r.bodies[b.ID()] = b
+	return nil
 }
 
 // Get retrieves a Body by its stable identity. Returns false if no
@@ -61,7 +67,3 @@ func (r *Registry) All() []Body {
 func (r *Registry) Count() int {
 	return len(r.bodies)
 }
-
-// ErrLocalBodyNotFound is returned when the mandatory Local Body
-// is missing from a Registry (should never happen in normal use).
-var ErrLocalBodyNotFound = fmt.Errorf("local body not found in registry")

@@ -30,11 +30,6 @@ const (
 	// BodyKindLocal identifies the in-process Local Body. Exactly one
 	// exists in every running Core.
 	BodyKindLocal BodyKind = "local"
-
-	// BodyKindRemote identifies a Body reachable over Doll Network.
-	// Declared in M1 but not used until Core 3+; its presence in the
-	// type system avoids later breaking changes to the Body interface.
-	BodyKindRemote BodyKind = "remote"
 )
 
 // Capability describes a single operation a Body can perform. A Body

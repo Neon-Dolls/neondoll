@@ -89,12 +89,3 @@ func TestLocalBody_NewLocalIsDeterministic(t *testing.T) {
 		t.Errorf("expected deterministic IDs, got %q and %q", b1.ID(), b2.ID())
 	}
 }
-
-func TestLocalOption_CustomID(t *testing.T) {
-	b := NewLocal(func(lb *LocalBody) {
-		lb.id = BodyID("custom-local-id")
-	})
-	if b.ID() != "custom-local-id" {
-		t.Errorf("expected custom ID, got %q", b.ID())
-	}
-}

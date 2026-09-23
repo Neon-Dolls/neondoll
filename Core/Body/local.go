@@ -20,20 +20,14 @@ type LocalBody struct {
 	name string
 }
 
-// LocalOption configures the LocalBody at construction.
-type LocalOption func(*LocalBody)
-
-// NewLocal creates the mandatory LocalBody with default settings.
-// By default, its ID is LocalBodyID and its name is "local".
-func NewLocal(opts ...LocalOption) *LocalBody {
-	b := &LocalBody{
+// NewLocal creates the mandatory LocalBody with the canonical
+// LocalBodyID. The identity is always "local::core" and cannot
+// be overridden.
+func NewLocal() *LocalBody {
+	return &LocalBody{
 		id:   LocalBodyID,
 		name: "local",
 	}
-	for _, opt := range opts {
-		opt(b)
-	}
-	return b
 }
 
 // ID returns the stable identity of this LocalBody.

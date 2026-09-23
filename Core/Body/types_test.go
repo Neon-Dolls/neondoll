@@ -18,9 +18,6 @@ func TestBodyKind_Values(t *testing.T) {
 	if BodyKindLocal != "local" {
 		t.Fatalf("BodyKindLocal = %q, want %q", BodyKindLocal, "local")
 	}
-	if BodyKindRemote != "remote" {
-		t.Fatalf("BodyKindRemote = %q, want %q", BodyKindRemote, "remote")
-	}
 }
 
 func TestCapability_HasName(t *testing.T) {
