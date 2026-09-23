@@ -1,6 +1,7 @@
 package body
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -111,8 +112,14 @@ func TestNewRegistry_LocalBodyHasCapabilities(t *testing.T) {
 	if len(caps) != 1 {
 		t.Fatalf("M2 LocalBody should have 1 capability, got %d", len(caps))
 	}
-	if caps[0].Name != "runtime.info / read" {
-		t.Errorf("capability Name = %q, want %q", caps[0].Name, "runtime.info / read")
+	if caps[0].ID != "runtime.info" {
+		t.Errorf("capability ID = %q, want %q", caps[0].ID, "runtime.info")
+	}
+	if len(caps[0].Operations) != 1 || caps[0].Operations[0] != "read" {
+		t.Errorf("capability Operations = %v, want [read]", caps[0].Operations)
+	}
+	if !caps[0].Available {
+		t.Error("capability Available = false, want true")
 	}
 }
 
@@ -137,8 +144,11 @@ func TestRegistry_GetCapabilitiesReturnsLocalCaps(t *testing.T) {
 	if len(caps) != 1 {
 		t.Fatalf("expected 1 capability, got %d", len(caps))
 	}
-	if caps[0].Name != "runtime.info / read" {
-		t.Errorf("capability Name = %q, want %q", caps[0].Name, "runtime.info / read")
+	if caps[0].ID != "runtime.info" {
+		t.Errorf("capability ID = %q, want %q", caps[0].ID, "runtime.info")
+	}
+	if len(caps[0].Operations) != 1 || caps[0].Operations[0] != "read" {
+		t.Errorf("capability Operations = %v, want [read]", caps[0].Operations)
 	}
 }
 
@@ -152,7 +162,11 @@ func TestRegistry_GetCapabilitiesMissingBody(t *testing.T) {
 
 func TestRegistry_GetCapabilitiesRegisteredBody(t *testing.T) {
 	r := NewRegistry()
-	custCap := Capability{Name: "custom:test", Description: "a test"}
+	custCap := Capability{
+		ID:         "custom:test",
+		Operations: []string{"do-thing"},
+		Available:  true,
+	}
 	cust := NewCustomBodyWithCaps("test:custom", BodyKindLocal, "custom",
 		[]Capability{custCap})
 	err := r.Register(cust)
@@ -166,8 +180,11 @@ func TestRegistry_GetCapabilitiesRegisteredBody(t *testing.T) {
 	if len(caps) != 1 {
 		t.Fatalf("expected 1 capability, got %d", len(caps))
 	}
-	if caps[0].Name != "custom:test" {
-		t.Errorf("capability Name = %q, want %q", caps[0].Name, "custom:test")
+	if caps[0].ID != "custom:test" {
+		t.Errorf("capability ID = %q, want %q", caps[0].ID, "custom:test")
+	}
+	if len(caps[0].Operations) != 1 || caps[0].Operations[0] != "do-thing" {
+		t.Errorf("capability Operations = %v, want [do-thing]", caps[0].Operations)
 	}
 }
 
@@ -207,6 +224,52 @@ func TestRegistry_AllCapabilitiesMultipleBodies(t *testing.T) {
 	}
 }
 
+func TestRegistry_ResolveCapabilityThroughBodyBoundary(t *testing.T) {
+	r := NewRegistry()
+
+	// AC1: runtime.info / read on the Local Body → supported + available.
+	if err := r.ResolveCapability(LocalBodyID, "runtime.info", "read"); err != nil {
+		t.Errorf("ResolveCapability(local, runtime.info, read) = %v, want nil", err)
+	}
+
+	// AC2: unknown capability → explicit unsupported capability.
+	if err := r.ResolveCapability(LocalBodyID, "nonexistent", "read"); err != ErrUnsupportedCapability {
+		t.Errorf("ResolveCapability(local, nonexistent, read) = %v, want ErrUnsupportedCapability", err)
+	}
+
+	// AC3: known capability, unknown operation → explicit unsupported operation.
+	if err := r.ResolveCapability(LocalBodyID, "runtime.info", "write"); err != ErrUnsupportedOperation {
+		t.Errorf("ResolveCapability(local, runtime.info, write) = %v, want ErrUnsupportedOperation", err)
+	}
+}
+
+func TestRegistry_ResolveCapabilityUnavailableCustomBody(t *testing.T) {
+	r := NewRegistry()
+	blocked := Capability{
+		ID:         "test:blocked",
+		Operations: []string{"do-thing"},
+		Available:  false,
+	}
+	cust := NewCustomBodyWithCaps("test:offline", BodyKindLocal, "offline",
+		[]Capability{blocked})
+	if err := r.Register(cust); err != nil {
+		t.Fatalf("Register failed: %v", err)
+	}
+
+	// AC4: known but unavailable capability → explicit unavailable.
+	if err := r.ResolveCapability("test:offline", "test:blocked", "do-thing"); err != ErrUnavailable {
+		t.Errorf("ResolveCapability(offline, test:blocked, do-thing) = %v, want ErrUnavailable", err)
+	}
+}
+
+func TestRegistry_ResolveCapabilityMissingBody(t *testing.T) {
+	r := NewRegistry()
+	err := r.ResolveCapability("no:such:body", "runtime.info", "read")
+	if err == nil {
+		t.Fatal("expected error for missing Body")
+	}
+}
+
 // NewCustomBody creates a simple Body for testing that satisfies the Body interface.
 func NewCustomBody(id BodyID, kind BodyKind, name string) Body {
 	return &customBody{id: id, kind: kind, name: name}
@@ -224,10 +287,61 @@ type customBody struct {
 	caps []Capability
 }
 
-func (c *customBody) ID() BodyID             { return c.id }
-func (c *customBody) Kind() BodyKind         { return c.kind }
-func (c *customBody) Name() string           { return c.name }
-func (c *customBody) Describe() []Capability { return c.caps }
+func (c *customBody) ID() BodyID     { return c.id }
+func (c *customBody) Kind() BodyKind { return c.kind }
+func (c *customBody) Name() string   { return c.name }
+func (c *customBody) Describe() []Capability {
+	if c.caps == nil {
+		return nil
+	}
+	out := make([]Capability, len(c.caps))
+	for i, cap := range c.caps {
+		out[i] = cap
+		if cap.Operations != nil {
+			out[i].Operations = append([]string(nil), cap.Operations...)
+		}
+	}
+	return out
+}
+func (c *customBody) ResolveCapability(capID string, operation string) error {
+	for _, cap := range c.caps {
+		if cap.ID != capID {
+			continue
+		}
+		for _, op := range cap.Operations {
+			if op == operation {
+				if !cap.Available {
+					return ErrUnavailable
+				}
+				return nil
+			}
+		}
+		return ErrUnsupportedOperation
+	}
+	return ErrUnsupportedCapability
+}
+func (c *customBody) RegisterCapability(cap Capability) error {
+	if cap.ID == "" {
+		return fmt.Errorf("capability ID must not be empty")
+	}
+	if len(cap.Operations) == 0 {
+		return fmt.Errorf("capability %q has no operations", cap.ID)
+	}
+	for _, existing := range c.caps {
+		if existing.ID == cap.ID {
+			return fmt.Errorf("capability %q already registered", cap.ID)
+		}
+	}
+	seen := make(map[string]bool, len(cap.Operations))
+	for _, op := range cap.Operations {
+		if seen[op] {
+			return fmt.Errorf("duplicate operation %q in capability %q", op, cap.ID)
+		}
+		seen[op] = true
+	}
+	c.caps = append(c.caps, cap)
+	return nil
+}
 func (c *customBody) Execute(req ExecutionRequest) (*ExecutionResult, error) {
 	return nil, ErrExecutionNotAvailable
 }

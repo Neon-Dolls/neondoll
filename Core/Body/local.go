@@ -36,11 +36,11 @@ func NewLocal() *LocalBody {
 		caps: NewCapabilityRegistry(),
 	}
 	// Register M2 target capability: runtime.info / read.
-	_ = b.caps.Register(
-		"runtime.info / read",
-		"Read runtime metadata about the Core execution environment",
-		map[string]string{},
-	)
+	_ = b.caps.Register(Capability{
+		ID:         "runtime.info",
+		Operations: []string{"read"},
+		Available:  true,
+	})
 	return b
 }
 
@@ -56,6 +56,19 @@ func (b *LocalBody) Name() string { return b.name }
 // Describe returns the capabilities the LocalBody provides.
 // In M2, this returns the pre-registered capabilities (runtime.info / read).
 func (b *LocalBody) Describe() []Capability { return b.caps.All() }
+
+// ResolveCapability checks whether a specific (capability ID, operation) pair
+// is supported and available on this LocalBody. Delegates to the internal
+// CapabilityRegistry.
+func (b *LocalBody) ResolveCapability(capID string, operation string) error {
+	return b.caps.Resolve(capID, operation)
+}
+
+// RegisterCapability declares a capability on this LocalBody, enforcing the
+// M2 registry invariants. Delegates to the internal CapabilityRegistry.
+func (b *LocalBody) RegisterCapability(cap Capability) error {
+	return b.caps.Register(cap)
+}
 
 // Execute runs a capability on this LocalBody.
 // In M1, execution is not yet available — returns an ErrExecutionNotAvailable.

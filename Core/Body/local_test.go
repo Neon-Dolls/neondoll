@@ -47,8 +47,38 @@ func TestLocalBody_DescribeReturnsCapabilities(t *testing.T) {
 	if len(caps) != 1 {
 		t.Fatalf("LocalBody.Describe() returned %d capabilities, want 1", len(caps))
 	}
-	if caps[0].Name != "runtime.info / read" {
-		t.Errorf("capability Name = %q, want %q", caps[0].Name, "runtime.info / read")
+	if caps[0].ID != "runtime.info" {
+		t.Errorf("capability ID = %q, want %q", caps[0].ID, "runtime.info")
+	}
+	if len(caps[0].Operations) != 1 || caps[0].Operations[0] != "read" {
+		t.Errorf("capability Operations = %v, want [read]", caps[0].Operations)
+	}
+	if !caps[0].Available {
+		t.Error("capability Available = false, want true")
+	}
+}
+
+func TestLocalBody_ResolveCapabilitySupportedAndAvailable(t *testing.T) {
+	b := NewLocal()
+	err := b.ResolveCapability("runtime.info", "read")
+	if err != nil {
+		t.Errorf("ResolveCapability(runtime.info, read) = %v, want nil", err)
+	}
+}
+
+func TestLocalBody_ResolveCapabilityUnknownCapability(t *testing.T) {
+	b := NewLocal()
+	err := b.ResolveCapability("nonexistent", "read")
+	if err != ErrUnsupportedCapability {
+		t.Errorf("ResolveCapability(nonexistent, read) = %v, want ErrUnsupportedCapability", err)
+	}
+}
+
+func TestLocalBody_ResolveCapabilityUnknownOperation(t *testing.T) {
+	b := NewLocal()
+	err := b.ResolveCapability("runtime.info", "write")
+	if err != ErrUnsupportedOperation {
+		t.Errorf("ResolveCapability(runtime.info, write) = %v, want ErrUnsupportedOperation", err)
 	}
 }
 
@@ -70,6 +100,8 @@ func TestLocalBody_ImplementsBodyInterface(t *testing.T) {
 	_ = b.Kind()
 	_ = b.Name()
 	_ = b.Describe()
+	_ = b.ResolveCapability("runtime.info", "read")
+	_ = b.RegisterCapability(Capability{})
 }
 
 func TestLocalBody_IdentityNotTransport(t *testing.T) {
