@@ -10,6 +10,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/Neon-Dolls/neondoll/Core/Body"
 	"github.com/Neon-Dolls/neondoll/Core/Config"
 	"github.com/Neon-Dolls/neondoll/Core/Inference"
 	"github.com/Neon-Dolls/neondoll/Core/Interaction"
@@ -71,6 +72,13 @@ func main() {
 	log.Info("inference provider created", map[string]any{
 		"provider": cfg.Inference.Provider,
 		"base_url": cfg.Inference.BaseURL,
+	})
+
+	// Create the Body Registry with the mandatory Local Body.
+	bodyRegistry := body.NewRegistry()
+	log.Info("body registry created", map[string]any{
+		"local_id": string(body.LocalBodyID),
+		"count":    bodyRegistry.Count(),
 	})
 
 	// Create the Interaction service (Doll Link ↔ Persistence bridge).
