@@ -35,10 +35,10 @@ type MessagePayload struct {
 
 // CommandPayload for slash commands and directives.
 type CommandPayload struct {
-	Command    string            `json:"command"`
-	Args       []string          `json:"args,omitempty"`
-	Flags      map[string]string `json:"flags,omitempty"`
-	Raw        string            `json:"raw,omitempty"`
+	Command string            `json:"command"`
+	Args    []string          `json:"args,omitempty"`
+	Flags   map[string]string `json:"flags,omitempty"`
+	Raw     string            `json:"raw,omitempty"`
 }
 
 // SystemPayload for lifecycle and system events.
@@ -75,10 +75,10 @@ func New(id string, typ Type, source string, payload any) Event {
 // NewDollMessage creates a message Event addressed to a specific Doll.
 func NewDollMessage(id, dollID, text string) Event {
 	return Event{
-		ID:     id,
-		Type:   TypeMessage,
-		Source: "client",
-		DollID: dollID,
+		ID:        id,
+		Type:      TypeMessage,
+		Source:    "client",
+		DollID:    dollID,
 		Timestamp: time.Now().UTC(),
 		Payload: MessagePayload{
 			Text: text,

@@ -66,7 +66,7 @@ type enterMockAPI struct {
 
 func (m *enterMockAPI) Inference() inference.Provider { return nil }
 func (m *enterMockAPI) State() *dollstate.DollState   { return m.s }
-func (m *enterMockAPI) Save() error                    { return nil }
+func (m *enterMockAPI) Save() error                   { return nil }
 
 // ──────────────────────────────────────────────
 // L0Reflex — unit tests
@@ -654,7 +654,7 @@ type errSpy struct {
 func (e *errSpy) Infer(_ context.Context, _ inference.Request) (*inference.Response, error) {
 	return nil, fmt.Errorf("%s", e.errMsg)
 }
-func (e *errSpy) ID() inference.ProviderID { return inference.ProviderID("errSpy") }
+func (e *errSpy) ID() inference.ProviderID          { return inference.ProviderID("errSpy") }
 func (e *errSpy) capturedReqs() []inference.Request { return nil }
 
 // TestEnterWake_SaveFailureSurfaced proves that a persistence failure after
@@ -694,9 +694,9 @@ func TestEnterWake_SaveFailureSurfaced(t *testing.T) {
 
 // saveFailAPI records save calls and returns a configurable error.
 type saveFailAPI struct {
-	s        *dollstate.DollState
+	s          *dollstate.DollState
 	saveCalled int
-	saveErr  error
+	saveErr    error
 }
 
 func (m *saveFailAPI) Inference() inference.Provider { return nil }
@@ -932,10 +932,11 @@ func TestEnterDoesNotBreakExistingRun(t *testing.T) {
 // subsequent restart.
 //
 // Acceptance path:
-//   pending future-wake → persist → Store.Close → new Store → LoadDoll →
-//   reconstructed Scheduler knows future Intention → advance refTime →
-//   DueIntentions → EnterWake → cognition marks Completed → persist →
-//   Store.Close → new Store → LoadDoll → DueIntentions returns nothing
+//
+//	pending future-wake → persist → Store.Close → new Store → LoadDoll →
+//	reconstructed Scheduler knows future Intention → advance refTime →
+//	DueIntentions → EnterWake → cognition marks Completed → persist →
+//	Store.Close → new Store → LoadDoll → DueIntentions returns nothing
 //
 // Two genuine close/reopen cycles prove that:
 //   - Intention identity and semantic fields survive the first restart

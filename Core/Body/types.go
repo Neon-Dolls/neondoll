@@ -5,9 +5,8 @@
 // It is NOT a transport connection, a session, or a WebSocket link. A Body
 // is an execution provider: it declares capabilities and performs operations.
 //
-// Core 2 Milestone 1 introduces the minimal vocabulary. Actual capability
-// registration (M2), authority (M3), and execution (M4) come in later
-// milestones. In M1, types exist and the mandatory Local Body can be
+// Core 2 Milestone 1 introduces the minimal vocabulary. Capability
+// registration (M2), authority (M3), and execution (M4) build on it. In M1, types exist and the mandatory Local Body can be
 // identified by identity and kind.
 package body
 
@@ -81,32 +80,108 @@ type Capability struct {
 	Metadata map[string]string `json:"metadata,omitempty"`
 }
 
-// ExecutionRequest is the input to execute a Body capability.
-// M1 defines the shape only — execution is not wired until M4.
+// ExecutionRequest is the canonical request that crosses the guarded Core
+// execution boundary (M4). It carries everything needed to identify,
+// authorize, and execute one operation: the execution ID used to correlate
+// the terminal result, the requesting Doll, the target Body, the capability,
+// the operation, and the arguments.
+//
+// The exact Arguments are presented to authority evaluation and then passed
+// unchanged to the Body operation — Guard.Execute does not authorize one
+// request and execute a mutated request.
 type ExecutionRequest struct {
-	// Capability is the Name of the capability to execute.
+	// ExecutionID is the stable, opaque correlation identity of this
+	// request. Every terminal result carries the same ID. Execution IDs
+	// are opaque: authority is never derived from them and they do not
+	// encode Body locality or provider details.
+	ExecutionID string `json:"execution_id"`
+
+	// Doll identifies the Doll requesting the operation.
+	Doll string `json:"doll"`
+
+	// Body is the target Body that would perform the operation.
+	Body BodyID `json:"body"`
+
+	// Capability is the capability ID requested (e.g. "runtime.info").
 	Capability string `json:"capability"`
 
-	// Parameters holds execution-specific key-value inputs.
-	Parameters map[string]any `json:"parameters,omitempty"`
+	// Operation is the operation requested (e.g. "read").
+	Operation string `json:"operation"`
+
+	// Arguments holds execution-specific key-value inputs. These exact
+	// arguments are what authority evaluates and what the Body executes.
+	Arguments map[string]any `json:"arguments,omitempty"`
 }
 
-// ExecutionStatus represents the state of a capability execution.
+// ExecutionStatus represents the terminal state of a capability execution.
+// M4 defines the Core 2 terminal outcome vocabulary:
+//
+//	success | denied | unsupported | invalid | unavailable | failed
+//
+// These outcomes stay distinct. Denial is not failure, an unsupported
+// capability/operation is not failure, an unavailable capability is not
+// failure, and a malformed request is not failure.
 type ExecutionStatus string
 
 const (
-	StatusPending   ExecutionStatus = "pending"
-	StatusRunning   ExecutionStatus = "running"
-	StatusCompleted ExecutionStatus = "completed"
-	StatusFailed    ExecutionStatus = "failed"
-	StatusDenied    ExecutionStatus = "denied"
+	// StatusSuccess is the terminal outcome of an authorized execution
+	// that completed its operation.
+	StatusSuccess ExecutionStatus = "success"
+
+	// StatusDenied is the terminal outcome when authority refused the
+	// request. Never collapse into StatusFailed.
+	StatusDenied ExecutionStatus = "denied"
+
+	// StatusUnsupported is the terminal outcome when the capability or
+	// operation is unknown. Never collapse into StatusFailed.
+	StatusUnsupported ExecutionStatus = "unsupported"
+
+	// StatusInvalid is the terminal outcome when the request is
+	// structurally invalid and can never execute. Never collapse into
+	// StatusFailed.
+	StatusInvalid ExecutionStatus = "invalid"
+
+	// StatusUnavailable is the terminal outcome when the capability and
+	// operation are known but not currently available. Never collapse
+	// into StatusFailed.
+	StatusUnavailable ExecutionStatus = "unavailable"
+
+	// StatusFailed is the terminal outcome when an authorized invocation
+	// failed during execution.
+	StatusFailed ExecutionStatus = "failed"
+
+	// StatusPending and StatusRunning are the pre-terminal M1/M2 lifecycle
+	// states. M4 execution is synchronous from the Core caller's
+	// perspective; these are retained for vocabulary compatibility.
+	StatusPending ExecutionStatus = "pending"
+	StatusRunning ExecutionStatus = "running"
+
+	// StatusCompleted is a legacy alias for StatusSuccess, retained for
+	// compatibility with M1/M2 vocabulary.
+	StatusCompleted ExecutionStatus = "success"
 )
 
 // ExecutionResult represents the outcome of a capability execution.
+// It carries the execution ID of the request it answers and a terminal
+// status from the M4 outcome vocabulary:
+// success | denied | unsupported | invalid | unavailable | failed.
 type ExecutionResult struct {
+	// ExecutionID correlates this result with the request that produced it.
+	ExecutionID string `json:"execution_id"`
+
+	// Status is the terminal outcome.
 	Status ExecutionStatus `json:"status"`
-	Output string          `json:"output,omitempty"`
-	Error  string          `json:"error,omitempty"`
+
+	// Output holds the operation output. Structured payloads (e.g.
+	// runtime.info / read) are JSON documents.
+	Output string `json:"output,omitempty"`
+
+	// ErrorCode is a machine-usable reason code (e.g. "no_rule",
+	// "unsupported_capability", "invocation_failed").
+	ErrorCode string `json:"error_code,omitempty"`
+
+	// Error is an optional human-readable explanation.
+	Error string `json:"error,omitempty"`
 }
 
 // String returns a human-readable representation.
@@ -154,7 +229,11 @@ type Body interface {
 	RegisterCapability(cap Capability) error
 
 	// Execute runs a capability synchronously and returns the result.
-	// In M1-M3, this is not wired — Local Execute returns an error
-	// indicating execution is not yet available.
+	// The request is already resolved and authorized by Core before it
+	// reaches the Body (see Guard.Execute). This is the Body-side
+	// invocation primitive, NOT the Core authorization boundary —
+	// production Core callers use the guarded Guard.Execute path so that
+	// no capability invocation occurs without capability resolution and
+	// authority evaluation first.
 	Execute(req ExecutionRequest) (*ExecutionResult, error)
 }

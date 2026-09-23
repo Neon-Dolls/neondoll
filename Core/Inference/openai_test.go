@@ -77,7 +77,7 @@ func TestOpenAIProvider_EmptyChoices(t *testing.T) {
 
 	provider := NewOpenAIProvider(WithBaseURL(srv.URL))
 	_, err := provider.Infer(context.Background(), Request{
-		Model: "default",
+		Model:    "default",
 		Messages: []Message{{Role: "user", Content: "Hi"}},
 	})
 	if err == nil {
@@ -100,7 +100,7 @@ func TestOpenAIProvider_EmptyContent(t *testing.T) {
 
 	provider := NewOpenAIProvider(WithBaseURL(srv.URL))
 	_, err := provider.Infer(context.Background(), Request{
-		Model: "default",
+		Model:    "default",
 		Messages: []Message{{Role: "user", Content: "Hi"}},
 	})
 	if err == nil {
@@ -119,7 +119,7 @@ func TestOpenAIProvider_NonOKStatus(t *testing.T) {
 
 	provider := NewOpenAIProvider(WithBaseURL(srv.URL))
 	_, err := provider.Infer(context.Background(), Request{
-		Model: "default",
+		Model:    "default",
 		Messages: []Message{{Role: "user", Content: "Hi"}},
 	})
 	if err == nil {
@@ -140,7 +140,7 @@ func TestOpenAIProvider_MalformedResponse(t *testing.T) {
 
 	provider := NewOpenAIProvider(WithBaseURL(srv.URL))
 	_, err := provider.Infer(context.Background(), Request{
-		Model: "default",
+		Model:    "default",
 		Messages: []Message{{Role: "user", Content: "Hi"}},
 	})
 	if err == nil {
@@ -163,7 +163,7 @@ func TestOpenAIProvider_ContextCancellation(t *testing.T) {
 	cancel() // cancel immediately
 
 	_, err := provider.Infer(ctx, Request{
-		Model: "default",
+		Model:    "default",
 		Messages: []Message{{Role: "user", Content: "Hi"}},
 	})
 	if err == nil {
@@ -189,7 +189,7 @@ func TestOpenAIProvider_ContextTimeout(t *testing.T) {
 	defer cancel()
 
 	_, err := provider.Infer(ctx, Request{
-		Model: "default",
+		Model:    "default",
 		Messages: []Message{{Role: "user", Content: "Hi"}},
 	})
 	if err == nil {

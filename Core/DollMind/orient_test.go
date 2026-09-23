@@ -20,8 +20,8 @@ type orientTestProvider struct {
 	callCount atomic.Int64
 }
 
-func (p *orientTestProvider) Name() string                { return p.name }
-func (p *orientTestProvider) ID() inference.ProviderID    { return inference.ProviderID(p.name) }
+func (p *orientTestProvider) Name() string             { return p.name }
+func (p *orientTestProvider) ID() inference.ProviderID { return inference.ProviderID(p.name) }
 func (p *orientTestProvider) Infer(_ context.Context, req inference.Request) (*inference.Response, error) {
 	p.callCount.Add(1)
 	p.lastReq = &req
@@ -39,7 +39,7 @@ type orientMockAPI struct {
 
 func (m *orientMockAPI) Inference() inference.Provider { return nil }
 func (m *orientMockAPI) State() *dollstate.DollState   { return m.state }
-func (m *orientMockAPI) Save() error                    { return nil }
+func (m *orientMockAPI) Save() error                   { return nil }
 
 func TestBuildOrientPrompt_IncludesState(t *testing.T) {
 	state := &dollstate.DollState{

@@ -69,10 +69,14 @@ func (l *Logger) log(level Level, msg string, fields map[string]any) {
 	fmt.Fprintln(l.output, string(data))
 }
 
-func (l *Logger) Debug(msg string, fields ...map[string]any) { l.log(DebugLevel, msg, merge(fields...)) }
-func (l *Logger) Info(msg string, fields ...map[string]any)  { l.log(InfoLevel, msg, merge(fields...)) }
-func (l *Logger) Warn(msg string, fields ...map[string]any)  { l.log(WarnLevel, msg, merge(fields...)) }
-func (l *Logger) Error(msg string, fields ...map[string]any) { l.log(ErrorLevel, msg, merge(fields...)) }
+func (l *Logger) Debug(msg string, fields ...map[string]any) {
+	l.log(DebugLevel, msg, merge(fields...))
+}
+func (l *Logger) Info(msg string, fields ...map[string]any) { l.log(InfoLevel, msg, merge(fields...)) }
+func (l *Logger) Warn(msg string, fields ...map[string]any) { l.log(WarnLevel, msg, merge(fields...)) }
+func (l *Logger) Error(msg string, fields ...map[string]any) {
+	l.log(ErrorLevel, msg, merge(fields...))
+}
 
 func merge(fields ...map[string]any) map[string]any {
 	if len(fields) == 0 {

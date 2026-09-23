@@ -13,7 +13,8 @@ import "fmt"
 //   - Does NOT fake WebSocket, Doll Link, or serialization
 //   - In M2, advertises runtime capabilities via its CapabilityRegistry
 //
-// Later milestones add authority (M3) and actual execution (M4).
+// M3 adds authority. M4 wires the first real Local Body operation:
+// runtime.info / read — reachable only through the guarded Core path.
 type LocalBody struct {
 	id   BodyID
 	name string
@@ -27,7 +28,8 @@ type LocalBody struct {
 // The Local Body comes with a pre-registered set of capabilities:
 //   - runtime.info / read — read runtime metadata about the Core
 //
-// Execution support is not yet available in M2 — capabilities are
+// Execution support is available in M4 — runtime.info / read executes
+// through the real Local Body. Earlier milestones kept capabilities
 // discoverable but not executable.
 func NewLocal() *LocalBody {
 	b := &LocalBody{
@@ -70,10 +72,24 @@ func (b *LocalBody) RegisterCapability(cap Capability) error {
 	return b.caps.Register(cap)
 }
 
-// Execute runs a capability on this LocalBody.
-// In M1, execution is not yet available — returns an ErrExecutionNotAvailable.
+// Execute runs a capability on this LocalBody. M4 wires the first real
+// operation: runtime.info / read returns a structured, benign runtime
+// payload (see RuntimeInfo). Any request that does not match a fully
+// implemented (capability, operation) pair returns ErrExecutionNotAvailable
+// — the Body-side primitive only implements what the Local capability surface
+// declares. Production callers reach execution through Guard.Execute, which
+// validates, resolves, and authorizes before forwarding the request.
+//
+// The request is already resolved and authorized by Core when it reaches
+// this point (see Guard.Execute). Body-local defensive checks are allowed
+// but do not replace Core authority.
 func (b *LocalBody) Execute(req ExecutionRequest) (*ExecutionResult, error) {
-	return nil, fmt.Errorf("%w: capability %q", ErrExecutionNotAvailable, req.Capability)
+	switch {
+	case req.Capability == "runtime.info" && req.Operation == "read":
+		return executeRuntimeInfoRead()
+	default:
+		return nil, fmt.Errorf("%w: capability %q operation %q", ErrExecutionNotAvailable, req.Capability, req.Operation)
+	}
 }
 
 // ErrExecutionNotAvailable is returned when a Body cannot execute

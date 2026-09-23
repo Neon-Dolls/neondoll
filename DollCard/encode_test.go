@@ -34,7 +34,7 @@ func testSparkState(t *testing.T) *dollstate.DollState {
 		},
 		Owner: dollstate.Owner{
 			OwnerID: "zero",
-			Name:  "Zero",
+			Name:    "Zero",
 			Content: "# Owner\n\nSpark's distinguished Owner is Zero.",
 		},
 		Memories: dollstate.Memories{

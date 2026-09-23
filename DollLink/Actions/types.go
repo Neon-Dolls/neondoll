@@ -13,11 +13,11 @@ const (
 
 // Action is an outbound action the Doll takes.
 type Action struct {
-	ID        string       `json:"id"`
-	Type      Type         `json:"type"`
-	Target    string       `json:"target"`
-	Payload   any          `json:"payload"`
-	Metadata  map[string]any `json:"metadata,omitempty"`
+	ID       string         `json:"id"`
+	Type     Type           `json:"type"`
+	Target   string         `json:"target"`
+	Payload  any            `json:"payload"`
+	Metadata map[string]any `json:"metadata,omitempty"`
 }
 
 // SendMessagePayload for sending a message.
@@ -41,9 +41,9 @@ type UpdateStatusPayload struct {
 
 // WebhookPayload for dispatching a webhook.
 type WebhookPayload struct {
-	URL     string `json:"url"`
-	Method  string `json:"method"`
-	Body    any    `json:"body,omitempty"`
+	URL     string            `json:"url"`
+	Method  string            `json:"method"`
+	Body    any               `json:"body,omitempty"`
 	Headers map[string]string `json:"headers,omitempty"`
 }
 

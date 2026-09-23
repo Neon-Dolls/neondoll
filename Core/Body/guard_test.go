@@ -2,18 +2,20 @@ package body
 
 import (
 	"errors"
+	"fmt"
+	"reflect"
 	"testing"
 )
 
 // ── Spy Body seam ──────────────────────────────────────────────────────
 
 // spyBody is a deterministic fake Body that records every invocation.
-// It is used to prove that denied requests never reach invocation and
-// that eligible requests are not invoked in M3.
 type spyBody struct {
 	id       BodyID
 	caps     *CapabilityRegistry
 	executed int
+	lastReq  ExecutionRequest // M4: captured for argument-equivalence tests
+	failErr  error            // M4: when non-nil, Execute returns this error
 }
 
 func newSpyBody(id BodyID) *spyBody {
@@ -39,10 +41,14 @@ func (s *spyBody) RegisterCapability(cap Capability) error {
 	return s.caps.Register(cap)
 }
 
-// Execute records the call. It must never be reached in M3.
+// Execute records the call and optionally returns the configured error.
 func (s *spyBody) Execute(req ExecutionRequest) (*ExecutionResult, error) {
 	s.executed++
-	return &ExecutionResult{Status: StatusCompleted, Output: "spy"}, nil
+	s.lastReq = req
+	if s.failErr != nil {
+		return nil, s.failErr
+	}
+	return &ExecutionResult{Status: StatusSuccess, Output: "spy"}, nil
 }
 
 // spyEvaluator is an authority evaluator whose decision is fixed.
@@ -57,10 +63,19 @@ func (e *spyEvaluator) Evaluate(req AuthorityRequest) AuthorityResult {
 	return AuthorityResult{Decision: e.decision, Reason: e.reason}
 }
 
-// ── Phase 3: Guarded Execution Boundary ────────────────────────────────
+// recordingEvaluator records the AuthorityRequest it evaluated.
+type recordingEvaluator struct {
+	inner   AuthorityEvaluator
+	lastReq AuthorityRequest
+}
 
-// TestGuard_DeniedNeverReachesInvocation proves that a denied request stops
-// at the authority boundary — Body.Execute is never called.
+func (r *recordingEvaluator) Evaluate(req AuthorityRequest) AuthorityResult {
+	r.lastReq = req
+	return r.inner.Evaluate(req)
+}
+
+// ── Phase 3: Guarded Execution Boundary (M3 — Authorize) ──────────────
+
 func TestGuard_DeniedNeverReachesInvocation(t *testing.T) {
 	registry := NewRegistry()
 	spy := newSpyBody("spy::one")
@@ -69,7 +84,6 @@ func TestGuard_DeniedNeverReachesInvocation(t *testing.T) {
 		t.Fatalf("register spy Body: %v", err)
 	}
 
-	// Explicit deny.
 	ev := &spyEvaluator{decision: AuthorityDeny, reason: "explicit_deny"}
 	guard := NewGuard(registry, ev)
 
@@ -93,8 +107,6 @@ func TestGuard_DeniedNeverReachesInvocation(t *testing.T) {
 	}
 }
 
-// TestGuard_EligibleNotInvokedInM3 proves that an allowed request is marked
-// eligible but Body.Execute is NOT called in M3.
 func TestGuard_EligibleNotInvokedInM3(t *testing.T) {
 	registry := NewRegistry()
 	spy := newSpyBody("spy::one")
@@ -119,14 +131,10 @@ func TestGuard_EligibleNotInvokedInM3(t *testing.T) {
 		t.Fatalf("Authorize() = %+v, want eligible and not denied", res)
 	}
 	if spy.executed != 0 {
-		t.Fatalf("eligible request was invoked in M3: executed = %d, want 0", spy.executed)
+		t.Fatalf("eligible request was invoked via Authorize: executed = %d, want 0", spy.executed)
 	}
 }
 
-// TestGuard_UnsupportedNeverAuthorityApproved proves unsupported capability
-// and unsupported operation fail resolution BEFORE authority — the result
-// is the M2 error, not an authority-approved execution, and the evaluator
-// is never consulted.
 func TestGuard_UnsupportedNeverAuthorityApproved(t *testing.T) {
 	registry := NewRegistry()
 	spy := newSpyBody("spy::one")
@@ -135,11 +143,9 @@ func TestGuard_UnsupportedNeverAuthorityApproved(t *testing.T) {
 		t.Fatalf("register spy Body: %v", err)
 	}
 
-	// Evaluator that would say yes — it must never even be asked.
 	ev := &spyEvaluator{decision: AuthorityAllow}
 	guard := NewGuard(registry, ev)
 
-	// Unsupported capability.
 	_, err := guard.Authorize(AuthorityRequest{
 		Doll:       "neko-chan",
 		Body:       "spy::one",
@@ -150,7 +156,6 @@ func TestGuard_UnsupportedNeverAuthorityApproved(t *testing.T) {
 		t.Fatalf("unsupported capability: err = %v, want ErrUnsupportedCapability", err)
 	}
 
-	// Unsupported operation on a known capability.
 	_, err = guard.Authorize(AuthorityRequest{
 		Doll:       "neko-chan",
 		Body:       "spy::one",
@@ -169,9 +174,6 @@ func TestGuard_UnsupportedNeverAuthorityApproved(t *testing.T) {
 	}
 }
 
-// TestGuard_UnavailableNeverAuthorityApproved proves an unavailable
-// capability fails resolution BEFORE authority — ErrUnavailable is
-// returned and the evaluator is never consulted.
 func TestGuard_UnavailableNeverAuthorityApproved(t *testing.T) {
 	registry := NewRegistry()
 	spy := newSpyBody("spy::one")
@@ -197,9 +199,6 @@ func TestGuard_UnavailableNeverAuthorityApproved(t *testing.T) {
 	}
 }
 
-// TestGuard_SameEntryHandlesAllowAndDeny proves the guarded entry point is
-// the same for both outcomes: one Guard instance routes the same request
-// shape to allow or deny depending on authority.
 func TestGuard_SameEntryHandlesAllowAndDeny(t *testing.T) {
 	registry := NewRegistry()
 	spy := newSpyBody("spy::one")
@@ -218,7 +217,6 @@ func TestGuard_SameEntryHandlesAllowAndDeny(t *testing.T) {
 		},
 	))
 
-	// Allow for the explicitly permitted Doll.
 	res, err := guard.Authorize(AuthorityRequest{
 		Doll:       "allowed-doll",
 		Body:       "spy::one",
@@ -232,7 +230,6 @@ func TestGuard_SameEntryHandlesAllowAndDeny(t *testing.T) {
 		t.Fatalf("allow path: %+v, want eligible", res)
 	}
 
-	// Deny for any other Doll via the same entry point.
 	res, err = guard.Authorize(AuthorityRequest{
 		Doll:       "unlisted-doll",
 		Body:       "spy::one",
@@ -251,8 +248,6 @@ func TestGuard_SameEntryHandlesAllowAndDeny(t *testing.T) {
 	}
 }
 
-// TestGuard_UnknownBodyIsResolutionFailure proves a request for an
-// unregistered Body is a resolution failure, not an authority decision.
 func TestGuard_UnknownBodyIsResolutionFailure(t *testing.T) {
 	registry := NewRegistry()
 	guard := NewGuard(registry, &spyEvaluator{decision: AuthorityAllow})
@@ -268,9 +263,6 @@ func TestGuard_UnknownBodyIsResolutionFailure(t *testing.T) {
 	}
 }
 
-// TestGuard_M2ErrorsAndDenialDistinct proves that unsupported capability,
-// unsupported operation, unavailable, and denied remain four distinct
-// outcomes: the first three are errors, denial is an outcome result.
 func TestGuard_M2ErrorsAndDenialDistinct(t *testing.T) {
 	registry := NewRegistry()
 	spy := newSpyBody("spy::one")
@@ -282,30 +274,360 @@ func TestGuard_M2ErrorsAndDenialDistinct(t *testing.T) {
 
 	guard := NewGuard(registry, NewRuleEvaluator()) // default deny
 
-	// Unsupported capability → error.
 	_, err := guard.Authorize(AuthorityRequest{Doll: "d", Body: "spy::one", Capability: "no.such", Operation: "read"})
 	if !errors.Is(err, ErrUnsupportedCapability) {
 		t.Errorf("unsupported capability: err = %v, want ErrUnsupportedCapability", err)
 	}
 
-	// Unsupported operation → error.
 	_, err = guard.Authorize(AuthorityRequest{Doll: "d", Body: "spy::one", Capability: "runtime.info", Operation: "write"})
 	if !errors.Is(err, ErrUnsupportedOperation) {
 		t.Errorf("unsupported operation: err = %v, want ErrUnsupportedOperation", err)
 	}
 
-	// Unavailable → error.
 	_, err = guard.Authorize(AuthorityRequest{Doll: "d", Body: "spy::one", Capability: "test:blocked", Operation: "do-thing"})
 	if !errors.Is(err, ErrUnavailable) {
 		t.Errorf("unavailable: err = %v, want ErrUnavailable", err)
 	}
 
-	// Denied → outcome, not error.
 	res, err := guard.Authorize(AuthorityRequest{Doll: "d", Body: "spy::one", Capability: "runtime.info", Operation: "read"})
 	if err != nil {
 		t.Errorf("denial: err = %v, want nil (denial is an outcome)", err)
 	}
 	if !res.Denied {
 		t.Errorf("denial: res = %+v, want denied", res)
+	}
+}
+
+// ── Phase 3: Guard.Execute — M4 Production Execution Path ─────────────
+
+func TestGuardExecute_InvalidZeroInvocation(t *testing.T) {
+	registry := NewRegistry()
+	spy := newSpyBody("spy::one")
+	_ = spy.caps.Register(Capability{ID: "runtime.info", Operations: []string{"read"}, Available: true})
+	if err := registry.Register(spy); err != nil {
+		t.Fatalf("register spy Body: %v", err)
+	}
+	ev := &spyEvaluator{decision: AuthorityAllow}
+	guard := NewGuard(registry, ev)
+
+	tests := []struct {
+		name string
+		req  ExecutionRequest
+	}{
+		{"missing-execution-id", ExecutionRequest{Doll: "d", Body: "spy::one", Capability: "runtime.info", Operation: "read"}},
+		{"missing-doll", ExecutionRequest{ExecutionID: "e1", Body: "spy::one", Capability: "runtime.info", Operation: "read"}},
+		{"missing-body", ExecutionRequest{ExecutionID: "e2", Doll: "d", Capability: "runtime.info", Operation: "read"}},
+		{"missing-capability", ExecutionRequest{ExecutionID: "e3", Doll: "d", Body: "spy::one", Operation: "read"}},
+		{"missing-operation", ExecutionRequest{ExecutionID: "e4", Doll: "d", Body: "spy::one", Capability: "runtime.info"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			res := guard.Execute(tc.req)
+			if res.Status != StatusInvalid {
+				t.Errorf("status = %q, want %q", res.Status, StatusInvalid)
+			}
+			if res.ErrorCode != "invalid_request" {
+				t.Errorf("error_code = %q, want %q", res.ErrorCode, "invalid_request")
+			}
+			if res.ExecutionID != tc.req.ExecutionID {
+				t.Errorf("execution_id = %q, want %q", res.ExecutionID, tc.req.ExecutionID)
+			}
+		})
+	}
+	if spy.executed != 0 {
+		t.Fatalf("invalid requests reached invocation: executed = %d, want 0", spy.executed)
+	}
+	if ev.calls != 0 {
+		t.Fatalf("evaluator consulted %d times for invalid requests, want 0", ev.calls)
+	}
+}
+
+func TestGuardExecute_DeniedZeroInvocation(t *testing.T) {
+	registry := NewRegistry()
+	spy := newSpyBody("spy::one")
+	_ = spy.caps.Register(Capability{ID: "runtime.info", Operations: []string{"read"}, Available: true})
+	if err := registry.Register(spy); err != nil {
+		t.Fatalf("register spy Body: %v", err)
+	}
+
+	ev := &spyEvaluator{decision: AuthorityDeny, reason: "explicit_deny"}
+	guard := NewGuard(registry, ev)
+
+	res := guard.Execute(ExecutionRequest{
+		ExecutionID: "exec-x",
+		Doll:        "neko-chan",
+		Body:        "spy::one",
+		Capability:  "runtime.info",
+		Operation:   "read",
+	})
+	if res.Status != StatusDenied {
+		t.Errorf("status = %q, want %q", res.Status, StatusDenied)
+	}
+	if res.ErrorCode != "explicit_deny" {
+		t.Errorf("error_code = %q, want %q", res.ErrorCode, "explicit_deny")
+	}
+	if res.ExecutionID != "exec-x" {
+		t.Errorf("execution_id = %q, want %q", res.ExecutionID, "exec-x")
+	}
+	if spy.executed != 0 {
+		t.Fatalf("denied request reached invocation: executed = %d, want 0", spy.executed)
+	}
+}
+
+func TestGuardExecute_UnsupportedZeroInvocation(t *testing.T) {
+	registry := NewRegistry()
+	spy := newSpyBody("spy::one")
+	_ = spy.caps.Register(Capability{ID: "runtime.info", Operations: []string{"read"}, Available: true})
+	if err := registry.Register(spy); err != nil {
+		t.Fatalf("register spy Body: %v", err)
+	}
+
+	ev := &spyEvaluator{decision: AuthorityAllow}
+	guard := NewGuard(registry, ev)
+
+	tests := []struct {
+		name     string
+		req      ExecutionRequest
+		want     ExecutionStatus
+		wantCode string
+	}{
+		{"unknown-capability", ExecutionRequest{ExecutionID: "e1", Doll: "d", Body: "spy::one", Capability: "no.such", Operation: "read"}, StatusUnsupported, "unsupported_capability"},
+		{"unknown-operation", ExecutionRequest{ExecutionID: "e2", Doll: "d", Body: "spy::one", Capability: "runtime.info", Operation: "write"}, StatusUnsupported, "unsupported_operation"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			res := guard.Execute(tc.req)
+			if res.Status != tc.want {
+				t.Errorf("status = %q, want %q", res.Status, tc.want)
+			}
+			if res.ErrorCode != tc.wantCode {
+				t.Errorf("error_code = %q, want %q", res.ErrorCode, tc.wantCode)
+			}
+			if res.ExecutionID != tc.req.ExecutionID {
+				t.Errorf("execution_id = %q, want %q", res.ExecutionID, tc.req.ExecutionID)
+			}
+		})
+	}
+	if spy.executed != 0 {
+		t.Fatalf("unsupported requests reached invocation: executed = %d, want 0", spy.executed)
+	}
+	if ev.calls != 0 {
+		t.Fatalf("evaluator consulted %d times for unsupported requests, want 0", ev.calls)
+	}
+}
+
+func TestGuardExecute_UnavailableZeroInvocation(t *testing.T) {
+	registry := NewRegistry()
+	spy := newSpyBody("spy::one")
+	_ = spy.caps.Register(Capability{ID: "runtime.info", Operations: []string{"read"}, Available: false})
+	if err := registry.Register(spy); err != nil {
+		t.Fatalf("register spy Body: %v", err)
+	}
+
+	ev := &spyEvaluator{decision: AuthorityAllow}
+	guard := NewGuard(registry, ev)
+
+	res := guard.Execute(ExecutionRequest{
+		ExecutionID: "exec-u",
+		Doll:        "d",
+		Body:        "spy::one",
+		Capability:  "runtime.info",
+		Operation:   "read",
+	})
+	if res.Status != StatusUnavailable {
+		t.Errorf("status = %q, want %q", res.Status, StatusUnavailable)
+	}
+	if res.ErrorCode != "unavailable" {
+		t.Errorf("error_code = %q, want %q", res.ErrorCode, "unavailable")
+	}
+	if res.ExecutionID != "exec-u" {
+		t.Errorf("execution_id = %q, want %q", res.ExecutionID, "exec-u")
+	}
+	if spy.executed != 0 {
+		t.Fatalf("unavailable request reached invocation: executed = %d, want 0", spy.executed)
+	}
+	if ev.calls != 0 {
+		t.Fatalf("evaluator consulted %d times for unavailable request, want 0", ev.calls)
+	}
+}
+
+func TestGuardExecute_BodyNotFoundIsInvalid(t *testing.T) {
+	registry := NewRegistry()
+	guard := NewGuard(registry, &spyEvaluator{decision: AuthorityAllow})
+
+	res := guard.Execute(ExecutionRequest{
+		ExecutionID: "exec-b",
+		Doll:        "d",
+		Body:        "ghost::body",
+		Capability:  "runtime.info",
+		Operation:   "read",
+	})
+	if res.Status != StatusInvalid {
+		t.Errorf("status = %q, want %q", res.Status, StatusInvalid)
+	}
+	if res.ErrorCode != "body_not_found" {
+		t.Errorf("error_code = %q, want %q", res.ErrorCode, "body_not_found")
+	}
+	if res.ExecutionID != "exec-b" {
+		t.Errorf("execution_id = %q, want %q", res.ExecutionID, "exec-b")
+	}
+}
+
+func TestGuardExecute_AllowInvokesExactlyOnce(t *testing.T) {
+	registry := NewRegistry()
+	spy := newSpyBody("spy::one")
+	_ = spy.caps.Register(Capability{ID: "runtime.info", Operations: []string{"read"}, Available: true})
+	if err := registry.Register(spy); err != nil {
+		t.Fatalf("register spy Body: %v", err)
+	}
+
+	guard := NewGuard(registry, &spyEvaluator{decision: AuthorityAllow})
+
+	res := guard.Execute(ExecutionRequest{
+		ExecutionID: "exec-y",
+		Doll:        "neko-chan",
+		Body:        "spy::one",
+		Capability:  "runtime.info",
+		Operation:   "read",
+	})
+	if res.Status != StatusSuccess {
+		t.Errorf("status = %q, want %q", res.Status, StatusSuccess)
+	}
+	if res.Output != "spy" {
+		t.Errorf("output = %q, want %q", res.Output, "spy")
+	}
+	if res.ExecutionID != "exec-y" {
+		t.Errorf("execution_id = %q, want %q", res.ExecutionID, "exec-y")
+	}
+	if spy.executed != 1 {
+		t.Fatalf("execute count = %d, want 1", spy.executed)
+	}
+}
+
+func TestGuardExecute_DefaultDenyRule(t *testing.T) {
+	registry := NewRegistry()
+	spy := newSpyBody("spy::one")
+	_ = spy.caps.Register(Capability{ID: "runtime.info", Operations: []string{"read"}, Available: true})
+	if err := registry.Register(spy); err != nil {
+		t.Fatalf("register spy Body: %v", err)
+	}
+
+	guard := NewGuard(registry, NewRuleEvaluator()) // default deny
+
+	res := guard.Execute(ExecutionRequest{
+		ExecutionID: "exec-d",
+		Doll:        "d",
+		Body:        "spy::one",
+		Capability:  "runtime.info",
+		Operation:   "read",
+	})
+	if res.Status != StatusDenied {
+		t.Errorf("status = %q, want %q", res.Status, StatusDenied)
+	}
+	if res.ErrorCode != "no_rule" {
+		t.Errorf("error_code = %q, want %q", res.ErrorCode, "no_rule")
+	}
+	if res.ExecutionID != "exec-d" {
+		t.Errorf("execution_id = %q, want %q", res.ExecutionID, "exec-d")
+	}
+	if spy.executed != 0 {
+		t.Fatalf("default-denied request reached invocation: executed = %d, want 0", spy.executed)
+	}
+}
+
+func TestGuardExecute_InvocationErrorFailed(t *testing.T) {
+	registry := NewRegistry()
+	spy := newSpyBody("spy::one")
+	_ = spy.caps.Register(Capability{ID: "runtime.info", Operations: []string{"read"}, Available: true})
+	if err := registry.Register(spy); err != nil {
+		t.Fatalf("register spy Body: %v", err)
+	}
+
+	// Configure spy to fail on invocation.
+	spy.failErr = fmt.Errorf("internal error")
+
+	guard := NewGuard(registry, &spyEvaluator{decision: AuthorityAllow})
+
+	res := guard.Execute(ExecutionRequest{
+		ExecutionID: "exec-f",
+		Doll:        "d",
+		Body:        "spy::one",
+		Capability:  "runtime.info",
+		Operation:   "read",
+	})
+	if res.Status != StatusFailed {
+		t.Errorf("status = %q, want %q", res.Status, StatusFailed)
+	}
+	if res.ErrorCode != "invocation_failed" {
+		t.Errorf("error_code = %q, want %q", res.ErrorCode, "invocation_failed")
+	}
+	if res.ExecutionID != "exec-f" {
+		t.Errorf("execution_id = %q, want %q", res.ExecutionID, "exec-f")
+	}
+	if spy.executed != 1 {
+		t.Fatalf("Body invoked %d times, want 1 (invocation counts even when it fails)", spy.executed)
+	}
+}
+
+func TestGuardExecute_PreservesExecutionID(t *testing.T) {
+	registry := NewRegistry()
+	spy := newSpyBody("spy::one")
+	_ = spy.caps.Register(Capability{ID: "runtime.info", Operations: []string{"read"}, Available: true})
+	if err := registry.Register(spy); err != nil {
+		t.Fatalf("register spy Body: %v", err)
+	}
+
+	guard := NewGuard(registry, &spyEvaluator{decision: AuthorityAllow})
+
+	// Success path.
+	res := guard.Execute(ExecutionRequest{ExecutionID: "s1", Doll: "d", Body: "spy::one", Capability: "runtime.info", Operation: "read"})
+	if res.ExecutionID != "s1" {
+		t.Errorf("success: execution_id = %q, want %q", res.ExecutionID, "s1")
+	}
+
+	// Denied path (different evaluator).
+	denyGuard := NewGuard(registry, &spyEvaluator{decision: AuthorityDeny})
+	res = denyGuard.Execute(ExecutionRequest{ExecutionID: "d1", Doll: "d", Body: "spy::one", Capability: "runtime.info", Operation: "read"})
+	if res.ExecutionID != "d1" {
+		t.Errorf("denied: execution_id = %q, want %q", res.ExecutionID, "d1")
+	}
+}
+
+func TestGuardExecute_ArgumentsAuthorizedEqualsArgumentsExecuted(t *testing.T) {
+	registry := NewRegistry()
+	spy := newSpyBody("spy::one")
+	_ = spy.caps.Register(Capability{ID: "runtime.info", Operations: []string{"read"}, Available: true})
+	if err := registry.Register(spy); err != nil {
+		t.Fatalf("register spy Body: %v", err)
+	}
+
+	rules := NewRuleEvaluator(
+		AuthorityRule{
+			Doll: "d", Body: "spy::one", Capability: "runtime.info", Operation: "read",
+			Decision: AuthorityAllow,
+		},
+	)
+	recorder := &recordingEvaluator{inner: rules}
+	guard := NewGuard(registry, recorder)
+
+	args := map[string]any{"key1": "value1", "nested": map[string]any{"inner": 42}}
+
+	guard.Execute(ExecutionRequest{
+		ExecutionID: "exec-a",
+		Doll:        "d",
+		Body:        "spy::one",
+		Capability:  "runtime.info",
+		Operation:   "read",
+		Arguments:   args,
+	})
+
+	if !reflect.DeepEqual(recorder.lastReq.Arguments, args) {
+		t.Errorf("authority saw different arguments: got %v, want %v", recorder.lastReq.Arguments, args)
+	}
+	if !reflect.DeepEqual(spy.lastReq.Arguments, args) {
+		t.Errorf("body executed different arguments: got %v, want %v", spy.lastReq.Arguments, args)
+	}
+	if !reflect.DeepEqual(recorder.lastReq.Arguments, spy.lastReq.Arguments) {
+		t.Error("authorized arguments differ from executed arguments")
 	}
 }

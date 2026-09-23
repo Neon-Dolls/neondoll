@@ -5,8 +5,8 @@ import (
 	"testing"
 
 	"github.com/Neon-Dolls/neondoll/Core/Inference"
-	"github.com/Neon-Dolls/neondoll/pkg/logger"
 	"github.com/Neon-Dolls/neondoll/DollState"
+	"github.com/Neon-Dolls/neondoll/pkg/logger"
 )
 
 type mockMindAPI struct {
@@ -15,7 +15,7 @@ type mockMindAPI struct {
 
 func (m *mockMindAPI) Inference() inference.Provider { return nil }
 func (m *mockMindAPI) State() *dollstate.DollState   { return m.s }
-func (m *mockMindAPI) Save() error                    { return nil }
+func (m *mockMindAPI) Save() error                   { return nil }
 
 func TestNewCognition(t *testing.T) {
 	provider := inference.NewMockProvider("mock", "Hello, doll!")

@@ -49,15 +49,15 @@ type LinkConfig struct {
 
 // WebSocketConfig for the WS server.
 type WebSocketConfig struct {
-	Enabled   bool   `json:"enabled"`
-	Listen    string `json:"listen"`
+	Enabled bool   `json:"enabled"`
+	Listen  string `json:"listen"`
 }
 
 // HTTPConfig for the API server.
 type HTTPConfig struct {
-	Enabled      bool   `json:"enabled"`
-	Listen       string `json:"listen"`
-	EnableCORS   bool   `json:"enable_cors"`
+	Enabled    bool   `json:"enabled"`
+	Listen     string `json:"listen"`
+	EnableCORS bool   `json:"enable_cors"`
 }
 
 // Defaults returns a Config with sensible defaults.

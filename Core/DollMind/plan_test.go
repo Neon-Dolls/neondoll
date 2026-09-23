@@ -605,7 +605,7 @@ func TestPlan_FutureCognition_MalformedWakeTime(t *testing.T) {
 
 func TestPlan_FutureCognition_PastWakeTime(t *testing.T) {
 	refTime := time.Date(2035, 6, 15, 12, 0, 0, 0, time.UTC)
-	pastWake := refTime.Add(-35*365*24*time.Hour).Format(time.RFC3339) // ~2000-01-01
+	pastWake := refTime.Add(-35 * 365 * 24 * time.Hour).Format(time.RFC3339) // ~2000-01-01
 	json := `{"summary":"past wake","observations":[],"should_reorient":false,"request_future_cognition":true,"future_subject":"test","future_reason":"testing","future_wake_time":"` + pastWake + `"}`
 	provider := &orientTestProvider{response: json}
 	log := logger.New(logger.ErrorLevel, nil)
