@@ -11,7 +11,10 @@
 // identified by identity and kind.
 package body
 
-import "fmt"
+import (
+	"errors"
+	"fmt"
+)
 
 // BodyID uniquely identifies a Body within a running Core. A BodyID is
 // stable for the lifetime of the Core instance and survives configuration
@@ -32,22 +35,50 @@ const (
 	BodyKindLocal BodyKind = "local"
 )
 
-// Capability describes a single operation a Body can perform. A Body
-// declares its capabilities in Describe(). The capability name is used
-// as the execution key in ExecutionRequest.
+// Sentinel errors for capability resolution.
+var (
+	// ErrUnsupportedCapability is returned when a capability ID is not
+	// declared by any registered capability on a Body.
+	ErrUnsupportedCapability = errors.New("unsupported capability")
+
+	// ErrUnsupportedOperation is returned when a capability ID exists but
+	// the requested operation is not among its declared operations.
+	ErrUnsupportedOperation = errors.New("unsupported operation")
+
+	// ErrUnavailable is returned when a capability and operation are known
+	// but the capability is marked as not currently available.
+	ErrUnavailable = errors.New("capability unavailable")
+)
+
+// Capability describes a named capability a Body can perform. A capability
+// owns one or more distinct operations and declares its availability
+// independently of any future authority layer.
 //
-// In M1, capabilities are a descriptive type only — no capabilities are
-// registered, resolved, or executed. M2 introduces the Capability Registry.
+//	ID:         "runtime.info"
+//	Operations: ["read"]
+//	Available:  true
+//
+// M2 introduces explicit capability registration with operation-level
+// resolution. Execution and authority come in later milestones.
 type Capability struct {
-	// Name is the unique key for this capability within the Body.
-	// Convention: "namespace:action" (e.g. "file:read", "shell:exec").
-	Name string `json:"name"`
+	// ID is the canonical semantic identity of this capability within
+	// the Body. Convention: "namespace:action" (e.g. "runtime.info").
+	ID string `json:"id"`
 
-	// Description is a human-readable explanation of what this capability does.
-	Description string `json:"description,omitempty"`
+	// Operations is the set of distinct operations this capability
+	// supports (e.g. ["read"]). At least one operation is required.
+	Operations []string `json:"operations"`
 
-	// Parameters describes expected parameter names and types, if known.
-	Parameters map[string]string `json:"parameters,omitempty"`
+	// Available indicates whether this capability can be used right now.
+	// A capability may exist but be unavailable (e.g. hardware offline).
+	Available bool `json:"available"`
+
+	// Constraints describes capability-specific constraints, if any.
+	Constraints map[string]string `json:"constraints,omitempty"`
+
+	// Metadata carries additional discovery-time information about
+	// this capability.
+	Metadata map[string]string `json:"metadata,omitempty"`
 }
 
 // ExecutionRequest is the input to execute a Body capability.
@@ -106,6 +137,21 @@ type Body interface {
 	// Describe returns the capabilities this Body provides.
 	// In M1, the Local Body returns an empty slice.
 	Describe() []Capability
+
+	// ResolveCapability checks whether a specific (capability ID, operation)
+	// pair is supported and available on this Body.
+	//
+	// Returns:
+	//   - nil if the capability exists, operation is declared, and Available
+	//   - ErrUnsupportedCapability if the capability ID is unknown
+	//   - ErrUnsupportedOperation if the capability exists but operation is not declared
+	//   - ErrUnavailable if the capability and operation are known but not available
+	ResolveCapability(capID string, operation string) error
+
+	// RegisterCapability declares a capability on this Body. Enforces the
+	// M2 registry invariants (non-empty ID, at least one operation, no
+	// duplicate IDs, no duplicate operations within a capability).
+	RegisterCapability(cap Capability) error
 
 	// Execute runs a capability synchronously and returns the result.
 	// In M1-M3, this is not wired — Local Execute returns an error

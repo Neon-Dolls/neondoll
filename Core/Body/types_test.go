@@ -20,14 +20,20 @@ func TestBodyKind_Values(t *testing.T) {
 	}
 }
 
-func TestCapability_HasName(t *testing.T) {
+func TestCapability_HasIDAndOperations(t *testing.T) {
 	cap := Capability{
-		Name:        "file:read",
-		Description: "Read a file from the local filesystem",
-		Parameters:  map[string]string{"path": "string"},
+		ID:         "file:read",
+		Operations: []string{"read"},
+		Available:  true,
 	}
-	if cap.Name != "file:read" {
-		t.Errorf("Capability.Name = %q, want %q", cap.Name, "file:read")
+	if cap.ID != "file:read" {
+		t.Errorf("Capability.ID = %q, want %q", cap.ID, "file:read")
+	}
+	if len(cap.Operations) != 1 || cap.Operations[0] != "read" {
+		t.Errorf("Capability.Operations = %v, want [read]", cap.Operations)
+	}
+	if !cap.Available {
+		t.Error("Capability.Available = false, want true")
 	}
 }
 
