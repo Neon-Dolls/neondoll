@@ -37,12 +37,12 @@ func TestRestoredSparkContinues(t *testing.T) {
 	// ========================================================================
 
 	const (
-		dollID         = "spark-continues"
-		canonicalName  = "Spark"
-		wantSubject    = "Check in after restoration"
-		wantDesc       = "Prove restored Spark continues outstanding agency"
-		wantIntID      = "int-continues"
-		wantWakeTime   = "2036-01-15T12:00:00Z"
+		dollID        = "spark-continues"
+		canonicalName = "Spark"
+		wantSubject   = "Check in after restoration"
+		wantDesc      = "Prove restored Spark continues outstanding agency"
+		wantIntID     = "int-continues"
+		wantWakeTime  = "2036-01-15T12:00:00Z"
 	)
 
 	srcPath, cleanupSrc := tempDB(t)

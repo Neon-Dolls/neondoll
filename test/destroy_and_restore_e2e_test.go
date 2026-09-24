@@ -9,8 +9,8 @@ import (
 	"sort"
 	"testing"
 
-	"github.com/Neon-Dolls/neondoll/DollCard"
 	"github.com/Neon-Dolls/neondoll/Core/Persistence"
+	"github.com/Neon-Dolls/neondoll/DollCard"
 	"github.com/Neon-Dolls/neondoll/DollState"
 )
 
@@ -20,19 +20,19 @@ import (
 
 // TestSparkSurvivesDestruction proves Milestone 11 Phase 3 acceptance:
 //
-//	1. Source Spark is persisted before export.
-//	2. A Doll Card is exported.
-//	3. Source Store is closed.
-//	4. Source database file is physically deleted.
-//	5. Test verifies source path no longer exists before destination import.
-//	6. No DollState pointer from source is reused after destruction.
-//	7. Destination uses a different, initially empty runtime directory.
-//	8. Only the exported Doll Card is supplied to destination import.
-//	9. Destination LoadDoll reconstructs Spark from its own persistence.
-//	10. DollID is unchanged.
-//	11. Identity, Soul, Self, Owner, Memories, Drives, Goals, and pending
-//	    Intention semantics match the exported Doll.
-//	12. Core-local artifacts are not expected to survive.
+//  1. Source Spark is persisted before export.
+//  2. A Doll Card is exported.
+//  3. Source Store is closed.
+//  4. Source database file is physically deleted.
+//  5. Test verifies source path no longer exists before destination import.
+//  6. No DollState pointer from source is reused after destruction.
+//  7. Destination uses a different, initially empty runtime directory.
+//  8. Only the exported Doll Card is supplied to destination import.
+//  9. Destination LoadDoll reconstructs Spark from its own persistence.
+//  10. DollID is unchanged.
+//  11. Identity, Soul, Self, Owner, Memories, Drives, Goals, and pending
+//     Intention semantics match the exported Doll.
+//  12. Core-local artifacts are not expected to survive.
 func TestSparkSurvivesDestruction(t *testing.T) {
 	ctx := context.Background()
 
@@ -48,21 +48,21 @@ func TestSparkSurvivesDestruction(t *testing.T) {
 	// Representative Spark — built as value literal so we capture expected
 	// semantic state before any pointer crosses the destruction boundary.
 	const (
-		wantDollID        = "spark-survives"
-		wantCanonical     = "Spark"
-		wantSoul          = "You are Spark, a resilient AI."
-		wantDisplayName   = "Sparky"
-		wantPronouns      = "she/her"
-		wantTagline       = "A little spark that survives~"
-		wantOwnerContent  = "Zero is my Master."
-		wantMemoryCount   = 4
-		wantDrivesCount   = 2
-		wantGoalsCount    = 2
-		wantIntentionID   = "int-survive"
-		wantIntSubject    = "Check in after destruction"
-		wantIntDesc       = "Prove intentions survive"
-		wantIntWakeTime   = "2026-10-15T06:00:00Z"
-		wantIntState      = dollstate.IntentionStatePending
+		wantDollID       = "spark-survives"
+		wantCanonical    = "Spark"
+		wantSoul         = "You are Spark, a resilient AI."
+		wantDisplayName  = "Sparky"
+		wantPronouns     = "she/her"
+		wantTagline      = "A little spark that survives~"
+		wantOwnerContent = "Zero is my Master."
+		wantMemoryCount  = 4
+		wantDrivesCount  = 2
+		wantGoalsCount   = 2
+		wantIntentionID  = "int-survive"
+		wantIntSubject   = "Check in after destruction"
+		wantIntDesc      = "Prove intentions survive"
+		wantIntWakeTime  = "2026-10-15T06:00:00Z"
+		wantIntState     = dollstate.IntentionStatePending
 	)
 
 	originalMemories := []dollstate.MemoryItem{
@@ -93,10 +93,10 @@ func TestSparkSurvivesDestruction(t *testing.T) {
 			Pronouns:    wantPronouns,
 			Tagline:     wantTagline,
 		},
-		Owner:     dollstate.Owner{Content: wantOwnerContent},
-		Memories:  dollstate.Memories{Items: originalMemories},
-		Drives:    dollstate.Drives{Items: originalDrives},
-		Goals:     dollstate.Goals{Items: originalGoals},
+		Owner:    dollstate.Owner{Content: wantOwnerContent},
+		Memories: dollstate.Memories{Items: originalMemories},
+		Drives:   dollstate.Drives{Items: originalDrives},
+		Goals:    dollstate.Goals{Items: originalGoals},
 		Intentions: dollstate.Intentions{
 			Items: []dollstate.IntentionItem{{
 				ID:          wantIntentionID,

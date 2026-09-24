@@ -223,8 +223,9 @@ func TestContinuity_MemorySurvivesStoreReopen(t *testing.T) {
 //
 // Spark's doll card is enriched with a continuity Drive and an active Goal
 // before cognition. A purpose-aware mock provider returns structured JSON:
-//   Orient: matters=true (the event touches on Spark's continuity Drive)
-//   Plan:   request_future_cognition=true (Spark should revisit later)
+//
+//	Orient: matters=true (the event touches on Spark's continuity Drive)
+//	Plan:   request_future_cognition=true (Spark should revisit later)
 //
 // The mock WakeTime is set far in the future (2035) so validation passes
 // regardless of real clock. The intention's Subject and exact WakeTime are
@@ -452,7 +453,7 @@ type storeBackedMindAPI struct {
 }
 
 func (m *storeBackedMindAPI) Inference() inference.Provider { return m.provider }
-func (m *storeBackedMindAPI) State() *dollstate.DollState    { return m.state }
+func (m *storeBackedMindAPI) State() *dollstate.DollState   { return m.state }
 func (m *storeBackedMindAPI) Save() error {
 	return m.store.SaveDoll(m.ctx, m.state)
 }
