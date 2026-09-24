@@ -77,7 +77,7 @@ func newConformanceState() *dollstate.DollState {
 	return &dollstate.DollState{
 		Identity: dollstate.Identity{CanonicalName: "Spark"},
 		Soul:     dollstate.Soul{Content: "A curious little AI girl."},
-		Owner:    dollstate.Owner{Name: "Zero"},
+		Owner:    dollstate.Owner{Name: "Zero", Content: "Zero"},
 	}
 }
 
@@ -160,11 +160,16 @@ func TestM6_PositiveProof_TwoSequentialToolCalls(t *testing.T) {
 	if plan == nil {
 		t.Fatal("Plan() returned nil plan")
 	}
-	if dirty {
-		t.Error("Plan() returned dirty=true, want false (no intention created)")
-	}
 	if plan.Summary != "M6 positive proof: two tools executed" {
 		t.Errorf("plan.Summary = %q, want %q", plan.Summary, "M6 positive proof: two tools executed")
+	}
+	if len(plan.Observations) == 0 {
+		t.Error("expected non-empty observations")
+	}
+	// Dirty=false — observations alone don't materialise into memory
+	// Only explicitly retained experience becomes durable Doll Memory.
+	if dirty {
+		t.Errorf("Plan() returned dirty=%v, want false (observations are ephemeral)", dirty)
 	}
 
 	// Verify the provider was called 3 times (2 tool rounds + 1 final)
@@ -245,11 +250,12 @@ func TestM6_NoToolInference_BehavesAsBefore(t *testing.T) {
 	if plan == nil {
 		t.Fatal("Plan() returned nil plan")
 	}
-	if dirty {
-		t.Error("Plan() returned dirty=true, want false")
-	}
 	if plan.Summary != "no-tool backward compat" {
 		t.Errorf("plan.Summary = %q, want %q", plan.Summary, "no-tool backward compat")
+	}
+	// Dirty=false — observations alone don't materialise into memory
+	if dirty {
+		t.Errorf("Plan() returned dirty=%v, want false (observations are ephemeral)", dirty)
 	}
 	// Provider called exactly once (no tool loop)
 	if len(prov.lastReqs) != 1 {
