@@ -48,7 +48,7 @@ type e2ePersistedAPI struct {
 }
 
 func (m *e2ePersistedAPI) Inference() inference.Provider { return nil }
-func (m *e2ePersistedAPI) State() *dollstate.DollState    { return m.state }
+func (m *e2ePersistedAPI) State() *dollstate.DollState   { return m.state }
 func (m *e2ePersistedAPI) Save() error {
 	return m.store.SaveDoll(context.Background(), m.state)
 }
@@ -68,15 +68,15 @@ func tempDB(t *testing.T) (string, func()) {
 // TestSparkActs_E2E_VerticalSlice proves the complete Milestone 10 pathway.
 //
 // Acceptance criteria (from 3-connected-client-observes-autonomous-spark.md):
-//   1. client is connected before the autonomous wake,
-//   2. Spark has a pending future Intention,
-//   3. no inbound human message is sent to trigger the action,
-//   4. the Intention is initially not due,
-//   5. advancing deterministic time makes it due,
-//   6. the wake enters cognition as internal_wake,
-//   7. L2 proposes the expected outbound text,
-//   8. Core validates and dispatches it,
-//   9. the client receives the expected canonical action,
+//  1. client is connected before the autonomous wake,
+//  2. Spark has a pending future Intention,
+//  3. no inbound human message is sent to trigger the action,
+//  4. the Intention is initially not due,
+//  5. advancing deterministic time makes it due,
+//  6. the wake enters cognition as internal_wake,
+//  7. L2 proposes the expected outbound text,
+//  8. Core validates and dispatches it,
+//  9. the client receives the expected canonical action,
 //  10. the action is attributable to the autonomous wake path,
 //  11. the triggering Intention becomes Completed and durably persisted,
 //  12. it is not re-dispatched because Core checks due Intentions again.

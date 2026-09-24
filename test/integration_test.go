@@ -35,7 +35,7 @@ type mockMindAPI struct {
 
 func (m *mockMindAPI) Inference() inference.Provider { return nil }
 func (m *mockMindAPI) State() *dollstate.DollState   { return m.s }
-func (m *mockMindAPI) Save() error                    { return nil }
+func (m *mockMindAPI) Save() error                   { return nil }
 
 func TestIntegrationStateSaveLoad(t *testing.T) {
 	dir := t.TempDir()

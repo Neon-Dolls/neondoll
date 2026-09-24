@@ -9,8 +9,8 @@ import (
 	"sort"
 	"testing"
 
-	"github.com/Neon-Dolls/neondoll/DollCard"
 	"github.com/Neon-Dolls/neondoll/Core/Persistence"
+	"github.com/Neon-Dolls/neondoll/DollCard"
 	"github.com/Neon-Dolls/neondoll/DollState"
 )
 
@@ -147,16 +147,16 @@ func representativeSparkState(t *testing.T) *dollstate.DollState {
 
 // TestExportImportBoundary proves Milestone 11 Phase 2 acceptance:
 //
-//	1. Source Store contains a representative persisted Spark.
-//	2. Export loads canonical Doll State and writes a valid Doll Card.
-//	3. Destination Store begins empty.
-//	4. Import decodes the Card into Doll State.
-//	5. Destination persists the decoded state using its normal persistence API.
-//	6. A fresh LoadDoll from destination returns Spark with required semantic state.
-//	7. Source and destination database files are distinct.
-//	8. Destination import does not read from the source Store after Card creation.
-//	9. Outstanding pending Intentions remain pending with the same semantic wake time.
-//	10. No source database IDs or persistence representation are required for import.
+//  1. Source Store contains a representative persisted Spark.
+//  2. Export loads canonical Doll State and writes a valid Doll Card.
+//  3. Destination Store begins empty.
+//  4. Import decodes the Card into Doll State.
+//  5. Destination persists the decoded state using its normal persistence API.
+//  6. A fresh LoadDoll from destination returns Spark with required semantic state.
+//  7. Source and destination database files are distinct.
+//  8. Destination import does not read from the source Store after Card creation.
+//  9. Outstanding pending Intentions remain pending with the same semantic wake time.
+//  10. No source database IDs or persistence representation are required for import.
 func TestExportImportBoundary(t *testing.T) {
 	ctx := context.Background()
 

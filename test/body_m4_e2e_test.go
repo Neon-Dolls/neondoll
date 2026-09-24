@@ -38,8 +38,8 @@ func (c *countingBody) Execute(req body.ExecutionRequest) (*body.ExecutionResult
 // ── Recording evaluator for argument-equivalence proof ─────────────────
 
 type recordingEvaluator struct {
-	inner  body.AuthorityEvaluator
-	last   body.AuthorityRequest
+	inner body.AuthorityEvaluator
+	last  body.AuthorityRequest
 }
 
 func (r *recordingEvaluator) Evaluate(req body.AuthorityRequest) body.AuthorityResult {
