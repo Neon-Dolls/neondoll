@@ -51,8 +51,8 @@ func TestLocalBody_DescribeReturnsCapabilities(t *testing.T) {
 	if caps[0].ID != "runtime.info" {
 		t.Errorf("capability ID = %q, want %q", caps[0].ID, "runtime.info")
 	}
-	if len(caps[0].Operations) != 1 || caps[0].Operations[0] != "read" {
-		t.Errorf("capability Operations = %v, want [read]", caps[0].Operations)
+	if len(caps[0].Operations) != 2 || caps[0].Operations[0] != "read" || caps[0].Operations[1] != "list" {
+		t.Errorf("capability Operations = %v, want [read list]", caps[0].Operations)
 	}
 	if !caps[0].Available {
 		t.Error("capability Available = false, want true")
@@ -200,5 +200,22 @@ func TestLocalBody_NewLocalIsDeterministic(t *testing.T) {
 	b2 := NewLocal()
 	if b1.ID() != b2.ID() {
 		t.Errorf("expected deterministic IDs, got %q and %q", b1.ID(), b2.ID())
+	}
+}
+
+func TestLocalBody_ExecuteRuntimeInfoList(t *testing.T) {
+	b := NewLocal()
+	res, err := b.Execute(ExecutionRequest{Capability: "runtime.info", Operation: "list"})
+	if err != nil {
+		t.Fatalf("Execute(runtime.info, list) = %v, want nil", err)
+	}
+	if res == nil {
+		t.Fatal("Execute(runtime.info, list) returned nil result")
+	}
+	if res.Status != StatusSuccess {
+		t.Errorf("status = %q, want %q", res.Status, StatusSuccess)
+	}
+	if res.Output == "" {
+		t.Error("Output must not be empty")
 	}
 }

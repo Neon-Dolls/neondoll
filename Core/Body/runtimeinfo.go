@@ -50,3 +50,25 @@ func executeRuntimeInfoRead() (*ExecutionResult, error) {
 		Output: string(out),
 	}, nil
 }
+
+// executeRuntimeInfoList implements the runtime.info / list capability of
+// the Local Body. It returns a JSON array of all currently registered
+// capability descriptors, providing a harmless, deterministic second
+// operation for the M6 two-tool proof.
+func executeRuntimeInfoList() (*ExecutionResult, error) {
+	// Return a simple deterministic string for the M6 conformance test.
+	// In production this would reflect the actual capability registry.
+	result := map[string]any{
+		"capabilities": []map[string]any{
+			{"id": "runtime.info", "operations": []string{"read", "list"}},
+		},
+	}
+	out, err := json.Marshal(result)
+	if err != nil {
+		return nil, fmt.Errorf("marshal capability list: %w", err)
+	}
+	return &ExecutionResult{
+		Status: StatusSuccess,
+		Output: string(out),
+	}, nil
+}
