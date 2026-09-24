@@ -271,8 +271,8 @@ func TestScheduler_Enter_CommandReturnsOrientation(t *testing.T) {
 	if len(result.Actions) != 0 {
 		t.Errorf("expected 0 actions from command orient, got %d", len(result.Actions))
 	}
-	if result.StateDirty {
-		t.Error("expected StateDirty=false")
+	if !result.StateDirty {
+		t.Errorf("expected StateDirty=true (observations materialised), got false")
 	}
 	if calls := int(spy.calls.Load()); calls != 2 {
 		t.Errorf("expected 2 inference calls (orient + plan), got %d", calls)

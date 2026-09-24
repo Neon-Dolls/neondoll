@@ -277,6 +277,8 @@ func (s *Scheduler) Plan(ctx context.Context, eventType events.Type, input strin
 		if err != nil {
 			return nil, false, fmt.Errorf("plan intention: %w", err)
 		}
+		obsDirty := s.materialiseObservations(plan)
+		dirty = dirty || obsDirty
 		return plan, dirty, nil
 	}
 
@@ -310,6 +312,8 @@ func (s *Scheduler) Plan(ctx context.Context, eventType events.Type, input strin
 	if err != nil {
 		return nil, false, fmt.Errorf("plan intention: %w", err)
 	}
+	obsDirty := s.materialiseObservations(plan)
+	dirty = dirty || obsDirty
 	return plan, dirty, nil
 }
 
@@ -371,6 +375,45 @@ func (s *Scheduler) materialiseIntention(plan *Plan) (bool, error) {
 	}
 
 	return true, nil
+}
+
+// materialiseObservations converts a Plan's Observations into semantic
+// MemoryItems stored in Doll State for continuity across Core persistence
+// boundaries.
+//
+// It persists only what the Plan's Observations carry — the semantic meaning
+// Spark chose to retain. Raw tool transcripts, ToolCall IDs, execution IDs,
+// and provider artifacts are NOT persisted. This is the M7 boundary between
+// ephemeral execution data and durable semantic experience.
+//
+// It returns true if state was mutated.
+func (s *Scheduler) materialiseObservations(plan *Plan) bool {
+	if len(plan.Observations) == 0 {
+		return false
+	}
+
+	state := s.mindAPI.State()
+	now := s.timeProvider().Format(time.RFC3339)
+	seq := len(state.Memories.Items)
+
+	for _, obs := range plan.Observations {
+		mem := dollstate.MemoryItem{
+			ID:        uuid.New().String(),
+			Kind:      dollstate.KindObservation,
+			Content:   obs,
+			Sequence:  seq,
+			Timestamp: now,
+		}
+		state.Memories.Items = append(state.Memories.Items, mem)
+		seq++
+	}
+
+	s.log.Info("observations materialised",
+		map[string]any{
+			"count": len(plan.Observations),
+		})
+
+	return true
 }
 
 // ── Phase 5 — Cognition Run Tool Loop ───────────────────────────────────

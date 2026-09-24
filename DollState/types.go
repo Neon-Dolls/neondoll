@@ -56,6 +56,7 @@ type Memories struct {
 const (
 	KindHumanMessage = "human_message"
 	KindDollResponse = "doll_response"
+	KindObservation  = "observation"
 )
 
 // MemoryItem is a single memory record in the Doll's portable memory stream.
