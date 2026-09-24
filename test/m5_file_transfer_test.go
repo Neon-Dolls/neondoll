@@ -7,7 +7,6 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/json"
-	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -76,7 +75,12 @@ func (s *e2eTestServer) url() string {
 
 // handleWS accepts one WebSocket connection and acts as a receiver.
 // It understands the file transfer control messages and NDF1 binary frames.
+// Uses OpenRetained so that a reconnection with the same file_id finds
+// the partial file and resumes at the correct offset.
 func (s *e2eTestServer) handleWS(w http.ResponseWriter, r *http.Request) {
+	// Route file storage to the test server's temp directory so
+	// completed files appear where the test can find them.
+	ft.DefaultStorageDir = s.storage
 	upgrader := websocket.Upgrader{
 		CheckOrigin: func(r *http.Request) bool { return true },
 	}
@@ -89,7 +93,6 @@ func (s *e2eTestServer) handleWS(w http.ResponseWriter, r *http.Request) {
 
 	var rs *ft.ReceiveState
 	var offer *ft.Offer
-	completed := false
 
 	for {
 		mt, raw, err := conn.ReadMessage()
@@ -111,7 +114,7 @@ func (s *e2eTestServer) handleWS(w http.ResponseWriter, r *http.Request) {
 				s.t.Logf("server received offer: file=%s size=%d", p.FileID, p.Size)
 				// Accept at offset 0 (new transfer)
 				offer = &p
-				rs, err = ft.NewReceiveState(p.FileID, p.TransferID, p.Size, p.SHA256)
+				rs, err = ft.OpenRetained(p.FileID, p.TransferID, p.Size, p.SHA256)
 				if err != nil {
 					s.t.Logf("NewReceiveState: %v", err)
 					reject := ft.ControlMessage{Type: ft.TypeReject, Payload: ft.Reject{FileID: p.FileID, TransferID: p.TransferID, Reason: "io_error", Message: err.Error()}}
@@ -119,11 +122,11 @@ func (s *e2eTestServer) handleWS(w http.ResponseWriter, r *http.Request) {
 					_ = conn.WriteMessage(websocket.TextMessage, b)
 					return
 				}
-				// Send accept
+				// Send accept with the actual retained offset
 				accept := ft.ControlMessage{Type: ft.TypeAccept, Payload: ft.Accept{
 					FileID:     p.FileID,
 					TransferID: p.TransferID,
-					Offset:     0,
+					Offset:     rs.RetainedOffset(),
 				}}
 				b, _ := json.Marshal(accept)
 				if err := conn.WriteMessage(websocket.TextMessage, b); err != nil {
@@ -144,9 +147,10 @@ func (s *e2eTestServer) handleWS(w http.ResponseWriter, r *http.Request) {
 					s.t.Logf("complete with no receive state")
 					return
 				}
-				s.t.Logf("server received complete")
-				if rs.IsCompleted() {
-					completed = true
+				if rs.RetainedOffset() >= rs.Size {
+					if !rs.IsCompleted() {
+						_ = rs.Complete()
+					}
 					recv := ft.ControlMessage{Type: ft.TypeReceived, Payload: ft.Received{
 						FileID:     offer.FileID,
 						TransferID: offer.TransferID,
@@ -154,7 +158,7 @@ func (s *e2eTestServer) handleWS(w http.ResponseWriter, r *http.Request) {
 					b, _ := json.Marshal(recv)
 					_ = conn.WriteMessage(websocket.TextMessage, b)
 				} else {
-					s.t.Logf("complete but file not finished (completed=%v retained=%d)", completed, rs.RetainedOffset())
+					s.t.Logf("complete but file not finished (retained=%d, need %d)", rs.RetainedOffset(), rs.Size)
 				}
 
 			case ft.Received:
@@ -181,10 +185,12 @@ func (s *e2eTestServer) handleWS(w http.ResponseWriter, r *http.Request) {
 				s.t.Logf("WriteFrame: %v", err)
 				return
 			}
-			if rs.IsCompleted() {
-				completed = true
-				_ = rs.Complete()
-				s.t.Logf("file complete via binary frames (%d bytes)", rs.RetainedOffset())
+			if rs.RetainedOffset() >= rs.Size {
+				if err := rs.Complete(); err != nil {
+					s.t.Logf("Complete error: %v", err)
+				} else {
+					s.t.Logf("file complete via binary frames (%d bytes)", rs.RetainedOffset())
+				}
 			}
 		}
 	}
@@ -322,42 +328,49 @@ func TestM5_FileTransfer_CoreToBody(t *testing.T) {
 
 	// Verify the server received the file correctly by checking
 	// the partial file in storage.
-	files, err := os.ReadDir(server.storage)
+	files, err := os.ReadDir(filepath.Join(server.storage, "neondoll-transfer"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(files) == 0 {
 		t.Fatal("no files in server storage")
 	}
-	// Find the completed file
+	// Find the completed file — skip .partial files
 	var matched bool
 	for _, fi := range files {
-		if strings.HasPrefix(fi.Name(), "completed_") {
-			matched = true
-			recvPath := filepath.Join(server.storage, fi.Name())
-			recvData, err := os.ReadFile(recvPath)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if len(recvData) != size {
-				t.Fatalf("size mismatch: got %d, want %d", len(recvData), size)
-			}
-			if !bytes.Equal(recvData, data) {
-				t.Fatal("content mismatch")
-			}
-			recvSHA := ft.SHA256Hex(recvData)
-			if recvSHA != sha {
-				t.Fatalf("SHA mismatch: got %s, want %s", recvSHA, sha)
-			}
-			t.Logf("Core→Body: %d bytes verified (%s)", len(recvData), recvSHA)
+		if fi.IsDir() || strings.HasSuffix(fi.Name(), ".partial") {
+			continue
 		}
+		matched = true
+		recvPath := filepath.Join(server.storage, "neondoll-transfer", fi.Name())
+		recvData, err := os.ReadFile(recvPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(recvData) != size {
+			t.Fatalf("size mismatch: got %d, want %d", len(recvData), size)
+		}
+		if !bytes.Equal(recvData, data) {
+			t.Fatal("content mismatch")
+		}
+		recvSHA := ft.SHA256Hex(recvData)
+		if recvSHA != sha {
+			t.Fatalf("SHA mismatch: got %s, want %s", recvSHA, sha)
+		}
+		t.Logf("Core→Body: %d bytes verified (%s)", len(recvData), recvSHA)
 	}
 	if !matched {
 		t.Fatal("no completed file found in server storage")
 	}
 }
 
-// ── Test: Body → Core, 20 MiB file ───────────────────────────────────
+// ── Test: Body → Core, 20 MiB file with resume ─────────────────────────
+//
+// Tests the Body→Core direction: the "Body" (test peer acting as sender)
+// connects to the "Core" (server acting as receiver) and sends a 20 MiB
+// file. The WebSocket connection is forcibly broken mid-transfer, then
+// the Body reconnects and resumes from the retained offset. The final
+// file is verified by size, SHA-256, and byte equality.
 
 func TestM5_FileTransfer_BodyToCore(t *testing.T) {
 	if testing.Short() {
@@ -366,7 +379,7 @@ func TestM5_FileTransfer_BodyToCore(t *testing.T) {
 	server := newE2ETestServer(t)
 	defer server.close()
 
-	// Generate 20 MiB file that the "body" (server) will send back
+	// Generate 20 MiB file that the "Body" will send to "Core"
 	size := 20 * 1024 * 1024
 	srcPath := filepath.Join(t.TempDir(), "body_to_core.bin")
 	data := make([]byte, size)
@@ -379,70 +392,213 @@ func TestM5_FileTransfer_BodyToCore(t *testing.T) {
 	sha := ft.SHA256Hex(data)
 	fid := ft.FileID("test:body-to-core-20mib")
 
-	// Dial as receiver
+	// 1. First connection: offer, send ~200 KiB, then kill the connection
 	dialer := websocket.Dialer{HandshakeTimeout: 5 * time.Second}
 	conn, _, err := dialer.Dial(server.url(), nil)
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
-	defer conn.Close()
 
 	tid := ft.TransferIDFromUUID(uuid.New())
+	chunkSz := 256 * 1024
+	firstBatch := int64(200 * 1024) // send ~200 KiB before killing
 
-	// Have the server send us a file — but the server only receives,
-	// it doesn't send. So for this test, the "Core" (us) will receive
-	// from the server where the server is the sender. We'll make the
-	// server act as sender by passing the file path through.
+	// Build the sender state for the full file
+	sender, err := ft.NewSenderState(fid, tid, srcPath, int64(size), chunkSz)
+	if err != nil {
+		t.Fatalf("NewSenderState: %v", err)
+	}
+	defer sender.Close()
 
-	// Actually, the simplest approach: the test peer receives — we
-	// need a separate mechanism for server→client direction.
-	//
-	// For Body→Core, we establish a dedicated WebSocket where the
-	// test peer (acting as Body) sends us a file. The server already
-	// only receives. So let's create a minimal separate sender peer
-	// that connects and sends like sendFileToPeer does, but in reverse:
-	// the test runs the receiver side locally.
+	// Offer the file
+	offer := ft.ControlMessage{
+		Type: ft.TypeOffer,
+		Payload: ft.Offer{
+			FileID:     fid,
+			TransferID: tid,
+			Size:       int64(size),
+			SHA256:     sha,
+			Metadata:   map[string]string{"name": "body_to_core.bin"},
+		},
+	}
+	b, _ := json.Marshal(offer)
+	if err := conn.WriteMessage(websocket.TextMessage, b); err != nil {
+		t.Fatalf("write offer: %v", err)
+	}
 
-	// Reset: use a temporary receiver on the test side
-	destDir := t.TempDir()
+	// Wait for accept (offset 0)
+	_, resp, err := conn.ReadMessage()
+	if err != nil {
+		t.Fatalf("read accept: %v", err)
+	}
+	var msg ft.ControlMessage
+	if err := json.Unmarshal(resp, &msg); err != nil {
+		t.Fatalf("parse accept: %v", err)
+	}
+	if msg.Type != ft.TypeAccept {
+		t.Fatalf("expected accept, got %s", msg.Type)
+	}
+	accept, ok := msg.Payload.(ft.Accept)
+	if !ok {
+		t.Fatalf("payload type: %T", msg.Payload)
+	}
+	if accept.Offset != 0 {
+		t.Fatalf("first accept offset: got %d, want 0", accept.Offset)
+	}
+	t.Logf("Body→Core 1st offer accepted @ offset %d", accept.Offset)
 
-	// The "Body" peer is a sender that connects to us (the Core receiver).
-	// We need a server on the test side that acts as Core.
-	// Simpler approach: have the test open a listener, have a sender
-	// goroutine connect and offer the file, then receive on the test side.
+	// Send ~200 KiB in chunks, then kill the connection
+	var sent int64
+	for sent < firstBatch {
+		frame, fErr := sender.NextFrame()
+		if fErr == io.EOF {
+			break
+		}
+		if fErr != nil {
+			t.Fatalf("NextFrame: %v", fErr)
+		}
+		frameBytes, mErr := frame.MarshalBinary()
+		if mErr != nil {
+			t.Fatalf("marshal frame @ offset %d: %v", frame.Header.Offset, mErr)
+		}
+		if wErr := conn.WriteMessage(websocket.BinaryMessage, frameBytes); wErr != nil {
+			t.Fatalf("write frame @ offset %d: %v", frame.Header.Offset, wErr)
+		}
+		sent += int64(len(frame.Payload))
+	}
 
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	// 2. Shoot the connection before the file is complete
+	t.Logf("killing connection after %d bytes...", sent)
+	conn.Close()
+
+	// Allow server to process the last frames
+	time.Sleep(200 * time.Millisecond)
+
+	// 3. Reconnect with same file_id, new transfer_id, resume
+	conn2, _, err := dialer.Dial(server.url(), nil)
+	if err != nil {
+		t.Fatalf("dial2: %v", err)
+	}
+	defer conn2.Close()
+
+	tid2 := ft.TransferIDFromUUID(uuid.New())
+	offer2 := ft.ControlMessage{
+		Type: ft.TypeOffer,
+		Payload: ft.Offer{
+			FileID:     fid,
+			TransferID: tid2,
+			Size:       int64(size),
+			SHA256:     sha,
+			Metadata:   map[string]string{"name": "body_to_core.bin"},
+		},
+	}
+	b2, _ := json.Marshal(offer2)
+	if err := conn2.WriteMessage(websocket.TextMessage, b2); err != nil {
+		t.Fatalf("write re-offer: %v", err)
+	}
+
+	// 4. Wait for re-accept with non-zero offset
+	_, resp2, err := conn2.ReadMessage()
+	if err != nil {
+		t.Fatalf("read re-accept: %v", err)
+	}
+	var msg2 ft.ControlMessage
+	if err := json.Unmarshal(resp2, &msg2); err != nil {
+		t.Fatalf("parse re-accept: %v", err)
+	}
+	if msg2.Type != ft.TypeAccept {
+		t.Fatalf("expected re-accept, got %s", msg2.Type)
+	}
+	accept2, ok := msg2.Payload.(ft.Accept)
+	if !ok {
+		t.Fatalf("payload2 type: %T", msg2.Payload)
+	}
+	if accept2.Offset == 0 {
+		t.Fatal("re-accept offset is 0 — resume did not work")
+	}
+	t.Logf("Body→Core re-accepted @ offset %d (resume confirmed)", accept2.Offset)
+
+	// 5. Seek sender to the resume offset and send the rest
+	if err := sender.SeekTo(accept2.Offset); err != nil {
+		t.Fatalf("SeekTo(%d): %v", accept2.Offset, err)
+	}
+	for {
+		frame, fErr := sender.NextFrame()
+		if fErr == io.EOF {
+			break
+		}
+		if fErr != nil {
+			t.Fatalf("NextFrame after resume: %v", fErr)
+		}
+		frameBytes, mErr := frame.MarshalBinary()
+		if mErr != nil {
+			t.Fatalf("marshal frame @ offset %d: %v", frame.Header.Offset, mErr)
+		}
+		if wErr := conn2.WriteMessage(websocket.BinaryMessage, frameBytes); wErr != nil {
+			t.Fatalf("write frame @ offset %d: %v", frame.Header.Offset, wErr)
+		}
+	}
+
+	// 6. Send file.complete
+	comp := ft.ControlMessage{
+		Type: ft.TypeComplete,
+		Payload: ft.Complete{
+			FileID:     fid,
+			TransferID: tid2,
+		},
+	}
+	b4, _ := json.Marshal(comp)
+	if err := conn2.WriteMessage(websocket.TextMessage, b4); err != nil {
+		t.Fatalf("write complete: %v", err)
+	}
+
+	// 7. Wait for file.received
+	_, resp3, err := conn2.ReadMessage()
+	if err != nil {
+		t.Fatalf("read received: %v", err)
+	}
+	var msg3 ft.ControlMessage
+	if err := json.Unmarshal(resp3, &msg3); err != nil {
+		t.Fatalf("parse received: %v", err)
+	}
+	if msg3.Type != ft.TypeReceived {
+		t.Fatalf("expected received, got %s", msg3.Type)
+	}
+
+	// 7. Verify the completed file on the "Core" receiver
+	files, err := os.ReadDir(filepath.Join(server.storage, "neondoll-transfer"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	coreAddr := listener.Addr().String()
-
-	// Channel to signal receiver ready
-	ready := make(chan string, 1)
-	done := make(chan error, 2)
-
-	// Receiver goroutine (Core)
-	go func() {
-		accepted, aErr := listener.Accept()
-		if aErr != nil {
-			done <- fmt.Errorf("accept: %w", aErr)
-			return
+	var verified bool
+	for _, fi := range files {
+		if fi.IsDir() || strings.HasSuffix(fi.Name(), ".partial") {
+			continue
 		}
-		// Need to upgrade the raw connection -- use http.Hijack
-		_ = accepted
-		done <- fmt.Errorf("receiver: raw TCP not supported, need HTTP server")
-	}()
+		recvPath := filepath.Join(server.storage, "neondoll-transfer", fi.Name())
+		recvData, err := os.ReadFile(recvPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(recvData) != size {
+			t.Fatalf("Body→Core size mismatch: %d vs %d", len(recvData), size)
+		}
+		if !bytes.Equal(recvData, data) {
+			t.Fatal("Body→Core content mismatch")
+		}
+		recvSHA := ft.SHA256Hex(recvData)
+		if recvSHA != sha {
+			t.Fatalf("Body→Core SHA mismatch: %s vs %s", recvSHA, sha)
+		}
+		t.Logf("Body→Core verified: %d bytes, SHA=%s", len(recvData), recvSHA)
+		verified = true
+	}
+	if !verified {
+		t.Fatal("Body→Core: no completed file found in Core storage")
+	}
 
-	_ = coreAddr
-	_ = destDir
-	_ = sha
-	_ = fid
-	_ = tid
-	_ = data
-	_ = listener
-	_ = ready
-	_ = done
-	t.Skip("Body→Core direction: need dual-role peer, implemented via sendFileToPeer in next iteration")
+	t.Logf("Body→Core resume test passed: %d/%d bytes after resume @ offset %d",
+		accept2.Offset, size, accept2.Offset)
 }
 
 // ── Test: Resume after interrupted transfer ──────────────────────────
@@ -633,31 +789,32 @@ func TestM5_FileTransfer_Resume(t *testing.T) {
 	}
 
 	// Verify the completed file
-	files, err := os.ReadDir(server.storage)
+	files, err := os.ReadDir(filepath.Join(server.storage, "neondoll-transfer"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	var verified bool
 	for _, fi := range files {
-		if strings.HasPrefix(fi.Name(), "completed_") {
-			recvPath := filepath.Join(server.storage, fi.Name())
-			recvData, err := os.ReadFile(recvPath)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if len(recvData) != size {
-				t.Fatalf("resume size mismatch: %d vs %d", len(recvData), size)
-			}
-			if !bytes.Equal(recvData, data) {
-				t.Fatal("resume content mismatch")
-			}
-			recvSHA := ft.SHA256Hex(recvData)
-			if recvSHA != sha {
-				t.Fatalf("resume SHA mismatch: %s vs %s", recvSHA, sha)
-			}
-			t.Logf("Resume verified: %d bytes, SHA=%s", len(recvData), recvSHA)
-			verified = true
+		if fi.IsDir() || strings.HasSuffix(fi.Name(), ".partial") {
+			continue
 		}
+		recvPath := filepath.Join(server.storage, "neondoll-transfer", fi.Name())
+		recvData, err := os.ReadFile(recvPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(recvData) != size {
+			t.Fatalf("resume size mismatch: %d vs %d", len(recvData), size)
+		}
+		if !bytes.Equal(recvData, data) {
+			t.Fatal("resume content mismatch")
+		}
+		recvSHA := ft.SHA256Hex(recvData)
+		if recvSHA != sha {
+			t.Fatalf("resume SHA mismatch: %s vs %s", recvSHA, sha)
+		}
+		t.Logf("Resume verified: %d bytes, SHA=%s", len(recvData), recvSHA)
+		verified = true
 	}
 	if !verified {
 		t.Fatal("no completed file found after resume")

@@ -31,26 +31,9 @@ type ControlMessage struct {
 	Payload       any         `json:"payload"`
 }
 
-// marshalPayload returns the payload encoded as json.RawMessage for marshalling.
-func marshalPayload(p any) (json.RawMessage, error) {
-	if p == nil {
-		return nil, nil
-	}
-	data, err := json.Marshal(p)
-	if err != nil {
-		return nil, err
-	}
-	return data, nil
-}
-
-// MarshalJSON implements json.Marshaler — flattens payload into the same object.
+// MarshalJSON implements json.Marshaler — emits the canonical Doll Link
+// envelope with a nested "payload" key.
 func (m ControlMessage) MarshalJSON() ([]byte, error) {
-	raw, err := marshalPayload(m.Payload)
-	if err != nil {
-		return nil, err
-	}
-
-	// Build a map with all fields, flattening payload fields into the top level.
 	out := map[string]any{
 		"type": m.Type,
 	}
@@ -66,17 +49,9 @@ func (m ControlMessage) MarshalJSON() ([]byte, error) {
 	if m.CorrelationID != "" {
 		out["correlation_id"] = m.CorrelationID
 	}
-	// Merge payload fields into the top-level JSON object.
-	if raw != nil {
-		pMap := make(map[string]any)
-		if err := json.Unmarshal(raw, &pMap); err != nil {
-			return nil, err
-		}
-		for k, v := range pMap {
-			out[k] = v
-		}
+	if m.Payload != nil {
+		out["payload"] = m.Payload
 	}
-
 	return json.Marshal(out)
 }
 
@@ -106,29 +81,7 @@ func (m *ControlMessage) UnmarshalJSON(data []byte) error {
 	if raw.Payload != nil {
 		return m.decodePayload(raw.Type, raw.Payload)
 	}
-
-	// If there's no "payload" key, the payload fields may be flattened at top
-	// level. Extract everything except envelope fields as the payload.
-	var all map[string]json.RawMessage
-	if err := json.Unmarshal(data, &all); err != nil {
-		return err
-	}
-	delete(all, "type")
-	delete(all, "id")
-	delete(all, "timestamp")
-	delete(all, "body_id")
-	delete(all, "correlation_id")
-	delete(all, "payload")
-	if len(all) == 0 {
-		return nil // no payload
-	}
-
-	// Merge remaining fields into a single JSON object.
-	payloadData, err := json.Marshal(all)
-	if err != nil {
-		return err
-	}
-	return m.decodePayload(raw.Type, payloadData)
+	return nil // no payload — flattened format no longer supported
 }
 
 // decodePayload unmarshals raw payload bytes into the correct struct.
