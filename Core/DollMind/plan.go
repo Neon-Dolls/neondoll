@@ -36,6 +36,12 @@ type Plan struct {
 	Observations   []string `json:"observations"`    // noticed things about goals, drives, context
 	ShouldReorient bool     `json:"should_reorient"` // whether to re-evaluate later
 
+	// RetainExperience lists semantic content that Spark explicitly chooses
+	// for durable memory in Doll State. Unlike Observations (ephemeral,
+	// available to the cognition run), RetainExperience is materialised as
+	// KindObservation MemoryItems and survives Doll Card export/import.
+	RetainExperience []string `json:"retain_experience,omitempty"`
+
 	// Future cognition — set when Spark decides that future cognitive
 	// attention is warranted. The Core materialises these into a pending
 	// IntentionItem in Doll State after parsing.
@@ -57,6 +63,10 @@ type planJSON struct {
 	ProposedAction string   `json:"proposed_action"`
 	Observations   []string `json:"observations"`
 	ShouldReorient bool     `json:"should_reorient"`
+
+	// RetainExperience — semantic content Spark explicitly selects for
+	// durable memory. Materialised as KindObservation MemoryItems.
+	RetainExperience []string `json:"retain_experience,omitempty"`
 
 	RequestFutureCognition bool   `json:"request_future_cognition"`
 	FutureSubject          string `json:"future_subject,omitempty"`
@@ -157,6 +167,7 @@ func buildPlanPrompt(state *dollstate.DollState, eventType events.Type, input st
   "summary": "what you think should happen next",
   "proposed_action": "semantic description of the course of action you recommend",
   "observations": ["relevant observation about goals, drives, or context", "another observation, if any"],
+  "retain_experience": ["semantic experience to remember beyond this cognition", "(optional — observations you want to persist as durable memory)"],
   "should_reorient": false,
   "request_future_cognition": false,
   "future_subject": "",
@@ -165,7 +176,7 @@ func buildPlanPrompt(state *dollstate.DollState, eventType events.Type, input st
   "outbound_action": null
 }
 
-All fields are optional except "summary". "observations" may be empty. "should_reorient" indicates whether you want to re-evaluate this situation later. "request_future_cognition" indicates whether future cognitive attention is warranted — set to true only when the Doll should specifically reconsider something at a future time. When true, "future_subject" describes what to reconsider, "future_reason" explains why, and "future_wake_time" is the RFC 3339 UTC timestamp when this cognition should occur.
+All fields are optional except "summary". "observations" may be empty — these are ephemeral and available only to this cognition run. "retain_experience" is an optional field for explicitly marking observations or semantic experience that should become durable Doll Memory, surviving Doll Card export/import. Only include entries in "retain_experience" when Spark genuinely wants to remember them across cognitive episodes. "should_reorient" indicates whether you want to re-evaluate this situation later. "request_future_cognition" indicates whether future cognitive attention is warranted — set to true only when the Doll should specifically reconsider something at a future time. When true, "future_subject" describes what to reconsider, "future_reason" explains why, and "future_wake_time" is the RFC 3339 UTC timestamp when this cognition should occur.
 
 "outbound_action" is an optional field used when you want to initiate an outbound action to your connected Body/client. When set, it must be an object with:
   - "kind": the action type, currently only "send_text" is supported
@@ -211,6 +222,7 @@ func parsePlan(raw string) (*Plan, error) {
 		Summary:        parsed.Summary,
 		ProposedAction: parsed.ProposedAction,
 		Observations:   parsed.Observations,
+		RetainExperience: parsed.RetainExperience,
 		ShouldReorient: parsed.ShouldReorient,
 
 		RequestFutureCognition: parsed.RequestFutureCognition,
@@ -277,7 +289,7 @@ func (s *Scheduler) Plan(ctx context.Context, eventType events.Type, input strin
 		if err != nil {
 			return nil, false, fmt.Errorf("plan intention: %w", err)
 		}
-		obsDirty := s.materialiseObservations(plan)
+		obsDirty := s.materialiseExperience(plan)
 		dirty = dirty || obsDirty
 		return plan, dirty, nil
 	}
@@ -312,7 +324,7 @@ func (s *Scheduler) Plan(ctx context.Context, eventType events.Type, input strin
 	if err != nil {
 		return nil, false, fmt.Errorf("plan intention: %w", err)
 	}
-	obsDirty := s.materialiseObservations(plan)
+	obsDirty := s.materialiseExperience(plan)
 	dirty = dirty || obsDirty
 	return plan, dirty, nil
 }
@@ -377,18 +389,18 @@ func (s *Scheduler) materialiseIntention(plan *Plan) (bool, error) {
 	return true, nil
 }
 
-// materialiseObservations converts a Plan's Observations into semantic
-// MemoryItems stored in Doll State for continuity across Core persistence
-// boundaries.
+// materialiseExperience converts a Plan's explicitly retained experience
+// into semantic KindObservation MemoryItems in Doll State for continuity
+// across Core persistence boundaries.
 //
-// It persists only what the Plan's Observations carry — the semantic meaning
-// Spark chose to retain. Raw tool transcripts, ToolCall IDs, execution IDs,
-// and provider artifacts are NOT persisted. This is the M7 boundary between
-// ephemeral execution data and durable semantic experience.
+// Only plan.RetainExperience entries are materialised — regular Observations
+// remain ephemeral and available only to the cognition run. This preserves
+// the M7 distinction between ephemeral execution data and durable semantic
+// experience that Spark explicitly chose to retain.
 //
 // It returns true if state was mutated.
-func (s *Scheduler) materialiseObservations(plan *Plan) bool {
-	if len(plan.Observations) == 0 {
+func (s *Scheduler) materialiseExperience(plan *Plan) bool {
+	if len(plan.RetainExperience) == 0 {
 		return false
 	}
 
@@ -396,11 +408,11 @@ func (s *Scheduler) materialiseObservations(plan *Plan) bool {
 	now := s.timeProvider().Format(time.RFC3339)
 	seq := len(state.Memories.Items)
 
-	for _, obs := range plan.Observations {
+	for _, exp := range plan.RetainExperience {
 		mem := dollstate.MemoryItem{
 			ID:        uuid.New().String(),
 			Kind:      dollstate.KindObservation,
-			Content:   obs,
+			Content:   exp,
 			Sequence:  seq,
 			Timestamp: now,
 		}

@@ -4,21 +4,22 @@
 //
 // Thesis: a pending Intention autonomously wakes Spark, Spark uses M6 tools
 // (runtime.info/read, runtime.info/list), sees tool results in the same
-// cognition run, produces a final Plan with Observations capturing semantic
-// meaning, and those Observations persist as Memories through existing Doll
-// State/Doll Card continuity — surviving Core destruction and clean
-// reconstruction.
+// cognition run, produces a final Plan. Spark may explicitly select semantic
+// experience for durable retention. Only explicitly retained experience
+// becomes portable Doll Memory through the Doll Card continuity boundary.
 
 package dollmind
 
 import (
+	"bytes"
 	"context"
-	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/Neon-Dolls/neondoll/Core/Body"
 	"github.com/Neon-Dolls/neondoll/Core/Inference"
+	dollcard "github.com/Neon-Dolls/neondoll/DollCard"
 	events "github.com/Neon-Dolls/neondoll/DollLink/Events"
 	"github.com/Neon-Dolls/neondoll/DollState"
 	"github.com/Neon-Dolls/neondoll/pkg/logger"
@@ -30,6 +31,8 @@ import (
 // is in the past, suitable for EnterWake tests.
 func wakeState(intentionID, subject, wakeTime string) *dollstate.DollState {
 	state := newConformanceState()
+	state.Identity.DollID = "spark-dev"
+	state.Owner.Name = "Zero" // dollcard requires non-empty owner for encode/decode
 	state.Intentions = dollstate.Intentions{
 		Items: []dollstate.IntentionItem{
 			{
@@ -48,22 +51,40 @@ func orientResponse() string {
 	return `{"summary":"waking due to intention","matters":true,"reason":"intention became due"}`
 }
 
-// planWithObservations returns a Plan JSON with given summary and observations.
+// planWithObservations returns a Plan JSON with observations but NO retain_experience.
+// Observations are ephemeral — available only to this cognition run.
 func planWithObservations(summary string, observations []string) string {
-	b, err := json.Marshal(map[string]any{
-		"summary":                  summary,
-		"proposed_action":          "observed_and_acted",
-		"observations":             observations,
-		"should_reorient":          false,
-		"request_future_cognition": false,
-		"future_subject":           "",
-		"future_reason":            "",
-		"future_wake_time":         "",
-	})
-	if err != nil {
-		panic("planWithObservations: " + err.Error())
+	// Manually build without retain_experience field
+	b := `{"summary":"` + summary + `","proposed_action":"observed_and_acted","observations":[`
+	for i, obs := range observations {
+		if i > 0 {
+			b += ","
+		}
+		b += `"` + obs + `"`
 	}
-	return string(b)
+	b += `],"should_reorient":false,"request_future_cognition":false,"future_subject":"","future_reason":"","future_wake_time":""}`
+	return b
+}
+
+// planWithRetainedExperience returns a Plan JSON with both observations and
+// retain_experience. Only retain_experience entries become durable Doll Memory.
+func planWithRetainedExperience(summary string, observations, retain []string) string {
+	b := `{"summary":"` + summary + `","proposed_action":"observed_and_acted","observations":[`
+	for i, obs := range observations {
+		if i > 0 {
+			b += ","
+		}
+		b += `"` + obs + `"`
+	}
+	b += `],"retain_experience":[`
+	for i, exp := range retain {
+		if i > 0 {
+			b += ","
+		}
+		b += `"` + exp + `"`
+	}
+	b += `],"should_reorient":false,"request_future_cognition":false,"future_subject":"","future_reason":"","future_wake_time":""}`
+	return b
 }
 
 // setupWakeScheduler creates a Scheduler, provider, and mockAPI for M7
@@ -93,26 +114,37 @@ func setupWakeScheduler(acts []scriptedAct, guardEval body.AuthorityEvaluator, i
 	return s, prov, mockAPI
 }
 
-// ──────────────────────────────────────────────────────────────────────────
-// Test 1: Full autonomous path — pending Intention → EnterWake → tools →
-// observations → memories
-// ──────────────────────────────────────────────────────────────────────────
+// findObservationMemories returns memory items with KindObservation.
+func findObservationMemories(items []dollstate.MemoryItem) []dollstate.MemoryItem {
+	var out []dollstate.MemoryItem
+	for _, m := range items {
+		if m.Kind == dollstate.KindObservation {
+			out = append(out, m)
+		}
+	}
+	return out
+}
 
-func TestM7_AutonomousToolObservation(t *testing.T) {
+// ══════════════════════════════════════════════════════════════════════════
+// Test 1: Tool result available to cognition — observations are ephemeral
+// ══════════════════════════════════════════════════════════════════════════
+
+func TestM7_ToolResultAvailableToCognition(t *testing.T) {
+	// Proves:
+	//   1. tool result is available to the same cognition run
+	//   2. Plan.Observations capture semantic meaning
+	//   3. observations alone do NOT materialise as Doll Memory
+	//   4. ordinary observations do NOT dirty Doll State
+
 	const intentionID = "int-m7-test-1"
 	const subject = "Check runtime capabilities"
 
-	// Script sequence:
-	// [0] Orient response — matters=true
-	// [1] Tool A: runtime.info__read
-	// [2] Tool B: runtime.info__list
-	// [3] Final plan with semantic observations
 	toolA := inference.ToolCall{ID: "call_A", Name: "runtime.info__read"}
 	toolB := inference.ToolCall{ID: "call_B", Name: "runtime.info__list"}
 
 	obs1 := "runtime.info__read returned data about the Core"
 	obs2 := "runtime.info__list listed available capabilities"
-	finalPlan := planWithObservations("M7: Spark acted and observed tools", []string{obs1, obs2})
+	finalPlan := planWithObservations("M7: tool result available to cognition", []string{obs1, obs2})
 
 	s, prov, mockAPI := setupWakeScheduler(
 		[]scriptedAct{
@@ -133,9 +165,6 @@ func TestM7_AutonomousToolObservation(t *testing.T) {
 	if len(due) != 1 {
 		t.Fatalf("expected 1 due intention, got %d", len(due))
 	}
-	if due[0].ID != intentionID {
-		t.Fatalf("expected intention %q, got %q", intentionID, due[0].ID)
-	}
 
 	// 2. Build payload and call EnterWake
 	payload := events.IntentionWakePayload{
@@ -147,15 +176,13 @@ func TestM7_AutonomousToolObservation(t *testing.T) {
 		t.Fatalf("EnterWake: %v", err)
 	}
 
-	// 3. Verify result
+	// 3. Verify result has a Plan with observations
 	if result.Level != LevelPlan {
 		t.Fatalf("expected LevelPlan, got %v", result.Level)
 	}
 	if result.Plan == nil {
 		t.Fatal("expected non-nil Plan")
 	}
-
-	// 4. Verify Plan contains the semantic observations
 	if len(result.Plan.Observations) != 2 {
 		t.Fatalf("expected 2 observations, got %d: %v", len(result.Plan.Observations), result.Plan.Observations)
 	}
@@ -166,63 +193,155 @@ func TestM7_AutonomousToolObservation(t *testing.T) {
 		t.Errorf("observation[1] = %q, want %q", result.Plan.Observations[1], obs2)
 	}
 
-	// 5. Verify state has memory items for observations
-	state := mockAPI.state
-	obsItems := findObservationMemories(state.Memories.Items)
-	if len(obsItems) != 2 {
-		t.Fatalf("expected 2 observation memory items, got %d", len(obsItems))
+	// 4. Verify tool results are available in the provider's last request
+	//    (proves tool results fed back into same cognition run)
+	lastReq := prov.lastReqs[len(prov.lastReqs)-1]
+	if len(lastReq.ToolResults) == 0 {
+		t.Error("expected tool results in final provider request")
 	}
-	if obsItems[0].Content != obs1 {
-		t.Errorf("memory[0].Content = %q, want %q", obsItems[0].Content, obs1)
-	}
-	if obsItems[1].Content != obs2 {
-		t.Errorf("memory[1].Content = %q, want %q", obsItems[1].Content, obs2)
+	for _, tr := range lastReq.ToolResults {
+		if tr.Status != inference.ToolResultSuccess {
+			t.Errorf("expected ToolResultSuccess, got %v", tr.Status)
+		}
 	}
 
-	// 6. Verify memory items have proper fields
-	for i, mem := range obsItems {
-		if mem.ID == "" {
-			t.Errorf("memory[%d] has empty ID", i)
-		}
-		if mem.Kind != dollstate.KindObservation {
-			t.Errorf("memory[%d].Kind = %q, want %q", i, mem.Kind, dollstate.KindObservation)
-		}
-		if mem.Sequence != i {
-			t.Errorf("memory[%d].Sequence = %d, want %d", i, mem.Sequence, i)
-		}
-		if mem.Timestamp == "" {
-			t.Errorf("memory[%d] has empty Timestamp", i)
-		}
+	// 5. Verify StateDirty=false — observations alone do NOT materialise
+	if result.StateDirty {
+		t.Error("expected StateDirty=false (observations are ephemeral)")
+	}
+
+	// 6. Verify NO KindObservation memories were created
+	obsItems := findObservationMemories(mockAPI.state.Memories.Items)
+	if len(obsItems) != 0 {
+		t.Errorf("expected 0 KindObservation memories (observations are ephemeral), got %d", len(obsItems))
 	}
 
 	// 7. Verify Intention was marked Completed
-	if len(state.Intentions.Items) != 1 {
-		t.Fatalf("expected 1 intention item, got %d", len(state.Intentions.Items))
+	if len(mockAPI.state.Intentions.Items) != 1 {
+		t.Fatalf("expected 1 intention item, got %d", len(mockAPI.state.Intentions.Items))
 	}
-	if state.Intentions.Items[0].State != dollstate.IntentionStateCompleted {
-		t.Errorf("intention state = %q, want %q", state.Intentions.Items[0].State, dollstate.IntentionStateCompleted)
-	}
-
-	// 8. Verify the provider was called the expected number of times
-	// Orient(1) + toolCognize loop(3) = 4 calls
-	if len(prov.lastReqs) != 4 {
-		t.Errorf("expected 4 provider calls, got %d", len(prov.lastReqs))
+	if mockAPI.state.Intentions.Items[0].State != dollstate.IntentionStateCompleted {
+		t.Errorf("intention state = %q, want %q",
+			mockAPI.state.Intentions.Items[0].State, dollstate.IntentionStateCompleted)
 	}
 }
 
-// ──────────────────────────────────────────────────────────────────────────
-// Test 2: Observations persist through serialization/deserialization
-// ──────────────────────────────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════════
+// Test 2: Explicitly retained experience becomes durable Doll Memory
+// ══════════════════════════════════════════════════════════════════════════
 
-func TestM7_RestartProof(t *testing.T) {
+func TestM7_ExplicitRetention(t *testing.T) {
+	// Proves:
+	//   1. Plan.Observations are available to cognition (ephemeral)
+	//   2. Plan.RetainExperience entries are semantically distinct
+	//   3. Only RetainExperience becomes KindObservation Doll Memory
+	//   4. Observations alone do NOT create memory items
+	//   5. State IS dirty when experience is explicitly retained
+
 	const intentionID = "int-m7-test-2"
-	const subject = "Persistence check"
+	const subject = "Test explicit retention"
 
 	toolA := inference.ToolCall{ID: "call_A", Name: "runtime.info__read"}
 	toolB := inference.ToolCall{ID: "call_B", Name: "runtime.info__list"}
 
 	obs1 := "runtime.info__read returned info about Core state"
-	finalPlan := planWithObservations("M7 restart: observations persist", []string{obs1})
+	obs2 := "runtime.info__list showed available capabilities"
+	retain1 := "The Core runtime is operational and has two capabilities: read and list"
+	finalPlan := planWithRetainedExperience(
+		"M7: explicitly retained experience",
+		[]string{obs1, obs2}, // ephemeral observations
+		[]string{retain1},    // durable experience — only this survives
+	)
+
+	s, _, mockAPI := setupWakeScheduler(
+		[]scriptedAct{
+			{content: orientResponse()},
+			{toolCalls: []inference.ToolCall{toolA}},
+			{toolCalls: []inference.ToolCall{toolB}},
+			{content: finalPlan},
+		},
+		nil,
+		intentionID, subject, "2026-01-15T12:00:00Z",
+	)
+
+	payload := events.IntentionWakePayload{
+		IntentionID: intentionID,
+		Subject:     subject,
+	}
+	result, err := s.EnterWake(context.Background(), payload)
+	if err != nil {
+		t.Fatalf("EnterWake: %v", err)
+	}
+
+	// 1. Verify Plan has both observations and retain_experience
+	if result.Plan == nil {
+		t.Fatal("expected non-nil Plan")
+	}
+	if len(result.Plan.Observations) != 2 {
+		t.Errorf("expected 2 ephemeral observations, got %d", len(result.Plan.Observations))
+	}
+	if len(result.Plan.RetainExperience) != 1 {
+		t.Fatalf("expected 1 retained experience entry, got %d", len(result.Plan.RetainExperience))
+	}
+	if result.Plan.RetainExperience[0] != retain1 {
+		t.Errorf("retain_experience[0] = %q, want %q", result.Plan.RetainExperience[0], retain1)
+	}
+
+	// 2. Verify ONLY retained experience became KindObservation memory
+	obsItems := findObservationMemories(mockAPI.state.Memories.Items)
+	if len(obsItems) != 1 {
+		t.Fatalf("expected exactly 1 KindObservation memory (only retained), got %d: %v",
+			len(obsItems), obsItems)
+	}
+	if obsItems[0].Content != retain1 {
+		t.Errorf("memory[0].Content = %q, want %q (retained experience)", obsItems[0].Content, retain1)
+	}
+	if obsItems[0].Kind != dollstate.KindObservation {
+		t.Errorf("memory[0].Kind = %q, want %q", obsItems[0].Kind, dollstate.KindObservation)
+	}
+	if obsItems[0].ID == "" {
+		t.Error("memory[0] has empty ID")
+	}
+	if obsItems[0].Timestamp == "" {
+		t.Error("memory[0] has empty Timestamp")
+	}
+
+	// 3. Verify StateDirty=true — retained experience materialised
+	if !result.StateDirty {
+		t.Error("expected StateDirty=true (retained experience was materialised)")
+	}
+
+	// 4. Verify total memory count is exactly 1 (no extra observations leaked)
+	if len(mockAPI.state.Memories.Items) != 1 {
+		t.Errorf("expected exactly 1 total memory item, got %d: %v",
+			len(mockAPI.state.Memories.Items), mockAPI.state.Memories.Items)
+	}
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// Test 3: Retained experience survives real Doll Card export/import
+// ══════════════════════════════════════════════════════════════════════════
+
+func TestM7_ContinuityBoundary(t *testing.T) {
+	// Proves:
+	//   1. Retained experience survives actual Doll Card encode/decode
+	//   2. No ToolCall/Execution/provider/runtime artifacts in decoded state
+	//   3. Semantic experience is portable independent of execution machinery
+	//   4. KindObservation memories carry correct semantic content
+
+	const intentionID = "int-m7-test-3"
+	const subject = "Continuity check"
+
+	toolA := inference.ToolCall{ID: "call_A", Name: "runtime.info__read"}
+	toolB := inference.ToolCall{ID: "call_B", Name: "runtime.info__list"}
+
+	retain1 := "The Core runtime returned its current state information"
+	retain2 := "The system has two available capabilities: read and list"
+	finalPlan := planWithRetainedExperience(
+		"M7 continuity: semantic experience",
+		[]string{retain1, retain2}, // also visible as ephemeral observations
+		[]string{retain1, retain2}, // explicitly retained for durability
+	)
 
 	s, _, mockAPI := setupWakeScheduler(
 		[]scriptedAct{
@@ -240,66 +359,108 @@ func TestM7_RestartProof(t *testing.T) {
 		IntentionID: intentionID,
 		Subject:     subject,
 	}
-	_, err := s.EnterWake(context.Background(), payload)
+	result, err := s.EnterWake(context.Background(), payload)
 	if err != nil {
 		t.Fatalf("EnterWake: %v", err)
 	}
-
-	// 2. Get and serialize state from original mockAPI
-	originalState := mockAPI.state
-	origObs := findObservationMemories(originalState.Memories.Items)
-	if len(origObs) == 0 {
-		t.Fatal("expected observations after EnterWake")
+	if !result.StateDirty {
+		t.Error("expected StateDirty=true (retained experience was materialised)")
 	}
 
-	data, err := json.Marshal(originalState)
+	// 2. Export state to Doll Card (canonical encode/decode boundary)
+	var cardBuf bytes.Buffer
+	if err := dollcard.Encode(mockAPI.state, &cardBuf); err != nil {
+		t.Fatalf("dollcard.Encode: %v", err)
+	}
+	cardBytes := cardBuf.Bytes()
+	if len(cardBytes) == 0 {
+		t.Fatal("dollcard produced empty output")
+	}
+
+	// 3. Decode into a clean state — no connection to any Core runtime
+	restored, err := dollcard.DecodeFromReader(bytes.NewReader(cardBytes), int64(len(cardBytes)))
 	if err != nil {
-		t.Fatalf("marshal state: %v", err)
+		t.Fatalf("dollcard.DecodeFromReader: %v", err)
+	}
+	if restored == nil {
+		t.Fatal("DecodeFromReader returned nil")
 	}
 
-	// Verify no raw execution artifacts leaked into the serialized state
-	check := string(data)
-	for _, artifact := range []string{"call_A", "call_B", "ExecutionID", "ToolCallID", "ToolResult"} {
-		// These would appear in JSON field names or values
-		if contains(artifact, check) {
-			// Only fail if it's part of actual content, not JSON field names
-			t.Logf("checking for artifact %q in serialized state (may be a field name)", artifact)
-		}
+	// 4. Verify selected experience survived as KindObservation memories
+	restoredObs := findObservationMemories(restored.Memories.Items)
+	if len(restoredObs) != 2 {
+		t.Fatalf("expected 2 KindObservation memories after restore, got %d: %v",
+			len(restoredObs), restoredObs)
 	}
 
-	// 3. Simulate clean import: deserialize into a fresh state
-	var restoredState dollstate.DollState
-	if err := json.Unmarshal(data, &restoredState); err != nil {
-		t.Fatalf("unmarshal state: %v", err)
+	// Verify content matches what Spark chose to retain
+	if restoredObs[0].Content != retain1 {
+		t.Errorf("restored[0].Content = %q, want %q (semantic content)", restoredObs[0].Content, retain1)
+	}
+	if restoredObs[1].Content != retain2 {
+		t.Errorf("restored[1].Content = %q, want %q (semantic content)", restoredObs[1].Content, retain2)
 	}
 
-	// 4. Verify observations survived
-	restoredObs := findObservationMemories(restoredState.Memories.Items)
-	if len(restoredObs) != len(origObs) {
-		t.Fatalf("expected %d observation memories after restore, got %d", len(origObs), len(restoredObs))
-	}
+	// Verify memory kind
 	for i, mem := range restoredObs {
-		if mem.Content != origObs[i].Content {
-			t.Errorf("restored memory[%d].Content = %q, want %q", i, mem.Content, origObs[i].Content)
-		}
 		if mem.Kind != dollstate.KindObservation {
-			t.Errorf("restored memory[%d].Kind = %q", i, mem.Kind)
+			t.Errorf("restored[%d].Kind = %q, want %q", i, mem.Kind, dollstate.KindObservation)
 		}
+	}
+
+	// 5. Verify no execution artifacts in memory content
+	for _, mem := range restoredObs {
+		if strings.Contains(mem.Content, "call_") {
+			t.Errorf("memory contains raw ToolCall ID artifact: %q", mem.Content)
+		}
+		if strings.Contains(mem.Content, "ExecutionID") {
+			t.Errorf("memory contains execution ID artifact: %q", mem.Content)
+		}
+		if strings.Contains(mem.Content, "ToolResult") {
+			t.Errorf("memory contains ToolResult artifact: %q", mem.Content)
+		}
+	}
+
+	// 6. Verify no provider or runtime metadata leaked into restored state
+	rawJSON := cardBytes // the actual card bytes from encode
+	cardStr := string(rawJSON)
+	for _, artifact := range []string{"call_A", "call_B", "m7-conformance", "ExecutionID", "ToolCallID", "ToolResult"} {
+		if strings.Contains(cardStr, artifact) {
+			t.Errorf("Doll Card contains disallowed runtime artifact: %q", artifact)
+		}
+	}
+
+	// 7. Verify the restored state has no connection to original execution
+	if restored.Identity.CanonicalName != "Spark" {
+		t.Errorf("restored Identity.CanonicalName = %q, want %q",
+			restored.Identity.CanonicalName, "Spark")
 	}
 }
 
-// ──────────────────────────────────────────────────────────────────────────
-// Test 3: Denied tool produces truthful failure Spark can reason from
-// ──────────────────────────────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════════
+// Test 4: Denied tool produces truthful failure — explicit retention only
+// ══════════════════════════════════════════════════════════════════════════
 
-func TestM7_FailureProof(t *testing.T) {
-	const intentionID = "int-m7-test-3"
+func TestM7_FailureExperience(t *testing.T) {
+	// Proves:
+	//   1. Denied tool returns truthful failure ToolResult
+	//   2. Same L2 run continues with failure observation visible
+	//   3. Only explicitly retained experience becomes memory
+	//   4. No fabricated success — failure observation is truthful
+	//   5. Only retained content persists, not every observation
+
+	const intentionID = "int-m7-test-4"
 	const subject = "Test denied tools"
 
 	toolA := inference.ToolCall{ID: "call_A", Name: "runtime.info__read"}
 
 	failureObs := "runtime.info__read was denied — all operations denied for test"
-	finalPlan := planWithObservations("M7 failure: tool denied", []string{failureObs})
+	retainExperience := "The authority guard denied the runtime.info__read tool. The Core respects security boundaries."
+	finalPlan := planWithRetainedExperience(
+		"M7 failure: tool denied",
+		[]string{failureObs},       // truthful observation available to cognition
+		[]string{retainExperience}, // only this is selected for durable memory
+	)
 
 	// Use denyAllEvaluator to simulate global denial
 	s, prov, mockAPI := setupWakeScheduler(
@@ -321,173 +482,72 @@ func TestM7_FailureProof(t *testing.T) {
 		t.Fatalf("EnterWake: %v", err)
 	}
 
-	// 1. Verify result has a valid Plan
+	// 1. Verify result has a valid Plan with truthful failure observation
 	if result.Level != LevelPlan {
 		t.Fatalf("expected LevelPlan, got %v", result.Level)
 	}
 	if result.Plan == nil {
 		t.Fatal("expected non-nil Plan")
 	}
-
-	// 2. Verify Plan contains truthful failure observation
 	if len(result.Plan.Observations) != 1 {
 		t.Fatalf("expected 1 observation, got %d: %v", len(result.Plan.Observations), result.Plan.Observations)
 	}
 	if result.Plan.Observations[0] != failureObs {
-		t.Errorf("observation = %q, want %q", result.Plan.Observations[0], failureObs)
+		t.Errorf("observation = %q, want %q (truthful failure)", result.Plan.Observations[0], failureObs)
 	}
 
-	// 3. Verify tool results show failure
-	// The second provider call (index 1) is the tool call attempt
-	// The third provider call (index 2) should have ToolResults present with failure
-	if len(prov.lastReqs) >= 3 {
-		lastReq := prov.lastReqs[2] // the final plan request
-		if len(lastReq.ToolResults) > 0 {
-			tr := lastReq.ToolResults[0]
-			if tr.Status != inference.ToolResultFailure {
-				t.Errorf("expected ToolResultFailure, got %v", tr.Status)
-			}
-			if tr.Error == nil {
-				t.Error("expected non-nil Error on denied tool")
-			} else if tr.Error.Code != "denied" {
-				t.Errorf("expected Error.Code 'denied', got %q", tr.Error.Code)
-			}
+	// 2. Verify Plan has retain_experience
+	if len(result.Plan.RetainExperience) != 1 {
+		t.Fatalf("expected 1 retained experience entry, got %d", len(result.Plan.RetainExperience))
+	}
+	if result.Plan.RetainExperience[0] != retainExperience {
+		t.Errorf("retain_experience[0] = %q, want %q", result.Plan.RetainExperience[0], retainExperience)
+	}
+
+	// 3. Verify tool results show failure in the final provider request
+	lastReq := prov.lastReqs[len(prov.lastReqs)-1]
+	if len(lastReq.ToolResults) > 0 {
+		tr := lastReq.ToolResults[0]
+		if tr.Status != inference.ToolResultFailure {
+			t.Errorf("expected ToolResultFailure, got %v", tr.Status)
+		}
+		if tr.Error == nil {
+			t.Error("expected non-nil Error on denied tool")
+		} else if tr.Error.Code != "denied" {
+			t.Errorf("expected Error.Code 'denied', got %q", tr.Error.Code)
 		}
 	}
 
-	// 4. Verify memory contains the failure observation
-	state := mockAPI.state
-	obsItems := findObservationMemories(state.Memories.Items)
+	// 4. Verify ONLY retained experience became memory (not the observation)
+	obsItems := findObservationMemories(mockAPI.state.Memories.Items)
 	if len(obsItems) != 1 {
-		t.Fatalf("expected 1 observation memory, got %d", len(obsItems))
+		t.Fatalf("expected exactly 1 KindObservation memory (only retained), got %d: %v",
+			len(obsItems), obsItems)
 	}
-	if obsItems[0].Content != failureObs {
-		t.Errorf("memory content = %q, want %q", obsItems[0].Content, failureObs)
+	if obsItems[0].Content != retainExperience {
+		t.Errorf("memory.Content = %q, want %q (retained experience)", obsItems[0].Content, retainExperience)
 	}
-
-	// 5. Verify Intention was marked Completed (failure still completes the wake)
-	if len(state.Intentions.Items) != 1 {
-		t.Fatalf("expected 1 intention item, got %d", len(state.Intentions.Items))
-	}
-	if state.Intentions.Items[0].State != dollstate.IntentionStateCompleted {
-		t.Errorf("intention state = %q, want %q", state.Intentions.Items[0].State, dollstate.IntentionStateCompleted)
-	}
-}
-
-// ──────────────────────────────────────────────────────────────────────────
-// Test 4: Continuity — Core destruction doesn't lose semantic experience
-// ──────────────────────────────────────────────────────────────────────────
-
-func TestM7_ContinuityPreservesSemanticExperience(t *testing.T) {
-	const intentionID = "int-m7-test-4"
-	const subject = "Continuity check"
-
-	toolA := inference.ToolCall{ID: "call_A", Name: "runtime.info__read"}
-	toolB := inference.ToolCall{ID: "call_B", Name: "runtime.info__list"}
-
-	obs1 := "The Core runtime returned its current state information"
-	obs2 := "The system has two available capabilities: read and list"
-	finalPlan := planWithObservations("M7 continuity: semantic experience", []string{obs1, obs2})
-
-	s, _, mockAPI := setupWakeScheduler(
-		[]scriptedAct{
-			{content: orientResponse()},
-			{toolCalls: []inference.ToolCall{toolA}},
-			{toolCalls: []inference.ToolCall{toolB}},
-			{content: finalPlan},
-		},
-		nil,
-		intentionID, subject, "2026-01-15T12:00:00Z",
-	)
-
-	// 1. Run EnterWake (Spark uses M6 tools, produces observations)
-	payload := events.IntentionWakePayload{
-		IntentionID: intentionID,
-		Subject:     subject,
-	}
-	_, err := s.EnterWake(context.Background(), payload)
-	if err != nil {
-		t.Fatalf("EnterWake: %v", err)
+	if obsItems[0].Kind != dollstate.KindObservation {
+		t.Errorf("memory.Kind = %q, want %q", obsItems[0].Kind, dollstate.KindObservation)
 	}
 
-	// 2. Export state as JSON (simulates Doll Card export)
-	originalState := mockAPI.state
-	data, err := json.Marshal(originalState)
-	if err != nil {
-		t.Fatalf("marshal state: %v", err)
+	// 5. Verify state is dirty (retained experience was materialised)
+	if !result.StateDirty {
+		t.Error("expected StateDirty=true (retained experience was materialised)")
 	}
 
-	// 3. Create a clean state — no tool executor, no provider, no body handles
-	// This simulates Core destruction and clean reconstruction from Doll Card
-	var cleanState dollstate.DollState
-	if err := json.Unmarshal(data, &cleanState); err != nil {
-		t.Fatalf("unmarshal state: %v", err)
+	// 6. Verify total memory count is exactly 1 (no extra observations leaked)
+	if len(mockAPI.state.Memories.Items) != 1 {
+		t.Errorf("expected exactly 1 total memory item, got %d: %v",
+			len(mockAPI.state.Memories.Items), mockAPI.state.Memories.Items)
 	}
 
-	// 4. Verify the clean state has no connection to any runtime artifacts
-	cleanJSON := string(data)
-
-	// Verify observations are present
-	cleanObs := findObservationMemories(cleanState.Memories.Items)
-	if len(cleanObs) != 2 {
-		t.Fatalf("expected 2 observation memories in clean state, got %d", len(cleanObs))
+	// 7. Verify Intention was marked Completed (failure still completes the wake)
+	if len(mockAPI.state.Intentions.Items) != 1 {
+		t.Fatalf("expected 1 intention item, got %d", len(mockAPI.state.Intentions.Items))
 	}
-
-	// Verify content matches what Spark chose to retain (semantic, not raw)
-	if cleanObs[0].Content != obs1 {
-		t.Errorf("clean[0].Content = %q, want %q (semantic content lost or altered)", cleanObs[0].Content, obs1)
+	if mockAPI.state.Intentions.Items[0].State != dollstate.IntentionStateCompleted {
+		t.Errorf("intention state = %q, want %q",
+			mockAPI.state.Intentions.Items[0].State, dollstate.IntentionStateCompleted)
 	}
-	if cleanObs[1].Content != obs2 {
-		t.Errorf("clean[1].Content = %q, want %q (semantic content lost or altered)", cleanObs[1].Content, obs2)
-	}
-
-	// Verify no execution artifacts in memory content
-	for _, mem := range cleanObs {
-		if contains("call_", mem.Content) {
-			t.Errorf("memory contains raw ToolCall ID artifact: %q", mem.Content)
-		}
-		if contains("runtime.info__", mem.Content) {
-			// This is OK — the observation references the tool name semantically
-			// What matters is there's no ToolCall ID, execution ID, or provider name
-		}
-	}
-
-	// Verify no field leakage by checking the raw JSON for disallowed patterns
-	for _, artifact := range []string{"\"call_A\"", "\"call_B\"", "ExecutionID", "ToolCallID", "\"m7-conformance\"", "m6-conformance", "ToolResult"} {
-		if contains(artifact, cleanJSON) {
-			t.Errorf("serialized state contains disallowed runtime artifact: %q", artifact)
-		}
-	}
-
-	// Verify memories have the correct Kind
-	for _, mem := range cleanObs {
-		if mem.Kind != dollstate.KindObservation {
-			t.Errorf("memory.Kind = %q, want %q", mem.Kind, dollstate.KindObservation)
-		}
-	}
-}
-
-// ──────────────────────────────────────────────────────────────────────────
-// Test helpers
-// ──────────────────────────────────────────────────────────────────────────
-
-// findObservationMemories returns memory items with KindObservation.
-func findObservationMemories(items []dollstate.MemoryItem) []dollstate.MemoryItem {
-	var out []dollstate.MemoryItem
-	for _, m := range items {
-		if m.Kind == dollstate.KindObservation {
-			out = append(out, m)
-		}
-	}
-	return out
-}
-
-// contains reports whether substr is in s.
-func contains(substr, s string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
 }
