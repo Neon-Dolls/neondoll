@@ -349,6 +349,65 @@ func TestM6_DeniedAuthority_ReturnsFailureResult(t *testing.T) {
 	}
 }
 
+func TestM6_DeniedExecution_PreservesExecutionID(t *testing.T) {
+	t.Parallel()
+
+	// Set up a deny-all evaluator so every tool execution attempt is denied
+	// but does reach Guard.Execute, producing an ExecutionResult with an ID.
+	s, prov := setupConformanceScheduler([]scriptedAct{
+		{
+			toolCalls: []inference.ToolCall{
+				{ID: "call_deny_x1", Name: "runtime.info__read"},
+			},
+		},
+		{content: makePlanJSON("denied execution has correlation")},
+	}, denyAllEvaluator{})
+
+	ctx := context.Background()
+	plan, _, err := s.Plan(ctx, events.TypeMessage, "denied execution id", &Orientation{
+		Summary: "denied execution id",
+		Matters: true,
+		Reason:  "testing ExecutionID preservation on denied Body execution",
+	})
+	if err != nil {
+		t.Fatalf("Plan() = %v, want nil", err)
+	}
+	if plan == nil {
+		t.Fatal("Plan() returned nil plan")
+	}
+
+	// Grab the ToolResults passed back after the denied tool call.
+	if len(prov.lastReqs) < 2 {
+		t.Fatalf("provider called %d times, expected >= 2", len(prov.lastReqs))
+	}
+	results := prov.lastReqs[1].ToolResults
+	if len(results) != 1 {
+		t.Fatalf("second request has %d ToolResults, want 1", len(results))
+	}
+
+	r := results[0]
+
+	// Denied execution must still be a failure.
+	if r.Status != inference.ToolResultFailure {
+		t.Errorf("ToolResult.Status = %q, want %q", r.Status, inference.ToolResultFailure)
+	}
+	if r.Error == nil {
+		t.Fatal("ToolResult.Error is nil")
+	}
+	if r.Error.Code != "denied" {
+		t.Errorf("ToolResult.Error.Code = %q, want %q", r.Error.Code, "denied")
+	}
+
+	// Core of this test: a denied Guard.Execute attempt must preserve
+	// correlation IDs so multi-attempt scenarios are fully observable.
+	if r.ToolCallID != "call_deny_x1" {
+		t.Errorf("ToolResult.ToolCallID = %q, want %q", r.ToolCallID, "call_deny_x1")
+	}
+	if r.ExecutionID == "" {
+		t.Error("ToolResult.ExecutionID is empty — denied execution attempt is unobservable")
+	}
+}
+
 func TestM6_FailedToolContinuation_ProviderCanStillFinish(t *testing.T) {
 	// Tool A fails (denied), provider gets failure ToolResult, calls Tool B (allowed),
 	// then returns a valid Plan. Verifies the loop doesn't abort on failure.

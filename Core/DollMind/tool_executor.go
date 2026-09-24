@@ -58,15 +58,15 @@ func (e *ToolExecutor) ExecuteCall(ctx context.Context, call inference.ToolCall,
 	case body.StatusSuccess:
 		return successResult(call.ID, result)
 	case body.StatusDenied:
-		return failureResult(call.ID, "denied", fmt.Sprintf("authority denied: %s", result.Error))
+		return executionFailureResult(call.ID, result, "denied", fmt.Sprintf("authority denied: %s", result.Error))
 	case body.StatusUnsupported:
-		return failureResult(call.ID, "unsupported", fmt.Sprintf("capability/operation not supported: %s", result.Error))
+		return executionFailureResult(call.ID, result, "unsupported", fmt.Sprintf("capability/operation not supported: %s", result.Error))
 	case body.StatusInvalid:
-		return failureResult(call.ID, "invalid_arguments", fmt.Sprintf("invalid request: %s", result.Error))
+		return executionFailureResult(call.ID, result, "invalid_arguments", fmt.Sprintf("invalid request: %s", result.Error))
 	case body.StatusUnavailable:
-		return failureResult(call.ID, "unavailable", fmt.Sprintf("capability unavailable: %s", result.Error))
+		return executionFailureResult(call.ID, result, "unavailable", fmt.Sprintf("capability unavailable: %s", result.Error))
 	case body.StatusFailed:
-		return failureResult(call.ID, "execution_failed", fmt.Sprintf("body execution failed: %s", result.Error))
+		return executionFailureResult(call.ID, result, "execution_failed", fmt.Sprintf("body execution failed: %s", result.Error))
 	default:
 		return failureResult(call.ID, "unknown_status", fmt.Sprintf("unexpected execution status: %s", result.Status))
 	}
@@ -104,11 +104,30 @@ func successResult(callID string, execResult body.ExecutionResult) inference.Too
 	return tr
 }
 
-// failureResult builds a ToolResult with failure status.
+// failureResult builds a ToolResult with failure status and NO execution
+// correlation. Use for pre-execution validation failures where no Guard.Execute
+// attempt occurred (unknown tool, missing target body).
 func failureResult(callID string, code string, message string) inference.ToolResult {
 	return inference.ToolResult{
 		ToolCallID: callID,
 		Status:     inference.ToolResultFailure,
+		Error: &inference.ToolError{
+			Code:    code,
+			Message: message,
+		},
+	}
+}
+
+// executionFailureResult builds a ToolResult with failure status from a
+// completed Guard.Execute attempt, preserving the execution correlation ID.
+// Every actual execution attempt — whether denied, unsupported, or failed —
+// remains observable through ExecutionID so multiple attempts for one ToolCall
+// can be correlated independently.
+func executionFailureResult(callID string, execResult body.ExecutionResult, code string, message string) inference.ToolResult {
+	return inference.ToolResult{
+		ToolCallID:  callID,
+		ExecutionID: execResult.ExecutionID,
+		Status:      inference.ToolResultFailure,
 		Error: &inference.ToolError{
 			Code:    code,
 			Message: message,
