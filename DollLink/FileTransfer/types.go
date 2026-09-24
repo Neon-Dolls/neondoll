@@ -11,6 +11,7 @@ package filetransfer
 import (
 	"crypto/sha256"
 	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -23,11 +24,32 @@ import (
 type FileID string
 
 // TransferID identifies one attempt to move a file between peers.
+// JSON representation is a UUID string (e.g. "550e8400-e29b-41d4-a716-446655440000").
+// Binary representation is 16 raw bytes for NDF1 frames.
 type TransferID [16]byte
 
-// String returns the UUID-string representation of the transfer ID.
+// String returns the UUID-string representation.
 func (tid TransferID) String() string {
 	return uuid.UUID(tid).String()
+}
+
+// MarshalJSON implements json.Marshaler — encodes as a UUID string.
+func (tid TransferID) MarshalJSON() ([]byte, error) {
+	return json.Marshal(tid.String())
+}
+
+// UnmarshalJSON implements json.Unmarshaler — parses a UUID string.
+func (tid *TransferID) UnmarshalJSON(data []byte) error {
+	var s string
+	if err := json.Unmarshal(data, &s); err != nil {
+		return fmt.Errorf("filetransfer: transfer_id: %w", err)
+	}
+	u, err := uuid.Parse(s)
+	if err != nil {
+		return fmt.Errorf("filetransfer: invalid transfer_id %q: %w", s, err)
+	}
+	copy(tid[:], u[:])
+	return nil
 }
 
 // MarshalText implements encoding.TextMarshaler.
@@ -57,8 +79,31 @@ func TransferIDFromBytes(b [16]byte) TransferID {
 	return TransferID(b)
 }
 
+// ParseTransferID parses a UUID string into a TransferID.
+func ParseTransferID(s string) (TransferID, error) {
+	u, err := uuid.Parse(s)
+	if err != nil {
+		return TransferID{}, fmt.Errorf("filetransfer: parse transfer_id: %w", err)
+	}
+	return TransferIDFromUUID(u), nil
+}
+
+// MustParseTransferID parses a UUID string or panics (for tests).
+func MustParseTransferID(s string) TransferID {
+	tid, err := ParseTransferID(s)
+	if err != nil {
+		panic(err)
+	}
+	return tid
+}
+
 // EmptyTransferID is a zero-value transfer ID.
 var EmptyTransferID TransferID
+
+// IsZero returns true if the TransferID is the zero value.
+func (tid TransferID) IsZero() bool {
+	return tid == EmptyTransferID
+}
 
 // ── Canonical Cancel/Failure Reasons ────────────────────────────────────
 
@@ -84,7 +129,7 @@ const (
 // Offer is the payload of file.offer.
 type Offer struct {
 	FileID     FileID            `json:"file_id"`
-	TransferID string            `json:"transfer_id"`
+	TransferID TransferID        `json:"transfer_id"`
 	Size       int64             `json:"size"`
 	SHA256     string            `json:"sha256"`
 	Name       string            `json:"name,omitempty"`
@@ -95,37 +140,37 @@ type Offer struct {
 
 // Accept is the payload of file.accept.
 type Accept struct {
-	FileID     FileID `json:"file_id"`
-	TransferID string `json:"transfer_id"`
-	Offset     int64  `json:"offset"`
+	FileID     FileID     `json:"file_id"`
+	TransferID TransferID `json:"transfer_id"`
+	Offset     int64      `json:"offset"`
 }
 
 // Reject is the payload of file.reject.
 type Reject struct {
-	FileID     FileID `json:"file_id"`
-	TransferID string `json:"transfer_id"`
-	Reason     string `json:"reason,omitempty"`
-	Message    string `json:"message,omitempty"`
+	FileID     FileID     `json:"file_id"`
+	TransferID TransferID `json:"transfer_id"`
+	Reason     string     `json:"reason,omitempty"`
+	Message    string     `json:"message,omitempty"`
 }
 
 // Complete is the payload of file.complete.
 type Complete struct {
-	FileID     FileID `json:"file_id"`
-	TransferID string `json:"transfer_id"`
+	FileID     FileID     `json:"file_id"`
+	TransferID TransferID `json:"transfer_id"`
 }
 
 // Received is the payload of file.received.
 type Received struct {
-	FileID     FileID `json:"file_id"`
-	TransferID string `json:"transfer_id"`
+	FileID     FileID     `json:"file_id"`
+	TransferID TransferID `json:"transfer_id"`
 }
 
 // Cancel is the payload of file.cancel.
 type Cancel struct {
-	FileID     FileID `json:"file_id"`
-	TransferID string `json:"transfer_id"`
-	Reason     string `json:"reason,omitempty"`
-	Message    string `json:"message,omitempty"`
+	FileID     FileID     `json:"file_id"`
+	TransferID TransferID `json:"transfer_id"`
+	Reason     string     `json:"reason,omitempty"`
+	Message    string     `json:"message,omitempty"`
 }
 
 // ── Validation ──────────────────────────────────────────────────────────
@@ -136,11 +181,8 @@ func (o Offer) Validate() error {
 	if o.FileID == "" {
 		return fmt.Errorf("filetransfer: offer: file_id is required")
 	}
-	if o.TransferID == "" {
+	if o.TransferID.IsZero() {
 		return fmt.Errorf("filetransfer: offer: transfer_id is required")
-	}
-	if _, err := uuid.Parse(o.TransferID); err != nil {
-		return fmt.Errorf("filetransfer: offer: invalid transfer_id: %w", err)
 	}
 	if o.Size <= 0 {
 		return fmt.Errorf("filetransfer: offer: size must be positive, got %d", o.Size)
@@ -156,7 +198,7 @@ func (a Accept) Validate(bodySize int64) error {
 	if a.FileID == "" {
 		return fmt.Errorf("filetransfer: accept: file_id is required")
 	}
-	if a.TransferID == "" {
+	if a.TransferID.IsZero() {
 		return fmt.Errorf("filetransfer: accept: transfer_id is required")
 	}
 	if a.Offset < 0 {
@@ -173,7 +215,7 @@ func (r Reject) Validate() error {
 	if r.FileID == "" {
 		return fmt.Errorf("filetransfer: reject: file_id is required")
 	}
-	if r.TransferID == "" {
+	if r.TransferID.IsZero() {
 		return fmt.Errorf("filetransfer: reject: transfer_id is required")
 	}
 	return nil
@@ -184,7 +226,7 @@ func (c Complete) Validate() error {
 	if c.FileID == "" {
 		return fmt.Errorf("filetransfer: complete: file_id is required")
 	}
-	if c.TransferID == "" {
+	if c.TransferID.IsZero() {
 		return fmt.Errorf("filetransfer: complete: transfer_id is required")
 	}
 	return nil
@@ -195,7 +237,7 @@ func (r Received) Validate() error {
 	if r.FileID == "" {
 		return fmt.Errorf("filetransfer: received: file_id is required")
 	}
-	if r.TransferID == "" {
+	if r.TransferID.IsZero() {
 		return fmt.Errorf("filetransfer: received: transfer_id is required")
 	}
 	return nil
@@ -206,7 +248,7 @@ func (c Cancel) Validate() error {
 	if c.FileID == "" {
 		return fmt.Errorf("filetransfer: cancel: file_id is required")
 	}
-	if c.TransferID == "" {
+	if c.TransferID.IsZero() {
 		return fmt.Errorf("filetransfer: cancel: transfer_id is required")
 	}
 	return nil
