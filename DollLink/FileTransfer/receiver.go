@@ -63,9 +63,7 @@ func NewReceiveState(fileID FileID, tid TransferID, size int64, sha256Hex string
 		return nil, fmt.Errorf("filetransfer: create storage dir: %w", err)
 	}
 
-	safeName := fmt.Sprintf("tf_%s_%s",
-		sanitizeName(string(fileID)),
-		sanitizeName(hex.EncodeToString(tid[:])))
+	safeName := sanitizeName(string(fileID))
 
 	return &ReceiveState{
 		FileID:     fileID,
