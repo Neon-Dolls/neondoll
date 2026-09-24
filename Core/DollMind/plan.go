@@ -219,11 +219,11 @@ func parsePlan(raw string) (*Plan, error) {
 	}
 
 	plan := &Plan{
-		Summary:        parsed.Summary,
-		ProposedAction: parsed.ProposedAction,
-		Observations:   parsed.Observations,
+		Summary:          parsed.Summary,
+		ProposedAction:   parsed.ProposedAction,
+		Observations:     parsed.Observations,
 		RetainExperience: parsed.RetainExperience,
-		ShouldReorient: parsed.ShouldReorient,
+		ShouldReorient:   parsed.ShouldReorient,
 
 		RequestFutureCognition: parsed.RequestFutureCognition,
 		FutureSubject:          parsed.FutureSubject,
@@ -420,9 +420,9 @@ func (s *Scheduler) materialiseExperience(plan *Plan) bool {
 		seq++
 	}
 
-	s.log.Info("observations materialised",
+	s.log.Info("experience materialised",
 		map[string]any{
-			"count": len(plan.Observations),
+			"count": len(plan.RetainExperience),
 		})
 
 	return true

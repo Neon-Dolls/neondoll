@@ -505,17 +505,20 @@ func TestM7_FailureExperience(t *testing.T) {
 	}
 
 	// 3. Verify tool results show failure in the final provider request
+	//    This is a hard requirement — if the denied ToolResult never reaches
+	//    the continuing cognition, the M7 failure-acceptance condition fails.
 	lastReq := prov.lastReqs[len(prov.lastReqs)-1]
-	if len(lastReq.ToolResults) > 0 {
-		tr := lastReq.ToolResults[0]
-		if tr.Status != inference.ToolResultFailure {
-			t.Errorf("expected ToolResultFailure, got %v", tr.Status)
-		}
-		if tr.Error == nil {
-			t.Error("expected non-nil Error on denied tool")
-		} else if tr.Error.Code != "denied" {
-			t.Errorf("expected Error.Code 'denied', got %q", tr.Error.Code)
-		}
+	if len(lastReq.ToolResults) != 1 {
+		t.Fatalf("expected exactly 1 ToolResult in final provider request (denied tool must produce visible failure), got %d", len(lastReq.ToolResults))
+	}
+	tr := lastReq.ToolResults[0]
+	if tr.Status != inference.ToolResultFailure {
+		t.Errorf("expected ToolResultFailure, got %v", tr.Status)
+	}
+	if tr.Error == nil {
+		t.Error("expected non-nil Error on denied tool")
+	} else if tr.Error.Code != "denied" {
+		t.Errorf("expected Error.Code 'denied', got %q", tr.Error.Code)
 	}
 
 	// 4. Verify ONLY retained experience became memory (not the observation)
