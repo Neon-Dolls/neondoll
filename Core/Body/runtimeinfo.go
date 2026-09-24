@@ -52,13 +52,16 @@ func executeRuntimeInfoRead() (*ExecutionResult, error) {
 }
 
 // executeRuntimeInfoList implements the runtime.info / list capability of
-// the Local Body. It returns a JSON array of all currently registered
-// capability descriptors, providing a harmless, deterministic second
-// operation for the M6 two-tool proof.
+// the Local Body capability surface.
+//
+// This is an explicitly deterministic M6 conformance fixture: it returns a
+// hard-coded response and does NOT reflect the actual capability registry.
+// A future capability (e.g. capabilities.registry / list) will provide
+// truthful capability discovery when the architecture requires it.
 func executeRuntimeInfoList() (*ExecutionResult, error) {
-	// Return a simple deterministic string for the M6 conformance test.
-	// In production this would reflect the actual capability registry.
 	result := map[string]any{
+		"fixture": true,
+		"message": "M6 conformance — deterministic response",
 		"capabilities": []map[string]any{
 			{"id": "runtime.info", "operations": []string{"read", "list"}},
 		},

@@ -60,10 +60,13 @@ func ProjectToolsFromCapabilities(targetBody body.Body, targetBodyID body.BodyID
 	return tools
 }
 
-// toolName creates a deterministic tool name from Body, capability, and
-// operation identifiers. The pattern is: "body__<capability>__<operation>"
+// toolName creates a deterministic tool name from capability and operation
+// identifiers. The pattern is: "<capability>__<operation>"
+// The tool identity represents the semantic capability/operation pairing,
+// not the target Body — Body routing is tracked as explicit internal
+// metadata (Tool.TargetBodyID).
 func toolName(bodyID body.BodyID, capID string, opID string) string {
-	return fmt.Sprintf("body%s%s%s%s", ToolNameDelimiter, capID, ToolNameDelimiter, opID)
+	return fmt.Sprintf("%s%s%s", capID, ToolNameDelimiter, opID)
 }
 
 // ToolMappingTable recovers the internal routing metadata from a tool name.
@@ -71,22 +74,20 @@ func toolName(bodyID body.BodyID, capID string, opID string) string {
 // Body ID is returned empty in Core 2; it will be populated in future milestones
 // when alternative Body targets are supported.
 func ToolMappingTable(toolName string) (bodyID string, capID string, opID string, ok bool) {
-	// Expected format: "body__<capID>__<opID>"
-	prefix := "body" + ToolNameDelimiter
-	if len(toolName) <= len(prefix) {
+	// Expected format: "<capID>__<opID>"
+	if len(toolName) == 0 {
 		return "", "", "", false
 	}
-	rest := toolName[len(prefix):]
 
 	// Find the delimiter separating capability from operation.
 	delim := ToolNameDelimiter
-	idx := findDelimiter(rest, delim)
+	idx := findDelimiter(toolName, delim)
 	if idx < 0 {
 		return "", "", "", false
 	}
 
-	capID = rest[:idx]
-	opID = rest[idx+len(delim):]
+	capID = toolName[:idx]
+	opID = toolName[idx+len(delim):]
 	if capID == "" || opID == "" {
 		return "", "", "", false
 	}

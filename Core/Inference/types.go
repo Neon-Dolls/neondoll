@@ -23,7 +23,9 @@ const (
 // Tools are provider-neutral — no OpenAI, Anthropic, or other vendor types.
 // The name is deterministic and stable across calls.
 type Tool struct {
-	// Name is the deterministic, stable identifier (e.g. "body__runtime.info__read").
+	// Name is the deterministic, stable identifier (e.g. "runtime.info__read").
+	// The tool identity represents the semantic capability/operation pairing,
+	// not the target Body — Body routing is explicit internal metadata.
 	Name string `json:"name"`
 
 	// Description explains what the tool does, for the provider's consumption.
@@ -68,6 +70,12 @@ const (
 type ToolResult struct {
 	// ToolCallID correlates this result to the original ToolCall.
 	ToolCallID string `json:"tool_call_id"`
+
+	// ExecutionID traces this result to the concrete execution attempt
+	// that produced it. Multiple results may share a ToolCallID when a
+	// future/eligible alternative Body produces independently authorized
+	// execution attempts for one Tool Call.
+	ExecutionID string `json:"execution_id,omitempty"`
 
 	// Status indicates success or failure.
 	Status ToolResultStatus `json:"status"`

@@ -138,8 +138,8 @@ func TestM6_PositiveProof_TwoSequentialToolCalls(t *testing.T) {
 	//   provider → tool A → result A
 	//            → tool B → result B
 	//            → final valid Plan
-	toolA := inference.ToolCall{ID: "call_A", Name: "body__runtime.info__read"}
-	toolB := inference.ToolCall{ID: "call_B", Name: "body__runtime.info__list"}
+	toolA := inference.ToolCall{ID: "call_A", Name: "runtime.info__read"}
+	toolB := inference.ToolCall{ID: "call_B", Name: "runtime.info__list"}
 	finalPlan := makePlanJSON("M6 positive proof: two tools executed")
 
 	s, prov := setupConformanceScheduler([]scriptedAct{
@@ -312,7 +312,7 @@ func TestM6_DeniedAuthority_ReturnsFailureResult(t *testing.T) {
 	s, prov := setupConformanceScheduler([]scriptedAct{
 		{
 			toolCalls: []inference.ToolCall{
-				{ID: "call_denied", Name: "body__runtime.info__read"},
+				{ID: "call_denied", Name: "runtime.info__read"},
 			},
 		},
 		{content: makePlanJSON("denied handled")},
@@ -355,12 +355,12 @@ func TestM6_FailedToolContinuation_ProviderCanStillFinish(t *testing.T) {
 	s, prov := setupConformanceScheduler([]scriptedAct{
 		{
 			toolCalls: []inference.ToolCall{
-				{ID: "call_A", Name: "body__runtime.info__read"},
+				{ID: "call_A", Name: "runtime.info__read"},
 			},
 		},
 		{
 			toolCalls: []inference.ToolCall{
-				{ID: "call_B", Name: "body__runtime.info__list"},
+				{ID: "call_B", Name: "runtime.info__list"},
 			},
 		},
 		{content: makePlanJSON("failed-tool continuation works")},
@@ -408,7 +408,7 @@ func TestM6_LoopLimit_StopsRunawayProvider(t *testing.T) {
 	const toolLimit = 10
 	overflow := toolLimit + 3 // 13 tool calls, should hit limit at 10+1=11th
 
-	toolCall := inference.ToolCall{ID: "call_loop", Name: "body__runtime.info__read"}
+	toolCall := inference.ToolCall{ID: "call_loop", Name: "runtime.info__read"}
 	acts := make([]scriptedAct, overflow)
 	for i := range acts {
 		acts[i] = scriptedAct{toolCalls: []inference.ToolCall{toolCall}}
@@ -434,12 +434,12 @@ func TestM6_Cancellation_StopsToolLoop(t *testing.T) {
 	s, _ := setupConformanceScheduler([]scriptedAct{
 		{
 			toolCalls: []inference.ToolCall{
-				{ID: "call_A", Name: "body__runtime.info__read"},
+				{ID: "call_A", Name: "runtime.info__read"},
 			},
 		},
 		{
 			toolCalls: []inference.ToolCall{
-				{ID: "call_B", Name: "body__runtime.info__list"},
+				{ID: "call_B", Name: "runtime.info__list"},
 			},
 		},
 	}, nil)
@@ -467,8 +467,8 @@ func TestM6_SequentialExecution_NoConcurrency(t *testing.T) {
 	s, prov := setupConformanceScheduler([]scriptedAct{
 		{
 			toolCalls: []inference.ToolCall{
-				{ID: "call_1", Name: "body__runtime.info__read"},
-				{ID: "call_2", Name: "body__runtime.info__list"},
+				{ID: "call_1", Name: "runtime.info__read"},
+				{ID: "call_2", Name: "runtime.info__list"},
 			},
 		},
 		{content: makePlanJSON("sequential execution")},
@@ -512,17 +512,17 @@ func TestM6_CorrelationSurvivesContinuation(t *testing.T) {
 	s, prov := setupConformanceScheduler([]scriptedAct{
 		{
 			toolCalls: []inference.ToolCall{
-				{ID: "call_alpha", Name: "body__runtime.info__read"},
+				{ID: "call_alpha", Name: "runtime.info__read"},
 			},
 		},
 		{
 			toolCalls: []inference.ToolCall{
-				{ID: "call_beta", Name: "body__runtime.info__list"},
+				{ID: "call_beta", Name: "runtime.info__list"},
 			},
 		},
 		{
 			toolCalls: []inference.ToolCall{
-				{ID: "call_gamma", Name: "body__runtime.info__read"},
+				{ID: "call_gamma", Name: "runtime.info__read"},
 			},
 		},
 		{content: makePlanJSON("correlation preserved")},
@@ -570,7 +570,7 @@ func TestM6_NoProviderTypesLeakIntoBody(t *testing.T) {
 	s, prov := setupConformanceScheduler([]scriptedAct{
 		{
 			toolCalls: []inference.ToolCall{
-				{ID: "call_A", Name: "body__runtime.info__read"},
+				{ID: "call_A", Name: "runtime.info__read"},
 			},
 		},
 		{content: makePlanJSON("no type leak")},

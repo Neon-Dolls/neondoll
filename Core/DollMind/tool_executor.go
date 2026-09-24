@@ -92,8 +92,9 @@ func (e *ToolExecutor) ExecuteSequentially(ctx context.Context, calls []inferenc
 // successResult builds a ToolResult from a successful ExecutionResult.
 func successResult(callID string, execResult body.ExecutionResult) inference.ToolResult {
 	tr := inference.ToolResult{
-		ToolCallID: callID,
-		Status:     inference.ToolResultSuccess,
+		ToolCallID:  callID,
+		ExecutionID: execResult.ExecutionID,
+		Status:      inference.ToolResultSuccess,
 	}
 	if execResult.Output != "" {
 		tr.Result = map[string]any{
