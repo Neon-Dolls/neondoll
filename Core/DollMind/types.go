@@ -107,6 +107,7 @@ type Scheduler struct {
 	mindAPI      MindAPI
 	dispatcher   Dispatcher
 	timeProvider func() time.Time
+	toolExecutor *ToolExecutor
 }
 
 func New(provider inference.Provider, log *logger.Logger, mindAPI MindAPI, opts ...Option) *Scheduler {
@@ -122,11 +123,24 @@ func New(provider inference.Provider, log *logger.Logger, mindAPI MindAPI, opts 
 	return s
 }
 
+// ToolCallLimit is the maximum number of tool calls allowed in a single
+// Cognition Run (Core 2 default). This counts actual tool calls, not
+// provider round-trips.
+const ToolCallLimit = 10
+
 // WithTimeProvider sets the reference time source for DueIntentions and
 // Intention validation. Production defaults to time.Now; tests use a
 // fixed reference time for deterministic behaviour.
 func WithTimeProvider(tp func() time.Time) Option {
 	return func(s *Scheduler) { s.timeProvider = tp }
+}
+
+// WithToolExecutor sets the tool executor for tool-enabled cognition.
+// When set, Plan() uses the provider-native tool loop: tools are projected
+// from the local body, tool calls are executed via Guard.Execute, and results
+// are fed back to the provider until final content is produced.
+func WithToolExecutor(executor *ToolExecutor) Option {
+	return func(s *Scheduler) { s.toolExecutor = executor }
 }
 
 // Enter is the cognition entry boundary.

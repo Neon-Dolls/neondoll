@@ -258,6 +258,29 @@ func (s *Scheduler) Plan(ctx context.Context, eventType events.Type, input strin
 	state := s.mindAPI.State()
 	prompt := buildPlanPrompt(state, eventType, input, orientation)
 
+	// ── Tool-enabled path ──────────────────────────────────────────────
+	if s.toolExecutor != nil {
+		plan, err := s.toolCognize(ctx, prompt)
+		if err != nil {
+			return nil, false, fmt.Errorf("plan tool cognize: %w", err)
+		}
+
+		s.log.Info("plan complete (tools)",
+			map[string]any{
+				"event_type":      eventType,
+				"summary":         plan.Summary,
+				"should_reorient": plan.ShouldReorient,
+				"request_future":  plan.RequestFutureCognition,
+			})
+
+		dirty, err := s.materialiseIntention(plan)
+		if err != nil {
+			return nil, false, fmt.Errorf("plan intention: %w", err)
+		}
+		return plan, dirty, nil
+	}
+
+	// ── Original no-tool path ──────────────────────────────────────────
 	resp, err := s.provider.Infer(ctx, inference.Request{
 		Messages: []inference.Message{
 			{Role: "system", Content: prompt},
@@ -348,4 +371,81 @@ func (s *Scheduler) materialiseIntention(plan *Plan) (bool, error) {
 	}
 
 	return true, nil
+}
+
+// ── Phase 5 — Cognition Run Tool Loop ───────────────────────────────────
+
+// toolCognize runs the provider-native tool loop:
+//  1. Build request with tools
+//  2. Call provider
+//  3. If tool calls returned → execute each sequentially, feed results back, continue
+//  4. Repeat until final content → parse as Plan
+//
+// ALL continuations belong to the SAME Cognition Run. No new Intention,
+// Interaction Session, or inbound Doll Link event is created.
+func (s *Scheduler) toolCognize(ctx context.Context, prompt string) (*Plan, error) {
+	tools := s.toolExecutor.Tools()
+	toolMap := buildToolMap(tools)
+
+	// Limit: prevent runaway loops by counting actual tool calls executed.
+	// Phase 6 enforces the maximum and propagates context cancellation.
+	type loopState struct {
+		toolCallCount int
+	}
+
+	st := &loopState{}
+
+	req := inference.Request{
+		Messages: []inference.Message{
+			{Role: "system", Content: prompt},
+		},
+		Temperature: 0.3,
+		MaxTokens:   1024,
+		Purpose:     inference.PurposePlan,
+		Tools:       tools,
+	}
+
+	for {
+		// Phase 6 — context cancellation and deadline propagation
+		select {
+		case <-ctx.Done():
+			return nil, fmt.Errorf("tool cognize cancelled: %w", ctx.Err())
+		default:
+		}
+
+		resp, err := s.provider.Infer(ctx, req)
+		if err != nil {
+			return nil, fmt.Errorf("plan tool inference: %w", err)
+		}
+
+		// No tool calls → final content, parse as Plan
+		if len(resp.ToolCalls) == 0 {
+			return parsePlan(resp.Content)
+		}
+
+		// Execute tool calls sequentially (Phase 6: sequential, not concurrent)
+		// Count actual tool calls, not provider round-trips.
+		for _, call := range resp.ToolCalls {
+			st.toolCallCount++
+
+			if st.toolCallCount > ToolCallLimit {
+				return nil, fmt.Errorf("tool call limit (%d) exceeded in cognition run", ToolCallLimit)
+			}
+
+			result := s.toolExecutor.ExecuteCall(ctx, call, toolMap[call.Name])
+
+			req.ToolResults = append(req.ToolResults, result)
+		}
+	}
+}
+
+// buildToolMap builds a lookup table from tool name → *Tool for efficient
+// correlation during the tool loop.
+func buildToolMap(tools []inference.Tool) map[string]*inference.Tool {
+	m := make(map[string]*inference.Tool, len(tools))
+	for i := range tools {
+		t := &tools[i]
+		m[t.Name] = t
+	}
+	return m
 }

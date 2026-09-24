@@ -40,7 +40,7 @@ func NewLocal() *LocalBody {
 	// Register M2 target capability: runtime.info / read.
 	_ = b.caps.Register(Capability{
 		ID:         "runtime.info",
-		Operations: []string{"read"},
+		Operations: []string{"read", "list"},
 		Available:  true,
 	})
 	return b
@@ -87,6 +87,8 @@ func (b *LocalBody) Execute(req ExecutionRequest) (*ExecutionResult, error) {
 	switch {
 	case req.Capability == "runtime.info" && req.Operation == "read":
 		return executeRuntimeInfoRead()
+	case req.Capability == "runtime.info" && req.Operation == "list":
+		return executeRuntimeInfoList()
 	default:
 		return nil, fmt.Errorf("%w: capability %q operation %q", ErrExecutionNotAvailable, req.Capability, req.Operation)
 	}

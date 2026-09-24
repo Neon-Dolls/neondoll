@@ -50,3 +50,28 @@ func executeRuntimeInfoRead() (*ExecutionResult, error) {
 		Output: string(out),
 	}, nil
 }
+
+// executeRuntimeInfoList implements the runtime.info / list capability of
+// the Local Body capability surface.
+//
+// This is an explicitly deterministic M6 conformance fixture: it returns a
+// hard-coded response and does NOT reflect the actual capability registry.
+// A future capability (e.g. capabilities.registry / list) will provide
+// truthful capability discovery when the architecture requires it.
+func executeRuntimeInfoList() (*ExecutionResult, error) {
+	result := map[string]any{
+		"fixture": true,
+		"message": "M6 conformance — deterministic response",
+		"capabilities": []map[string]any{
+			{"id": "runtime.info", "operations": []string{"read", "list"}},
+		},
+	}
+	out, err := json.Marshal(result)
+	if err != nil {
+		return nil, fmt.Errorf("marshal capability list: %w", err)
+	}
+	return &ExecutionResult{
+		Status: StatusSuccess,
+		Output: string(out),
+	}, nil
+}
