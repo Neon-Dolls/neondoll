@@ -117,7 +117,7 @@ release:
   header: |
     ## NeonDoll {{ .Tag }}
 
-    > Core 1 — Spark survives destruction and continues outstanding agency.
+    > Core 2 — Spark acts, observes, learns from experience, and persists across restarts.
 
     ### Binaries
 
