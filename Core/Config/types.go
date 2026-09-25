@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 )
 
 // Config holds the Doll's runtime configuration.
@@ -17,10 +18,17 @@ type Config struct {
 	HTTP      HTTPConfig      `json:"http"`
 }
 
+// PulseConfig holds runtime configuration for the Pulse temporal subsystem.
+type PulseConfig struct {
+	Enabled        bool          `json:"enabled" yaml:"enabled"`
+	MinWakeSpacing time.Duration `json:"min_wake_spacing_seconds" yaml:"min_wake_spacing_seconds"`
+}
+
 // CoreConfig for runtime settings.
 type CoreConfig struct {
-	Profile     string `json:"profile"`
-	Environment string `json:"environment"`
+	Profile     string      `json:"profile"`
+	Environment string      `json:"environment"`
+	Pulse       PulseConfig `json:"pulse"`
 }
 
 // ConsoleConfig for REPL and terminal interaction.
