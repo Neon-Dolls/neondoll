@@ -15,6 +15,7 @@ import (
 	"github.com/Neon-Dolls/neondoll/Core/Inference"
 	"github.com/Neon-Dolls/neondoll/Core/Interaction"
 	"github.com/Neon-Dolls/neondoll/Core/Persistence"
+	"github.com/Neon-Dolls/neondoll/Core/Pulse"
 	"github.com/Neon-Dolls/neondoll/DollLink/WebSocket"
 	"github.com/Neon-Dolls/neondoll/pkg/logger"
 	"github.com/Neon-Dolls/neondoll/pkg/version"
@@ -89,10 +90,24 @@ func main() {
 	wsServer := ws.New(wsCfg, log, interactionSvc)
 	log.Info("ws transport created", map[string]any{"listen": listenAddr})
 
-	// Handle graceful shutdown.
+	// Create the base context for all services.
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	// Create Pulse runner if enabled in config.
+	var pulseRunner *pulse.Runner
+	if cfg.Core.Pulse.Enabled {
+		pulseRunner = pulse.NewRunner(cfg.Core.Pulse, pulse.NewRealClock(), log)
+		if err := pulseRunner.Start(ctx); err != nil {
+			log.Error("pulse runner start error", map[string]any{"error": err.Error()})
+			os.Exit(1)
+		}
+		log.Info("pulse runner started", map[string]any{
+			"enabled": cfg.Core.Pulse.Enabled,
+		})
+	}
+
+	// Handle graceful shutdown.
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 
@@ -105,6 +120,10 @@ func main() {
 
 		if err := wsServer.Shutdown(shutdownCtx); err != nil {
 			log.Error("ws shutdown error", map[string]any{"error": err.Error()})
+		}
+		if pulseRunner != nil {
+			pulseRunner.Stop()
+			log.Info("pulse runner stopped")
 		}
 		cancel()
 	}()

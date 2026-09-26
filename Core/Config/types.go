@@ -5,7 +5,14 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 )
+
+// secAsDuration converts an int64 seconds value (as stored in PulseConfig)
+// to a time.Duration, returning 0 for zero (unset) inputs.
+func secAsDuration(s int64) time.Duration {
+	return time.Duration(s) * time.Second
+}
 
 // Config holds the Doll's runtime configuration.
 type Config struct {
@@ -17,10 +24,25 @@ type Config struct {
 	HTTP      HTTPConfig      `json:"http"`
 }
 
+// PulseConfig holds runtime configuration for the Pulse temporal subsystem.
+// Fields are the canonical M1+ contract; some only gain semantics in later
+// milestones. All duration values are in seconds (int64); internally converted
+// to time.Duration via secAsDuration(). Zero means "not configured" and the
+// field (or its implied behaviour) is disabled unless documented otherwise.
+type PulseConfig struct {
+	Enabled        bool  `json:"enabled"`
+	IdleHorizon    int64 `json:"idle_horizon"`             // seconds; M2+: neglect idle without cognition
+	NeglectHorizon int64 `json:"neglect_horizon"`          // seconds; M2+: neglect threshold since last cognition
+	ChangeHorizon  int64 `json:"change_horizon"`           // count of state-change occurrences before triggering
+	WakeCooldown   int64 `json:"wake_cooldown"`            // seconds; later: cooldown after wake
+	MinWakeSpacing int64 `json:"min_wake_spacing_seconds"` // seconds; M3+: hard guard between spontaneous wakes. 0 = guard disabled.
+}
+
 // CoreConfig for runtime settings.
 type CoreConfig struct {
-	Profile     string `json:"profile"`
-	Environment string `json:"environment"`
+	Profile     string      `json:"profile"`
+	Environment string      `json:"environment"`
+	Pulse       PulseConfig `json:"pulse"`
 }
 
 // ConsoleConfig for REPL and terminal interaction.
