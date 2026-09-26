@@ -97,7 +97,7 @@ func main() {
 	// Create Pulse runner if enabled in config.
 	var pulseRunner *pulse.Runner
 	if cfg.Core.Pulse.Enabled {
-		pulseRunner = pulse.NewRunner(cfg.Core.Pulse, pulse.NewRealClock(), log)
+		pulseRunner = pulse.NewRunner(cfg.Core.Pulse, pulse.NewRealClock(), pulse.NewProductionRNG(), log)
 		if err := pulseRunner.Start(ctx); err != nil {
 			log.Error("pulse runner start error", map[string]any{"error": err.Error()})
 			os.Exit(1)

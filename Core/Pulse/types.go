@@ -66,6 +66,18 @@ type SignalSnapshot struct {
 	Budget   float64         `json:"budget"`
 }
 
+// SubjectActivation records which signals from a specific subject contributed
+// to an opportunity's pressure calculation. A SubjectActivation is emitted for
+// every subject with at least one non-zero activation signal. The global idle
+// signal is NOT represented as a SubjectActivation — it is always a top-level
+// field on OpportunitySnapshot.
+type SubjectActivation struct {
+	SubjectID  string  `json:"subject_id"`
+	Neglect    float64 `json:"neglect,omitempty"`
+	Change     float64 `json:"change,omitempty"`
+	Unfinished float64 `json:"unfinished,omitempty"`
+}
+
 // GuardReason is a typed constant describing why a guard blocked or allowed
 // an opportunity evaluation.
 type GuardReason string
@@ -92,7 +104,7 @@ type OpportunitySnapshot struct {
 	EffectivePressure float64             `json:"effective_pressure"`
 	ActivationSignals []float64           `json:"activation_signals"`
 	Inhibition        InhibitionBreakdown `json:"inhibition"`
-	Subjects          []string            `json:"subjects"`
+	Subjects          []SubjectActivation `json:"subjects"`
 	Eligible          bool                `json:"eligible"`
 	Guards            []GuardResult       `json:"guards"`
 	RandomSample      *float64            `json:"random_sample,omitempty"`

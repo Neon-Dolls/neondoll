@@ -64,6 +64,64 @@ func TestCombineActivation_SubjectOrderStability(t *testing.T) {
 	}
 }
 
+// --- Same-subject multiple signals regression test (Fix 1) ---
+
+func TestCombineActivation_SameSubjectMultipleSignals(t *testing.T) {
+	// Two signals from the SAME subject: neglect=0.5 AND change=0.5
+	// Should contribute 1 - ((1-0.5)*(1-0.5)) = 0.75, NOT 0.5 (which would be max)
+	p := CombineActivation([]float64{0.5, 0.5})
+	want := 1.0 - (1-0.5)*(1-0.5) // = 0.75
+	if math.Abs(p-want) > 1e-9 {
+		t.Fatalf("CombineActivation([0.5, 0.5]) = %f, want %f (saturating union of same-subject signals)", p, want)
+	}
+	if p == 0.5 {
+		t.Fatal("CombineActivation([0.5, 0.5]) == 0.5 means max-per-subject collapse is still present")
+	}
+}
+
+func TestCombineActivation_SameSubjectDifferentSignals(t *testing.T) {
+	// neglect=0.3, change=0.4, unfinished=0.2 from same subject
+	// Should contribute 1 - ((1-0.3)*(1-0.4)*(1-0.2)) = 0.664
+	p := CombineActivation([]float64{0.3, 0.4, 0.2})
+	want := 1.0 - (1-0.3)*(1-0.4)*(1-0.2)
+	if math.Abs(p-want) > 1e-9 {
+		t.Fatalf("CombineActivation([0.3, 0.4, 0.2]) = %f, want %f", p, want)
+	}
+}
+
+// --- Pressure evaluation from SignalSnapshot regression (Fix 1) ---
+
+func TestActivationSignalsFromSnapshot_SameSubjectMultipleSignals(t *testing.T) {
+	snap := SignalSnapshot{
+		At: time.Now(),
+		Subjects: []SubjectSignal{
+			{SubjectID: "subj-1", Neglect: 0.5, Change: 0.5, Unfinished: 0},
+		},
+	}
+	signals, activations := activationSignalsFromSnapshot(snap)
+	if len(signals) != 2 {
+		t.Fatalf("expected 2 activation signals (neglect + change), got %d: %v", len(signals), signals)
+	}
+	if len(activations) != 1 {
+		t.Fatalf("expected 1 subject activation, got %d", len(activations))
+	}
+	if activations[0].SubjectID != "subj-1" {
+		t.Fatalf("expected subject subj-1, got %s", activations[0].SubjectID)
+	}
+	if activations[0].Neglect != 0.5 || activations[0].Change != 0.5 {
+		t.Fatalf("expected neglect=0.5, change=0.5, got neglect=%f, change=%f", activations[0].Neglect, activations[0].Change)
+	}
+	// Saturating union: 1 - (1-0.5)*(1-0.5) = 0.75 (idle=0 already excluded from signals)
+	p := CombineActivation(signals)
+	want := 1.0 - (1-0.5)*(1-0.5)
+	if math.Abs(p-want) > 1e-9 {
+		t.Fatalf("expected combined pressure %f, got %f", want, p)
+	}
+	if p <= 0.5 {
+		t.Fatal("same-subject multiple signals must exceed max-per-subject value")
+	}
+}
+
 // --- Inhibition tests ---
 
 func TestApplyInhibition_PartialCooldown(t *testing.T) {
@@ -114,27 +172,27 @@ func TestApplyInhibition_ClampSafety(t *testing.T) {
 
 func TestEvaluateGuards_SpacingDisabled(t *testing.T) {
 	cfg := config.PulseConfig{Enabled: true}
-	sig := SignalSnapshot{At: time.Now(), Cooldown: 0, Budget: 0}
-	guards := EvaluateGuards(time.Now(), sig, PulseSnapshot{}, cfg, false)
+	ps := PulseSnapshot{}
+	eligible, guards := EvaluateGuards(time.Now(), ps, cfg, false)
 	// Spacing guard absent when MinWakeSpacing=0, so only cognition guard
-	foundCog := false
 	for _, g := range guards {
 		if g.Reason == GuardReasonCognitionRun && g.Blocked {
 			t.Fatal("cognition guard should not be blocked")
 		}
 	}
-	_ = foundCog
+	if !eligible {
+		t.Fatal("expected eligible when no guards block")
+	}
 }
 
 func TestEvaluateGuards_NoPreviousSpontaneousWake(t *testing.T) {
 	now := time.Date(2026, 9, 25, 12, 0, 0, 0, time.UTC)
 	cfg := config.PulseConfig{Enabled: true, MinWakeSpacing: 300}
-	sig := SignalSnapshot{At: now, Cooldown: 0, Budget: 0}
 	ps := PulseSnapshot{
 		LastCognitionAt:       now.Add(-10 * time.Minute),
 		LastSpontaneousWakeAt: time.Time{},
 	}
-	guards := EvaluateGuards(now, sig, ps, cfg, false)
+	eligible, guards := EvaluateGuards(now, ps, cfg, false)
 	hasSpacing := false
 	for _, g := range guards {
 		if g.Reason == GuardReasonMinWakeSpacing && g.Blocked {
@@ -147,63 +205,71 @@ func TestEvaluateGuards_NoPreviousSpontaneousWake(t *testing.T) {
 	if !hasSpacing {
 		t.Fatal("expected spacing guard")
 	}
+	if !eligible {
+		t.Fatal("expected eligible when no previous wake")
+	}
 }
 
 func TestEvaluateGuards_SpacingJustBelow(t *testing.T) {
 	now := time.Date(2026, 9, 25, 12, 0, 0, 0, time.UTC)
 	cfg := config.PulseConfig{Enabled: true, MinWakeSpacing: 300}
-	sig := SignalSnapshot{At: now, Cooldown: 0, Budget: 0}
 	ps := PulseSnapshot{
 		LastCognitionAt:       now.Add(-10 * time.Minute),
 		LastSpontaneousWakeAt: now.Add(-299 * time.Second),
 	}
-	guards := EvaluateGuards(now, sig, ps, cfg, false)
+	eligible, guards := EvaluateGuards(now, ps, cfg, false)
 	for _, g := range guards {
 		if g.Reason == GuardReasonMinWakeSpacing && !g.Blocked {
-			t.Fatalf("spacing should block: %s", g.Message)
+			t.Fatalf("spacing should block")
 		}
+	}
+	if eligible {
+		t.Fatal("expected ineligible due to spacing")
 	}
 }
 
 func TestEvaluateGuards_SpacingExactlyAt(t *testing.T) {
 	now := time.Date(2026, 9, 25, 12, 0, 0, 0, time.UTC)
 	cfg := config.PulseConfig{Enabled: true, MinWakeSpacing: 300}
-	sig := SignalSnapshot{At: now, Cooldown: 0, Budget: 0}
 	ps := PulseSnapshot{
 		LastSpontaneousWakeAt: now.Add(-300 * time.Second),
 	}
-	guards := EvaluateGuards(now, sig, ps, cfg, false)
+	eligible, guards := EvaluateGuards(now, ps, cfg, false)
 	for _, g := range guards {
 		if g.Reason == GuardReasonMinWakeSpacing && g.Blocked {
-			t.Fatalf("spacing should allow at boundary: %s", g.Message)
+			t.Fatalf("spacing should allow at boundary")
 		}
+	}
+	if !eligible {
+		t.Fatal("expected eligible at spacing boundary")
 	}
 }
 
 func TestEvaluateGuards_SpacingBeyond(t *testing.T) {
 	now := time.Date(2026, 9, 25, 12, 0, 0, 0, time.UTC)
 	cfg := config.PulseConfig{Enabled: true, MinWakeSpacing: 300}
-	sig := SignalSnapshot{At: now, Cooldown: 0, Budget: 0}
 	ps := PulseSnapshot{
 		LastSpontaneousWakeAt: now.Add(-600 * time.Second),
 	}
-	guards := EvaluateGuards(now, sig, ps, cfg, false)
+	eligible, guards := EvaluateGuards(now, ps, cfg, false)
 	for _, g := range guards {
 		if g.Reason == GuardReasonMinWakeSpacing && g.Blocked {
-			t.Fatalf("spacing should allow beyond boundary: %s", g.Message)
+			t.Fatalf("spacing should allow beyond boundary")
 		}
+	}
+	if !eligible {
+		t.Fatal("expected eligible when spacing exceeded")
 	}
 }
 
 func TestEvaluateGuards_CognitionRunActive(t *testing.T) {
 	now := time.Date(2026, 9, 25, 12, 0, 0, 0, time.UTC)
 	cfg := config.PulseConfig{Enabled: true, MinWakeSpacing: 0}
-	sig := SignalSnapshot{At: now, Cooldown: 0, Budget: 0}
 	ps := PulseSnapshot{
 		LastCognitionAt:       now.Add(-10 * time.Minute),
 		LastSpontaneousWakeAt: time.Time{},
 	}
-	guards := EvaluateGuards(now, sig, ps, cfg, true)
+	eligible, guards := EvaluateGuards(now, ps, cfg, true)
 	foundCog := false
 	for _, g := range guards {
 		if g.Reason == GuardReasonCognitionRun {
@@ -216,21 +282,26 @@ func TestEvaluateGuards_CognitionRunActive(t *testing.T) {
 	if !foundCog {
 		t.Fatal("expected cognition guard")
 	}
+	if eligible {
+		t.Fatal("expected ineligible when cognition run active")
+	}
 }
 
 func TestEvaluateGuards_MultipleSimultaneous(t *testing.T) {
 	now := time.Date(2026, 9, 25, 12, 0, 0, 0, time.UTC)
 	cfg := config.PulseConfig{Enabled: true, MinWakeSpacing: 600}
-	sig := SignalSnapshot{At: now, Cooldown: 0, Budget: 0}
 	ps := PulseSnapshot{
 		LastCognitionAt:       now.Add(-10 * time.Minute),
 		LastSpontaneousWakeAt: now.Add(-60 * time.Second),
 	}
-	guards := EvaluateGuards(now, sig, ps, cfg, true)
+	eligible, guards := EvaluateGuards(now, ps, cfg, true)
 	for _, g := range guards {
 		if !g.Blocked {
 			t.Fatalf("guard %s should block", g.Reason)
 		}
+	}
+	if eligible {
+		t.Fatal("expected ineligible when multiple guards block")
 	}
 }
 
@@ -329,6 +400,21 @@ func TestEvaluateOpportunity_ExactlyOneDrawWhenEligible(t *testing.T) {
 	}
 }
 
+func TestEvaluateOpportunity_ExactlyOneDrawRealRNG(t *testing.T) {
+	now := time.Date(2026, 9, 25, 12, 0, 0, 0, time.UTC)
+	cfg := config.PulseConfig{Enabled: true}
+	sig := SignalSnapshot{At: now, Idle: 1.0, Cooldown: 0, Budget: 0}
+	ps := PulseSnapshot{LastCognitionAt: now.Add(-10 * time.Minute)}
+	rng := NewProductionRNG()
+	opp := EvaluateOpportunity(now, sig, ps, cfg, false, rng)
+	if !opp.Opportunity {
+		t.Fatal("pressure 1 with real RNG must always succeed")
+	}
+	if opp.RandomSample == nil {
+		t.Fatal("expected non-nil RandomSample with real RNG")
+	}
+}
+
 func TestEvaluateOpportunity_DeterministicSameState(t *testing.T) {
 	now := time.Date(2026, 9, 25, 12, 0, 0, 0, time.UTC)
 	cfg := config.PulseConfig{Enabled: true}
@@ -417,21 +503,65 @@ func TestEvaluateOpportunity_ContributingSubjects(t *testing.T) {
 	}
 	ps := PulseSnapshot{LastCognitionAt: now.Add(-10 * time.Minute)}
 	opp := EvaluateOpportunity(now, sig, ps, cfg, false, &fakeRNG{samples: []float64{0.01}})
-	// subject-1 has max signal 0.5, subject-2 has max 0.1, subject-3 has max 0
+	// subject-1 has neglect=0.5, change=0.3, unfinished=0.2 → all >0
+	// subject-2 has neglect=0.1, change=0.1, unfinished=0.1 → all >0
+	// subject-3 has all 0 → not contributing
 	if len(opp.Subjects) != 2 {
-		t.Fatalf("expected 2 contributing subjects, got %v", opp.Subjects)
+		t.Fatalf("expected 2 contributing subjects, got %d: %+v", len(opp.Subjects), opp.Subjects)
 	}
 	foundS1, foundS2 := false, false
-	for _, s := range opp.Subjects {
-		switch s {
+	for _, sa := range opp.Subjects {
+		switch sa.SubjectID {
 		case "subject-1":
 			foundS1 = true
+			if sa.Neglect != 0.5 || sa.Change != 0.3 || sa.Unfinished != 0.2 {
+				t.Fatalf("subject-1 expected neglect=0.5, change=0.3, unfinished=0.2, got %+v", sa)
+			}
 		case "subject-2":
 			foundS2 = true
+			if sa.Neglect != 0.1 || sa.Change != 0.1 || sa.Unfinished != 0.1 {
+				t.Fatalf("subject-2 expected neglect=0.1, change=0.1, unfinished=0.1, got %+v", sa)
+			}
 		}
 	}
 	if !foundS1 || !foundS2 {
-		t.Fatalf("expected subject-1 and subject-2, got %v", opp.Subjects)
+		t.Fatalf("expected subject-1 and subject-2, got %+v", opp.Subjects)
+	}
+}
+
+func TestEvaluateOpportunity_ContributingSubjectsSameSourceMultipleSignals(t *testing.T) {
+	// Regression test: one subject with neglect=0.5 AND change=0.5
+	// Activation pressure must be 1 - (1-0.5)*(1-0.5) = 0.75, not 0.5 (max)
+	now := time.Date(2026, 9, 25, 12, 0, 0, 0, time.UTC)
+	cfg := config.PulseConfig{Enabled: true}
+	sig := SignalSnapshot{
+		At:   now,
+		Idle: 0.2,
+		Subjects: []SubjectSignal{
+			{SubjectID: "subj-1", Neglect: 0.5, Change: 0.5, Unfinished: 0},
+		},
+		Cooldown: 0,
+		Budget:   0,
+	}
+	ps := PulseSnapshot{LastCognitionAt: now.Add(-10 * time.Minute)}
+	opp := EvaluateOpportunity(now, sig, ps, cfg, false, &fakeRNG{samples: []float64{0.01}})
+	// Expected activation: idle(0.2) saturated with neglect(0.5) and change(0.5)
+	// = 1 - (1-0.2)*(1-0.5)*(1-0.5) = 1 - (0.8*0.5*0.5) = 1 - 0.2 = 0.8
+	want := 1.0 - (1-0.2)*(1-0.5)*(1-0.5)
+	if math.Abs(opp.Pressure-want) > 1e-9 {
+		t.Fatalf("expected pressure %f (saturating union over 3 individual signals), got %f", want, opp.Pressure)
+	}
+	if math.Abs(opp.Pressure-0.5) < 1e-9 || opp.Pressure < 0.75 {
+		t.Fatal("pressure should exceed max-per-subject value due to same-subject multiple signals")
+	}
+	if len(opp.Subjects) != 1 {
+		t.Fatalf("expected 1 subject, got %d", len(opp.Subjects))
+	}
+	if opp.Subjects[0].SubjectID != "subj-1" {
+		t.Fatalf("expected subj-1, got %s", opp.Subjects[0].SubjectID)
+	}
+	if opp.Subjects[0].Neglect != 0.5 || opp.Subjects[0].Change != 0.5 {
+		t.Fatalf("expected neglect=0.5, change=0.5, got %+v", opp.Subjects[0])
 	}
 }
 
@@ -620,12 +750,13 @@ func TestRunner_RaceSafeSnapshots(t *testing.T) {
 	<-done
 }
 
-// --- Backwards-time preservation ---
+// --- Backwards-time preservation (Fix 3) ---
 
 func TestBackwardsTime_PreservesSignalSnapshot(t *testing.T) {
 	ref := time.Date(2026, 9, 25, 12, 0, 0, 0, time.UTC)
 	cfg := config.PulseConfig{Enabled: true, IdleHorizon: 100}
 	r, _, tickCh, ackCh := newTestRunner(t, cfg, ref)
+	r.rng = &fakeRNG{samples: []float64{0.5}} // forward tick needs a draw
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -633,6 +764,9 @@ func TestBackwardsTime_PreservesSignalSnapshot(t *testing.T) {
 		t.Fatalf("Start: %v", err)
 	}
 	defer r.Stop()
+
+	// Establish cognition baseline
+	r.RecordCognition(ref.Add(-50 * time.Second))
 
 	// Forward
 	r.clock.(*fakeClock).Advance(10 * time.Second)
@@ -644,15 +778,33 @@ func TestBackwardsTime_PreservesSignalSnapshot(t *testing.T) {
 	triggerTick(t, tickCh, ackCh)
 	bwdSnap := r.SignalSnapshot()
 
-	if fwdSnap.At.IsZero() {
-		t.Fatal("forward snapshot should not be zero")
+	// Deep equality: the rejected backwards tick must preserve the previous snapshot unchanged
+	if fwdSnap.At != bwdSnap.At {
+		t.Fatalf("backwards tick changed At: forward=%v, backward=%v", fwdSnap.At, bwdSnap.At)
 	}
-	if bwdSnap.At.IsZero() {
-		t.Fatal("backwards snapshot should not be zero")
+	if fwdSnap.Idle != bwdSnap.Idle {
+		t.Fatalf("backwards tick changed Idle: forward=%f, backward=%f", fwdSnap.Idle, bwdSnap.Idle)
+	}
+	if len(fwdSnap.Subjects) != len(bwdSnap.Subjects) {
+		t.Fatalf("backwards tick changed Subjects count: forward=%d, backward=%d", len(fwdSnap.Subjects), len(bwdSnap.Subjects))
+	}
+	if fwdSnap.Cooldown != bwdSnap.Cooldown {
+		t.Fatalf("backwards tick changed Cooldown: forward=%f, backward=%f", fwdSnap.Cooldown, bwdSnap.Cooldown)
+	}
+	if fwdSnap.Budget != bwdSnap.Budget {
+		t.Fatalf("backwards tick changed Budget: forward=%f, backward=%f", fwdSnap.Budget, bwdSnap.Budget)
+	}
+	// Prove the full signal snapshot was preserved (deep equality on struct fields)
+	if len(fwdSnap.Subjects) > 0 {
+		for i := range fwdSnap.Subjects {
+			if fwdSnap.Subjects[i] != bwdSnap.Subjects[i] {
+				t.Fatalf("backwards tick changed Subject[%d]: forward=%+v, backward=%+v", i, fwdSnap.Subjects[i], bwdSnap.Subjects[i])
+			}
+		}
 	}
 }
 
-func TestBackwardsTime_PreservesOpportunitySnapshot(t *testing.T) {
+func TestBackwardsTime_PreservesOpportunitySnapshotAndNoRNGDraws(t *testing.T) {
 	ref := time.Date(2026, 9, 25, 12, 0, 0, 0, time.UTC)
 	cfg := config.PulseConfig{Enabled: true, IdleHorizon: 100, MinWakeSpacing: 0}
 	r, _, tickCh, ackCh := newTestRunner(t, cfg, ref)
@@ -665,21 +817,53 @@ func TestBackwardsTime_PreservesOpportunitySnapshot(t *testing.T) {
 	}
 	defer r.Stop()
 
+	// Establish cognition baseline
+	r.RecordCognition(ref.Add(-50 * time.Second))
+
 	// Forward
 	r.clock.(*fakeClock).Advance(10 * time.Second)
 	triggerTick(t, tickCh, ackCh)
 	fwdOpp := r.OpportunitySnapshot()
+
+	// Record RNG index after forward tick
+	fwdRngIdx := r.rng.(*fakeRNG).index
 
 	// Backwards
 	r.clock.(*fakeClock).Set(ref.Add(5 * time.Second))
 	triggerTick(t, tickCh, ackCh)
 	bwdOpp := r.OpportunitySnapshot()
 
-	if fwdOpp.EvaluatedAt.IsZero() {
-		t.Fatal("forward opp snapshot should not be zero")
+	// Deep equality: the rejected backwards tick must preserve the previous opportunity snapshot unchanged
+	if fwdOpp.EvaluatedAt != bwdOpp.EvaluatedAt {
+		t.Fatalf("backwards tick changed EvaluatedAt: forward=%v, backward=%v", fwdOpp.EvaluatedAt, bwdOpp.EvaluatedAt)
 	}
-	if bwdOpp.EvaluatedAt.IsZero() {
-		t.Fatal("backwards opp snapshot should not be zero")
+	if fwdOpp.Pressure != bwdOpp.Pressure {
+		t.Fatalf("backwards tick changed Pressure: forward=%f, backward=%f", fwdOpp.Pressure, bwdOpp.Pressure)
+	}
+	if fwdOpp.EffectivePressure != bwdOpp.EffectivePressure {
+		t.Fatalf("backwards tick changed EffectivePressure: forward=%f, backward=%f", fwdOpp.EffectivePressure, bwdOpp.EffectivePressure)
+	}
+	if fwdOpp.Eligible != bwdOpp.Eligible {
+		t.Fatalf("backwards tick changed Eligible: forward=%v, backward=%v", fwdOpp.Eligible, bwdOpp.Eligible)
+	}
+	if fwdOpp.Opportunity != bwdOpp.Opportunity {
+		t.Fatalf("backwards tick changed Opportunity: forward=%v, backward=%v", fwdOpp.Opportunity, bwdOpp.Opportunity)
+	}
+	if len(fwdOpp.Subjects) != len(bwdOpp.Subjects) {
+		t.Fatalf("backwards tick changed Subjects: forward=%d, backward=%d", len(fwdOpp.Subjects), len(bwdOpp.Subjects))
+	}
+	if len(fwdOpp.Subjects) > 0 {
+		for i := range fwdOpp.Subjects {
+			if fwdOpp.Subjects[i] != bwdOpp.Subjects[i] {
+				t.Fatalf("backwards tick changed Subject[%d]: forward=%+v, backward=%+v", i, fwdOpp.Subjects[i], bwdOpp.Subjects[i])
+			}
+		}
+	}
+
+	// Prove ZERO additional RNG draws consumed by the backwards tick
+	bwdRngIdx := r.rng.(*fakeRNG).index
+	if bwdRngIdx != fwdRngIdx {
+		t.Fatalf("backwards tick consumed RNG draws: forward index=%d, backward index=%d", fwdRngIdx, bwdRngIdx)
 	}
 }
 

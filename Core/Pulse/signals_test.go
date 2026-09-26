@@ -544,6 +544,7 @@ func TestRunner_SignalSnapshotThroughEvaluate(t *testing.T) {
 	ackCh := make(chan struct{}, 10)
 	r.tickTestCh = tickCh
 	r.tickAckCh = ackCh
+	r.rng = &fakeRNG{samples: []float64{0.5, 0.5}} // ticks twice, needs draw each time
 
 	// Start the runner
 	ctx, cancel := context.WithCancel(context.Background())

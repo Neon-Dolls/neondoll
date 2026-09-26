@@ -56,44 +56,82 @@ func ApplyInhibition(pressure, cooldown, budget float64) float64 {
 
 // activationSignalsFromSnapshot extracts all non-zero activation signal values
 // from a SignalSnapshot for the purpose of computing saturating-union pressure.
-// It returns the flattened list of signals and the list of subject IDs that
-// contributed non-zero subject-level signals.
+// It returns the flattened list of signals and structured activation evidence.
+//
+// Unlike M2 which collapsed each subject's neglect, change, and unfinished
+// into a single max per subject, M3 adds EVERY non-zero signal individually
+// into the saturating union. This means multiple activation signals from the
+// SAME subject all contribute independently — e.g. neglect=0.5 AND change=0.5
+// on the same subject contributes 1 - ((1-0.5)*(1-0.5)) = 0.75, not 0.5.
 //
 // The global idle signal is always included (even when zero, it contributes
 // nothing to the union). Subjects with all-zero signals are excluded from
-// both the signal list and the returned ID list.
-func activationSignalsFromSnapshot(snap SignalSnapshot) (signals []float64, contributingSubjectIDs []string) {
-	// Idle is always present; include only if non-zero.
+// both the signal list and the activation evidence.
+func activationSignalsFromSnapshot(snap SignalSnapshot) (signals []float64, activations []SubjectActivation) {
+	// Idle is always included as a signal (even when 0, it provides traceability).
+	// It is NOT wrapped in a SubjectActivation — idle is a global activation signal,
+	// not a subject-level one.
 	if snap.Idle > 0 {
-		signals = append(signals, snap.Idle)
+		signals = append(signals, clampSignal(snap.Idle))
 	}
 
-	// Collect subject IDs only for subjects with at least one non-zero signal.
+	// Collect every non-zero activation signal from each subject individually.
+	// Do NOT collapse a subject's signals to a single max — each signal
+	// contributes independently to the saturating union.
 	for _, subj := range snap.Subjects {
-		// Determine the maximum signal value for this subject.
-		maxSig := math.Max(math.Max(subj.Neglect, subj.Change), subj.Unfinished)
-		// Clamp to [0, 1] in case of float artifacts.
-		if maxSig > 1 {
-			maxSig = 1
+		act := SubjectActivation{SubjectID: subj.SubjectID}
+		hasNonZero := false
+
+		if subj.Neglect > 0 {
+			v := clampSignal(subj.Neglect)
+			signals = append(signals, v)
+			act.Neglect = v
+			hasNonZero = true
 		}
-		if maxSig > 0 {
-			signals = append(signals, maxSig)
-			contributingSubjectIDs = append(contributingSubjectIDs, subj.SubjectID)
+		if subj.Change > 0 {
+			v := clampSignal(subj.Change)
+			signals = append(signals, v)
+			act.Change = v
+			hasNonZero = true
+		}
+		if subj.Unfinished > 0 {
+			v := clampSignal(subj.Unfinished)
+			signals = append(signals, v)
+			act.Unfinished = v
+			hasNonZero = true
+		}
+
+		if hasNonZero {
+			activations = append(activations, act)
 		}
 	}
 
-	return signals, contributingSubjectIDs
+	return signals, activations
+}
+
+// clampSignal clamps a signal value to [0, 1], treating NaN/Inf as 0.
+func clampSignal(v float64) float64 {
+	if math.IsNaN(v) || math.IsInf(v, 0) {
+		return 0
+	}
+	if v < 0 {
+		return 0
+	}
+	if v > 1 {
+		return 1
+	}
+	return v
 }
 
 // EvaluatePressure is a pure function that computes raw pressure (saturating
 // union), effective pressure (after soft inhibition), and returns the
-// contributing signal values and subject IDs.
+// contributing signal values and subject activation evidence.
 //
 // It does not consume RNG, mutate state, or perform hard-guard checks.
-func EvaluatePressure(snap SignalSnapshot) (pressure, effectivePressure float64, activationSignals []float64, subjects []string) {
-	signals, subjectIDs := activationSignalsFromSnapshot(snap)
+func EvaluatePressure(snap SignalSnapshot) (pressure, effectivePressure float64, activationSignals []float64, subjects []SubjectActivation) {
+	signals, activations := activationSignalsFromSnapshot(snap)
 	activationSignals = signals
-	subjects = subjectIDs
+	subjects = activations
 	pressure = CombineActivation(signals)
 	effectivePressure = ApplyInhibition(pressure, snap.Cooldown, snap.Budget)
 	return
