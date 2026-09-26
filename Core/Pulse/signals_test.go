@@ -59,6 +59,31 @@ func TestEvaluateSignals_IdleAtExactTimes(t *testing.T) {
 	}
 }
 
+// TestEvaluateSignals_IdleNoBaseline proves that an unknown LastCognitionAt
+// (zero value) yields idle=0, not an invented infinite history.
+// Backwards-time Pulse evaluation is an error and is clipped to elapsed=0.
+func TestEvaluateSignals_IdleNoBaseline(t *testing.T) {
+	cfg := cfgWith(100, 0, 0, 0) // idle horizon = 100s
+	ps := PulseSnapshot{}
+	snap := EvaluateSignals(ref, cfg, ps, nil, InhibitionInputs{})
+	if snap.Idle != 0 {
+		t.Errorf("Idle = %f, want 0 (no cognition baseline → no idle signal)", snap.Idle)
+	}
+}
+
+// TestEvaluateSignals_IdleBackwardsTime proves that backwards-time evaluation
+// (now < LastCognitionAt) clips elapsed to 0, producing the same result as
+// zero elapsed.
+func TestEvaluateSignals_IdleBackwardsTime(t *testing.T) {
+	cfg := cfgWith(100, 0, 0, 0)
+	ps := PulseSnapshot{LastCognitionAt: ref.Add(-time.Hour)}
+	backwardsNow := ref.Add(-2 * time.Hour) // earlier than cognition
+	snap := EvaluateSignals(backwardsNow, cfg, ps, nil, InhibitionInputs{})
+	if snap.Idle != 0 {
+		t.Errorf("Idle = %f, want 0 (backwards time → elapsed clipped to 0)", snap.Idle)
+	}
+}
+
 // ─── 2. Idle with zero subjects ─────────────────────────────────────────────
 
 func TestEvaluateSignals_IdleWithZeroSubjects(t *testing.T) {

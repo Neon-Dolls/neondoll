@@ -10,7 +10,8 @@ const LifecycleStateUnresolved = "unresolved"
 
 // PulseSnapshot is a race-safe read of the runner's global bookkeeping.
 // LastCognitionAt is set by RecordCognition (called by Core on cognition
-// events). LastSpontaneousWakeAt is set by RecordSpontaneousWake (M3+).
+// events). LastSpontaneousWakeAt is available for M3+ spontaneous-wake
+// tracking; in M2 it remains zero (no mutation path).
 type PulseSnapshot struct {
 	TickCount             int64     `json:"tick_count"`
 	LastTickAt            time.Time `json:"last_tick_at"`
@@ -31,12 +32,11 @@ type PulseResult struct {
 // LifecycleStateUnresolved (sets unfinished=1). Pulse never infers state
 // from semantic prose.
 type PulseSubjectState struct {
-	SubjectID             string    `json:"subject_id"`
-	LastPresentedAt       time.Time `json:"last_presented_at"`
-	RevisionAtLastPresent time.Time `json:"revision_at_last_present"`
-	ChangesSincePresent   int64     `json:"changes_since_present"`
-	LastSettledAt         time.Time `json:"last_settled_at"`
-	LifecycleState        string    `json:"lifecycle_state"`
+	SubjectID           string    `json:"subject_id"`
+	LastPresentedAt     time.Time `json:"last_presented_at"`
+	ChangesSincePresent int64     `json:"changes_since_present"`
+	LastSettledAt       time.Time `json:"last_settled_at"`
+	LifecycleState      string    `json:"lifecycle_state"`
 }
 
 // InhibitionInputs is the narrow input seam through which Core supplies

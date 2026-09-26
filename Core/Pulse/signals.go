@@ -79,23 +79,20 @@ func EvaluateSignals(now time.Time, cfg config.PulseConfig, pulseState PulseSnap
 }
 
 // evaluateIdle computes the subject-independent idle activation signal.
+// Returns 0 when no cognition baseline exists (unknown = no idle signal).
 func evaluateIdle(now time.Time, cfg config.PulseConfig, pulseState PulseSnapshot) float64 {
 	idleH := cfg.IdleHorizon
 	if idleH <= 0 || !cfg.Enabled {
 		return 0
 	}
-
-	var elapsed float64
 	if pulseState.LastCognitionAt.IsZero() {
-		// No cognition recorded yet → elapsed is unbounded → saturated if horizon > 0
-		elapsed = math.Inf(1)
-	} else {
-		elapsed = now.Sub(pulseState.LastCognitionAt).Seconds()
-		if elapsed < 0 {
-			elapsed = 0 // backwards time → no elapsed
-		}
+		// No cognition baseline yet → no idle signal.
+		return 0
 	}
-
+	elapsed := now.Sub(pulseState.LastCognitionAt).Seconds()
+	if elapsed < 0 {
+		elapsed = 0 // backwards time → no elapsed
+	}
 	return normalize(elapsed, float64(idleH))
 }
 

@@ -32,10 +32,9 @@ type Runner struct {
 	stopCh  chan struct{}
 	wg      sync.WaitGroup
 
-	tickCount             int64
-	lastTickAt            time.Time
-	lastCognitionAt       time.Time
-	lastSpontaneousWakeAt time.Time
+	tickCount       int64
+	lastTickAt      time.Time
+	lastCognitionAt time.Time
 
 	// Subjects observed by Pulse. Core calls UpdateSubjects to push changes;
 	// evaluate() reads the latest snapshot under the lock.
@@ -92,14 +91,14 @@ func (r *Runner) Stop() {
 }
 
 // Snapshot returns a race-safe read of the runner's current bookkeeping.
+// LastSpontaneousWakeAt is always zero in M2 (no spontaneous-wake mutation path).
 func (r *Runner) Snapshot() PulseSnapshot {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return PulseSnapshot{
-		TickCount:             r.tickCount,
-		LastTickAt:            r.lastTickAt,
-		LastCognitionAt:       r.lastCognitionAt,
-		LastSpontaneousWakeAt: r.lastSpontaneousWakeAt,
+		TickCount:       r.tickCount,
+		LastTickAt:      r.lastTickAt,
+		LastCognitionAt: r.lastCognitionAt,
 	}
 }
 
@@ -146,17 +145,6 @@ func (r *Runner) RecordCognition(at time.Time) {
 	}
 }
 
-// RecordSpontaneousWake records a spontaneous wake event timestamp.
-// Used by Core (M3+) to set LastSpontaneousWakeAt, which drives cooldown.
-// Only forward-time updates are accepted.
-func (r *Runner) RecordSpontaneousWake(at time.Time) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if at.After(r.lastSpontaneousWakeAt) {
-		r.lastSpontaneousWakeAt = at
-	}
-}
-
 func (r *Runner) run(ctx context.Context) {
 	defer r.wg.Done()
 
@@ -188,19 +176,17 @@ func (r *Runner) run(ctx context.Context) {
 
 // evaluate performs one Pulse evaluation and updates runner state.
 // It calls the pure Evaluate function and applies its result.
-// Backwards-time results are rejected: state is not updated, and a warning
-// is logged. The previous LastTickAt and TickCount are preserved.
-// After tick bookkeeping, it evaluates all signals via EvaluateSignals and
-// stores the result for inspection via SignalSnapshot().
+// Backwards-time results are rejected: state is not updated, a warning
+// is logged, and the previous LastTickAt, TickCount, and SignalSnapshot
+// are all preserved.
 func (r *Runner) evaluate() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	prev := PulseSnapshot{
-		TickCount:             r.tickCount,
-		LastTickAt:            r.lastTickAt,
-		LastCognitionAt:       r.lastCognitionAt,
-		LastSpontaneousWakeAt: r.lastSpontaneousWakeAt,
+		TickCount:       r.tickCount,
+		LastTickAt:      r.lastTickAt,
+		LastCognitionAt: r.lastCognitionAt,
 	}
 
 	result := Evaluate(r.clock, prev)
@@ -210,40 +196,36 @@ func (r *Runner) evaluate() {
 			"last_tick_at": r.lastTickAt,
 			"now":          result.At,
 		})
-		// Evaluate signals on the PREVIOUS pulse state (backwards time
-		// preserves the old bookkeeping, so signals are evaluated at the
-		// old state at the new time — the caller gets an accurate read
-		// of signals despite time not advancing).
+		// Preserve the previous valid SignalSnapshot; do not recompute
+		// signals using the regressed time.
+		if r.tickAckCh != nil {
+			select {
+			case r.tickAckCh <- struct{}{}:
+			default:
+			}
+		}
+		return
 	}
 
-	// Always apply non-backwards tick state AND update signals snapshot
-	if !result.BackwardsTime {
-		r.tickCount = result.TickCount
-		r.lastTickAt = result.At
-	}
+	r.tickCount = result.TickCount
+	r.lastTickAt = result.At
 
-	// Evaluate signals (always — even on backwards time, the snapshot
-	// reflects current time with the frozen bookkeeping state).
+	// Evaluate signals at the current time with current bookkeeping.
 	now := result.At
 	subjects := make([]PulseSubjectState, len(r.subjects))
 	copy(subjects, r.subjects)
 	inhibition := InhibitionInputs{Budget: r.currentBudget}
 
-	// Build the pulse state snapshot as it was BEFORE this tick's
-	// bookkeeping changes (consistent with what EvaluateSignals expects).
 	sigPulseState := PulseSnapshot{
-		TickCount:             r.tickCount,
-		LastTickAt:            r.lastTickAt,
-		LastCognitionAt:       r.lastCognitionAt,
-		LastSpontaneousWakeAt: r.lastSpontaneousWakeAt,
+		TickCount:       r.tickCount,
+		LastTickAt:      r.lastTickAt,
+		LastCognitionAt: r.lastCognitionAt,
 	}
 
 	sigSnap := EvaluateSignals(now, r.cfg, sigPulseState, subjects, inhibition)
 	r.lastSignalSnapshot = sigSnap
 
 	if r.tickAckCh != nil {
-		// Non-blocking send; drained by tests. If nobody is listening
-		// (production path), the send is dropped harmlessly.
 		select {
 		case r.tickAckCh <- struct{}{}:
 		default:
