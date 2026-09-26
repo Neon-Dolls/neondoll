@@ -19,9 +19,16 @@ type Config struct {
 }
 
 // PulseConfig holds runtime configuration for the Pulse temporal subsystem.
+// Fields are the canonical M1+ contract; some only gain semantics in later
+// milestones. All durations are optional — zero means "not configured" and
+// the field (or its implied behaviour) is disabled unless documented otherwise.
 type PulseConfig struct {
-	Enabled        bool          `json:"enabled" yaml:"enabled"`
-	MinWakeSpacing time.Duration `json:"min_wake_spacing_seconds" yaml:"min_wake_spacing_seconds"`
+	Enabled       bool          `json:"enabled"`
+	IdleHorizon   time.Duration `json:"idle_horizon"`
+	NeglectHorizon time.Duration `json:"neglect_horizon"`
+	ChangeHorizon time.Duration `json:"change_horizon"`
+	WakeCooldown  time.Duration `json:"wake_cooldown"`
+	MinWakeSpacing time.Duration `json:"min_wake_spacing_seconds"` // M3+: hard guard between spontaneous wakes. 0 = guard disabled.
 }
 
 // CoreConfig for runtime settings.

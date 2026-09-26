@@ -4,98 +4,109 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"time"
 
-	coreconfig "github.com/Neon-Dolls/neondoll/Core/Config"
+	"github.com/Neon-Dolls/neondoll/Core/Config"
 	"github.com/Neon-Dolls/neondoll/pkg/logger"
 )
 
-// Runner manages the Pulse evaluation loop.
-// It enforces at-most-one runner per runtime and ensures goroutine lifecycle
-// is properly managed with synchronous Stop().
+// defaultTickInterval is the runner's internal evaluation cadence in production.
+// It is implementation machinery, not a canonical Pulse contract field;
+// later milestones may replace it with adaptive/event-driven scheduling.
+const defaultTickInterval = 1 * time.Second
+
+// Runner owns one Pulse evaluation loop per Core runtime.
+// It is single-runner only — duplicate Start is rejected.
 type Runner struct {
+	cfg   config.PulseConfig
+	clock Clock
+	log   *logger.Logger
+
 	mu      sync.Mutex
-	running bool
+	started atomic.Bool
 	stopCh  chan struct{}
 	wg      sync.WaitGroup
-	config  coreconfig.PulseConfig
-	clock   Clock
-	log     *logger.Logger
 
-	// mutable state protected by mu
-	tickCount      int64
-	lastTickTime   time.Time
-	evaluatedCount int64
+	tickCount             int64
+	lastTickAt            time.Time
+	lastCognitionAt       time.Time
+	lastSpontaneousWakeAt time.Time
 
-	// last result for backwards-time detection
-	lastResult PulseResult
+	// Test injection: when non-nil, replaces the production ticker channel.
+	// Tests send on this channel to drive evaluations deterministically.
+	tickTestCh chan time.Time
+	// Test injection: when non-nil, closed/drained after each evaluate() call
+	// completes under the lock. Tests read from this to synchronise with
+	// goroutine evaluation without time.Sleep.
+	tickAckCh chan struct{}
 }
 
-// NewRunner creates a Pulse runner. It does not start it.
-func NewRunner(cfg coreconfig.PulseConfig, clk Clock, log *logger.Logger) *Runner {
+// NewRunner creates a Pulse runner. It does not start the evaluation loop;
+// call Start after construction.
+func NewRunner(cfg config.PulseConfig, clock Clock, log *logger.Logger) *Runner {
 	return &Runner{
-		config: cfg,
-		clock:  clk,
+		cfg:    cfg,
+		clock:  clock,
 		log:    log,
+		stopCh: make(chan struct{}),
 	}
 }
 
-// Start begins the Pulse evaluation loop in a new goroutine.
-// Returns an error if the runner is already running.
-// When MinWakeSpacing is 0, the runner starts but never ticks (disabled mode).
+// Start begins the Pulse evaluation loop. Only one evaluation loop may run;
+// a second call returns an error.
 func (r *Runner) Start(ctx context.Context) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	if r.running {
-		return errors.New("pulse runner already running")
+	if !r.started.CompareAndSwap(false, true) {
+		return errors.New("pulse runner already started")
 	}
-
-	r.running = true
-	r.stopCh = make(chan struct{})
-
 	r.wg.Add(1)
 	go r.run(ctx)
 	return nil
 }
 
-// Stop signals the runner to stop and waits for the goroutine to exit.
+// Stop signals the evaluation loop to exit and waits for it to finish.
 // Safe to call multiple times; subsequent calls are no-ops.
 func (r *Runner) Stop() {
-	r.mu.Lock()
-	if !r.running {
-		r.mu.Unlock()
+	if !r.started.Load() {
 		return
 	}
-	r.running = false
-	close(r.stopCh)
-	r.mu.Unlock()
-	r.wg.Wait()
+	select {
+	case <-r.stopCh:
+		// already closed
+	default:
+		close(r.stopCh)
+	}
+	r.wg.Wait() // only the first close triggers stop
 }
 
-// Snapshot returns a read-only copy of the current Pulse state.
-// This is the only way to observe Pulse state from outside the runner.
+// Snapshot returns a race-safe read of the runner's current bookkeeping.
 func (r *Runner) Snapshot() PulseSnapshot {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return PulseSnapshot{
-		TickCount:      r.tickCount,
-		LastTickTime:   r.lastTickTime,
-		EvaluatedCount: r.evaluatedCount,
+		TickCount:             r.tickCount,
+		LastTickAt:            r.lastTickAt,
+		LastCognitionAt:       r.lastCognitionAt,
+		LastSpontaneousWakeAt: r.lastSpontaneousWakeAt,
 	}
 }
 
 func (r *Runner) run(ctx context.Context) {
 	defer r.wg.Done()
 
-	// If Pulse is not enabled or MinWakeSpacing is 0, just wait for stop.
-	if !r.config.Enabled || r.config.MinWakeSpacing <= 0 {
+	if !r.cfg.Enabled {
 		<-r.stopCh
 		return
 	}
 
-	ticker := time.NewTicker(r.config.MinWakeSpacing)
-	defer ticker.Stop()
+	var tickCh <-chan time.Time
+	if r.tickTestCh != nil {
+		tickCh = r.tickTestCh
+	} else {
+		ticker := time.NewTicker(defaultTickInterval)
+		defer ticker.Stop()
+		tickCh = ticker.C
+	}
 
 	for {
 		select {
@@ -103,25 +114,46 @@ func (r *Runner) run(ctx context.Context) {
 			return
 		case <-r.stopCh:
 			return
-		case <-ticker.C:
-			r.tick()
+		case <-tickCh:
+			r.evaluate()
 		}
 	}
 }
 
-func (r *Runner) tick() {
-	result := Evaluate(r.clock, r.lastResult)
-
+// evaluate performs one Pulse evaluation and updates runner state.
+// It calls the pure Evaluate function and applies its result.
+// Backwards-time results are rejected: state is not updated, and a warning
+// is logged. The previous LastTickAt and TickCount are preserved.
+func (r *Runner) evaluate() {
 	r.mu.Lock()
-	r.tickCount++
-	r.lastTickTime = result.At
-	r.evaluatedCount += int64(len(result.Subjects))
-	if result.BackwardsTime {
-		r.log.Warn("Backwards time detected", map[string]any{
-			"now":  result.At.Format(time.RFC3339),
-			"prev": r.lastResult.At.Format(time.RFC3339),
-		})
+	defer r.mu.Unlock()
+
+	prev := PulseSnapshot{
+		TickCount:             r.tickCount,
+		LastTickAt:            r.lastTickAt,
+		LastCognitionAt:       r.lastCognitionAt,
+		LastSpontaneousWakeAt: r.lastSpontaneousWakeAt,
 	}
-	r.lastResult = result
-	r.mu.Unlock()
+
+	result := Evaluate(r.clock, prev)
+
+	if result.BackwardsTime {
+		r.log.Warn("pulse backwards time", map[string]any{
+			"last_tick_at": r.lastTickAt,
+			"now":          result.At,
+		})
+	} else {
+		r.tickCount = result.TickCount
+		r.lastTickAt = result.At
+		// lastCognitionAt and lastSpontaneousWakeAt stay zero in M1
+	}
+
+	if r.tickAckCh != nil {
+		// Non-blocking send; drained by tests. If nobody is listening
+		// (production path), the send is dropped harmlessly.
+		select {
+		case r.tickAckCh <- struct{}{}:
+		default:
+		}
+	}
 }

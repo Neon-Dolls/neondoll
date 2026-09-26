@@ -103,7 +103,7 @@ func main() {
 			os.Exit(1)
 		}
 		log.Info("pulse runner started", map[string]any{
-			"min_wake_spacing_seconds": cfg.Core.Pulse.MinWakeSpacing,
+			"enabled": cfg.Core.Pulse.Enabled,
 		})
 	}
 

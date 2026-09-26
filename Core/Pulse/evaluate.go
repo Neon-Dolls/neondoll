@@ -1,49 +1,28 @@
 package pulse
 
-import (
-	"fmt"
-	"time"
-)
-
-// Evaluate performs a single synchronous Pulse evaluation using the given clock.
-// It is a pure function with no side effects: it does not mutate Doll State,
-// call inference providers, call Doll Mind, or create wake events.
+// Evaluate is a pure synchronous Pulse evaluation.
+// It reads the current time from the injected clock and produces a PulseResult
+// without side effects. The caller (runner) applies state changes, rejects
+// backwards time, and logs as appropriate.
 //
-// In M1, Evaluate always evaluates a single PulseSubject("temporal") and records
-// a TemporalObservation for each subject.
+// Backwards time: when now < prev.LastTickAt, TickCount is NOT incremented
+// and BackwardsTime is set to true. The previous time is thus preserved.
 //
-// Backwards time is detected when the clock returns a time before prev.Now().
-// When detected, BackwardsTime is set to true in the result, and a warning-worthy
-// observation is recorded.
-func Evaluate(clock Clock, prev PulseResult) PulseResult {
+// Same-time evaluation is valid — it increments TickCount normally
+// (the Pulse ran at this instant and recorded it).
+func Evaluate(clock Clock, prev PulseSnapshot) PulseResult {
 	now := clock.Now()
-	backwards := !prev.At.IsZero() && now.Before(prev.At)
 
-	subjects := []PulseSubject{"temporal"}
-	observations := []TemporalObservation{
-		{
-			At:        now,
-			Subject:   "temporal",
-			TickIndex: prev.TickIndex + 1,
-		},
+	backwards := !prev.LastTickAt.IsZero() && now.Before(prev.LastTickAt)
+
+	tickCount := prev.TickCount
+	if !backwards {
+		tickCount++
 	}
 
-	result := PulseResult{
-		TickIndex:     prev.TickIndex + 1,
+	return PulseResult{
+		TickCount:     tickCount,
 		At:            now,
-		Subjects:      subjects,
-		Observations:  observations,
 		BackwardsTime: backwards,
 	}
-
-	if backwards {
-		result.At = now
-		result.Observations = append(result.Observations, TemporalObservation{
-			At:        now,
-			Subject:   PulseSubject(fmt.Sprintf("backwards-warning: prev=%s now=%s", prev.At.Format(time.RFC3339), now.Format(time.RFC3339))),
-			TickIndex: prev.TickIndex + 1,
-		})
-	}
-
-	return result
 }

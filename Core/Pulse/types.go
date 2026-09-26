@@ -1,40 +1,20 @@
 package pulse
 
-import (
-	"time"
-)
+import "time"
 
-// PulseSubject is something Pulse evaluates. In M1 this is just an identifier
-// with no semantics — no inference, no Doll Mind, no wake events.
-type PulseSubject string
-
-// PulseSnapshot is a read-only, thread-safe view of Pulse state at a point in time.
+// PulseSnapshot is a race-safe read of the runner's global bookkeeping.
+// LastCognitionAt and LastSpontaneousWakeAt are defined here for M1 but
+// always return zero — they are set by later milestones (M2+, M3+).
 type PulseSnapshot struct {
-	TickCount      int64     `json:"tick_count"`
-	LastTickTime   time.Time `json:"last_tick_time"`
-	EvaluatedCount int64     `json:"evaluated_count"`
+	TickCount             int64     `json:"tick_count"`
+	LastTickAt            time.Time `json:"last_tick_at"`
+	LastCognitionAt       time.Time `json:"last_cognition_at"`
+	LastSpontaneousWakeAt time.Time `json:"last_spontaneous_wake_at"`
 }
 
-// TemporalObservation records a single Pulse evaluation tick.
-type TemporalObservation struct {
-	At        time.Time    `json:"at"`
-	Subject   PulseSubject `json:"subject"`
-	TickIndex int64        `json:"tick_index"`
-}
-
-// PulseResult is the deterministic output of a single Pulse evaluation.
+// PulseResult records what one Pulse evaluation produced.
 type PulseResult struct {
-	TickIndex     int64                 `json:"tick_index"`
-	At            time.Time             `json:"at"`
-	Subjects      []PulseSubject        `json:"subjects"`
-	Observations  []TemporalObservation `json:"observations"`
-	BackwardsTime bool                  `json:"backwards_time"`
+	TickCount     int64     `json:"tick_count"`
+	At            time.Time `json:"at"`
+	BackwardsTime bool      `json:"backwards_time"`
 }
-
-// PulseStatus represents the operational status of a Pulse runner.
-type PulseStatus string
-
-const (
-	PulseStatusStopped PulseStatus = "stopped"
-	PulseStatusRunning PulseStatus = "running"
-)

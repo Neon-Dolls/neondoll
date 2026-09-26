@@ -5,69 +5,133 @@ import (
 	"time"
 )
 
-func TestEvaluate_NormalAdvance(t *testing.T) {
-	clock := NewFakeClock(time.Date(2026, 9, 25, 12, 0, 0, 0, time.UTC))
-	prev := time.Date(2026, 9, 25, 11, 0, 0, 0, time.UTC)
-	prevResult := PulseResult{
-		TickIndex: 1,
-		At:        prev,
-		Subjects:  []PulseSubject{"temporal"},
-	}
+func TestEvaluate_First(t *testing.T) {
+	fc := NewFakeClock(time.Date(2026, 9, 25, 12, 0, 0, 0, time.UTC))
 
-	result := Evaluate(clock, prevResult)
-	if result.TickIndex != 2 {
-		t.Errorf("expected TickIndex 2, got %d", result.TickIndex)
+	prev := PulseSnapshot{}
+	result := Evaluate(fc, prev)
+
+	if result.TickCount != 1 {
+		t.Errorf("expected TickCount=1, got %d", result.TickCount)
 	}
 	if result.BackwardsTime {
-		t.Error("expected no backwards time")
+		t.Errorf("expected BackwardsTime=false on first eval")
 	}
-	if len(result.Subjects) != 1 {
-		t.Errorf("expected 1 subject, got %d", len(result.Subjects))
+}
+
+func TestEvaluate_Repeated(t *testing.T) {
+	now := time.Date(2026, 9, 25, 12, 0, 0, 0, time.UTC)
+	fc := NewFakeClock(now)
+
+	// First eval
+	prev := PulseSnapshot{}
+	r1 := Evaluate(fc, prev)
+
+	// Advance clock
+	fc.(*fakeClock).Advance(5 * time.Second)
+
+	// Second eval
+	prev2 := PulseSnapshot{
+		TickCount:  r1.TickCount,
+		LastTickAt: r1.At,
+	}
+	r2 := Evaluate(fc, prev2)
+
+	if r2.TickCount != 2 {
+		t.Errorf("expected TickCount=2, got %d", r2.TickCount)
+	}
+	if r2.BackwardsTime {
+		t.Errorf("expected BackwardsTime=false")
+	}
+}
+
+func TestEvaluate_SameTime(t *testing.T) {
+	now := time.Date(2026, 9, 25, 12, 0, 0, 0, time.UTC)
+	fc := NewFakeClock(now)
+
+	prev := PulseSnapshot{}
+	r1 := Evaluate(fc, prev)
+
+	// Same time — no clock advance
+	prev2 := PulseSnapshot{
+		TickCount:  r1.TickCount,
+		LastTickAt: r1.At,
+	}
+	r2 := Evaluate(fc, prev2)
+
+	if r2.TickCount != 2 {
+		t.Errorf("expected TickCount=2 (same-time valid), got %d", r2.TickCount)
+	}
+	if r2.BackwardsTime {
+		t.Errorf("expected BackwardsTime=false for same-time")
 	}
 }
 
 func TestEvaluate_BackwardsTime(t *testing.T) {
-	clock := NewFakeClock(time.Date(2026, 9, 25, 10, 0, 0, 0, time.UTC))
-	prev := time.Date(2026, 9, 25, 12, 0, 0, 0, time.UTC)
-	prevResult := PulseResult{
-		TickIndex: 5,
-		At:        prev,
-	}
+	now := time.Date(2026, 9, 25, 12, 0, 0, 0, time.UTC)
+	fc := NewFakeClock(now)
 
-	result := Evaluate(clock, prevResult)
-	if !result.BackwardsTime {
-		t.Fatal("expected backwards time detection")
+	// First eval at T
+	prev := PulseSnapshot{}
+	r1 := Evaluate(fc, prev)
+
+	// Advance
+	fc.(*fakeClock).Advance(10 * time.Second)
+	prev2 := PulseSnapshot{
+		TickCount:  r1.TickCount,
+		LastTickAt: r1.At,
 	}
-	if len(result.Observations) < 2 {
-		t.Errorf("expected at least 2 observations (normal + warning), got %d", len(result.Observations))
+	r2 := Evaluate(fc, prev2)
+
+	// Now go BACKWARDS
+	fc.(*fakeClock).Set(now)
+	prev3 := PulseSnapshot{
+		TickCount:  r2.TickCount,
+		LastTickAt: r2.At,
+	}
+	r3 := Evaluate(fc, prev3)
+
+	if r3.TickCount != r2.TickCount {
+		t.Errorf("expected TickCount to stay at %d (not incremented), got %d",
+			r2.TickCount, r3.TickCount)
+	}
+	if !r3.BackwardsTime {
+		t.Errorf("expected BackwardsTime=true")
 	}
 }
 
-func TestEvaluate_FirstTick_NoBackwards(t *testing.T) {
-	clock := NewFakeClock(time.Date(2026, 9, 25, 12, 0, 0, 0, time.UTC))
-	result := Evaluate(clock, PulseResult{})
+func TestEvaluate_BackwardsTimeFromZero(t *testing.T) {
+	// No previous tick — first eval is never backwards
+	now := time.Date(2026, 9, 25, 12, 0, 0, 0, time.UTC)
+	fc := NewFakeClock(now)
+
+	prev := PulseSnapshot{}
+	result := Evaluate(fc, prev)
+
 	if result.BackwardsTime {
-		t.Error("first tick should not detect backwards time")
+		t.Errorf("first eval from zero must not be backwards")
 	}
-	if result.TickIndex != 1 {
-		t.Errorf("expected TickIndex 1, got %d", result.TickIndex)
+	if result.TickCount != 1 {
+		t.Errorf("expected TickCount=1, got %d", result.TickCount)
 	}
 }
 
-func TestEvaluate_Deterministic(t *testing.T) {
-	clock := NewFakeClock(time.Date(2026, 9, 25, 12, 0, 0, 0, time.UTC))
-	prev := PulseResult{TickIndex: 3, At: clock.Now().Add(-time.Second)}
+func TestEvaluate_DeterministicTimestamps(t *testing.T) {
+	now := time.Date(2026, 9, 25, 12, 0, 0, 0, time.UTC)
+	fc := NewFakeClock(now)
 
-	r1 := Evaluate(clock, prev)
-	r2 := Evaluate(clock, prev)
+	result := Evaluate(fc, PulseSnapshot{})
+	if !result.At.Equal(now) {
+		t.Errorf("expected exact timestamp: %v, got %v", now, result.At)
+	}
 
-	if r1.TickIndex != r2.TickIndex {
-		t.Errorf("TickIndex mismatch: %d vs %d", r1.TickIndex, r2.TickIndex)
-	}
-	if !r1.At.Equal(r2.At) {
-		t.Errorf("At mismatch: %v vs %v", r1.At, r2.At)
-	}
-	if len(r1.Observations) != len(r2.Observations) {
-		t.Errorf("Observations length mismatch: %d vs %d", len(r1.Observations), len(r2.Observations))
+	fc.(*fakeClock).Advance(1234 * time.Millisecond)
+	result2 := Evaluate(fc, PulseSnapshot{
+		TickCount:  result.TickCount,
+		LastTickAt: result.At,
+	})
+	expected := now.Add(1234 * time.Millisecond)
+	if !result2.At.Equal(expected) {
+		t.Errorf("expected exact timestamp: %v, got %v", expected, result2.At)
 	}
 }

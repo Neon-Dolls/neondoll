@@ -5,35 +5,35 @@ import (
 	"time"
 )
 
-func TestPulseSubject_IsString(t *testing.T) {
-	s := PulseSubject("test-subject")
-	if string(s) != "test-subject" {
-		t.Errorf("expected 'test-subject', got %q", string(s))
-	}
-}
-
 func TestPulseSnapshot_ZeroValue(t *testing.T) {
 	var s PulseSnapshot
 	if s.TickCount != 0 {
 		t.Errorf("expected 0, got %d", s.TickCount)
 	}
-	if s.EvaluatedCount != 0 {
-		t.Errorf("expected 0, got %d", s.EvaluatedCount)
+	if !s.LastTickAt.IsZero() {
+		t.Errorf("expected zero LastTickAt")
+	}
+	if !s.LastCognitionAt.IsZero() {
+		t.Errorf("expected zero LastCognitionAt")
+	}
+	if !s.LastSpontaneousWakeAt.IsZero() {
+		t.Errorf("expected zero LastSpontaneousWakeAt")
 	}
 }
 
-func TestTemporalObservation_RoundTrip(t *testing.T) {
+func TestPulseSnapshot_Bookkeeping(t *testing.T) {
 	now := time.Date(2026, 9, 25, 12, 0, 0, 0, time.UTC)
-	o := TemporalObservation{
-		At:        now,
-		Subject:   "temporal",
-		TickIndex: 42,
+	s := PulseSnapshot{
+		TickCount:             42,
+		LastTickAt:            now,
+		LastCognitionAt:       time.Time{},
+		LastSpontaneousWakeAt: time.Time{},
 	}
-	if o.At != now {
+	if s.TickCount != 42 {
+		t.Errorf("expected 42, got %d", s.TickCount)
+	}
+	if !s.LastTickAt.Equal(now) {
 		t.Errorf("time mismatch")
-	}
-	if o.TickIndex != 42 {
-		t.Errorf("expected 42, got %d", o.TickIndex)
 	}
 }
 
@@ -42,10 +42,25 @@ func TestPulseResult_Defaults(t *testing.T) {
 	if r.BackwardsTime {
 		t.Error("expected BackwardsTime false")
 	}
-	if r.TickIndex != 0 {
-		t.Errorf("expected 0, got %d", r.TickIndex)
+	if r.TickCount != 0 {
+		t.Errorf("expected 0, got %d", r.TickCount)
 	}
-	if r.Subjects != nil {
-		t.Error("expected nil subjects")
+	if !r.At.IsZero() {
+		t.Error("expected zero At")
+	}
+}
+
+func TestPulseResult_BackwardsTime(t *testing.T) {
+	now := time.Date(2026, 9, 25, 12, 0, 0, 0, time.UTC)
+	r := PulseResult{
+		TickCount:     5,
+		At:            now,
+		BackwardsTime: true,
+	}
+	if !r.BackwardsTime {
+		t.Error("expected BackwardsTime true")
+	}
+	if r.TickCount != 5 {
+		t.Errorf("expected 5, got %d", r.TickCount)
 	}
 }
