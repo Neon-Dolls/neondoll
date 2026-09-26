@@ -33,7 +33,7 @@ type PulseConfig struct {
 	Enabled        bool  `json:"enabled"`
 	IdleHorizon    int64 `json:"idle_horizon"`             // seconds; M2+: neglect idle without cognition
 	NeglectHorizon int64 `json:"neglect_horizon"`          // seconds; M2+: neglect threshold since last cognition
-	ChangeHorizon  int64 `json:"change_horizon"`           // seconds; later: signal horizon for state change
+	ChangeHorizon  int64 `json:"change_horizon"`           // count of state-change occurrences before triggering
 	WakeCooldown   int64 `json:"wake_cooldown"`            // seconds; later: cooldown after wake
 	MinWakeSpacing int64 `json:"min_wake_spacing_seconds"` // seconds; M3+: hard guard between spontaneous wakes. 0 = guard disabled.
 }
