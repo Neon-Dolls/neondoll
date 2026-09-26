@@ -43,6 +43,15 @@ type Runner struct {
 	currentBudget float64
 	// lastSignalSnapshot is the most recently evaluated signal snapshot.
 	lastSignalSnapshot SignalSnapshot
+	// lastOpportunitySnapshot is the most recently evaluated opportunity snapshot.
+	lastOpportunitySnapshot OpportunitySnapshot
+	// cognitionRunActive indicates whether a Cognition Run is currently executing.
+	// When true, Pulse does not sample optional spontaneous opportunity.
+	// This is runtime concurrency, NOT autonomy control.
+	cognitionRunActive bool
+	// rng is the RNG source for stochastic opportunity sampling.
+	// In production this wraps *math/rand.Rand; in tests a deterministic fake.
+	rng RNG
 
 	// Test injection: when non-nil, replaces the production ticker channel.
 	// Tests send on this channel to drive evaluations deterministically.
@@ -55,10 +64,11 @@ type Runner struct {
 
 // NewRunner creates a Pulse runner. It does not start the evaluation loop;
 // call Start after construction.
-func NewRunner(cfg config.PulseConfig, clock Clock, log *logger.Logger) *Runner {
+func NewRunner(cfg config.PulseConfig, clock Clock, rng RNG, log *logger.Logger) *Runner {
 	return &Runner{
 		cfg:    cfg,
 		clock:  clock,
+		rng:    rng,
 		log:    log,
 		stopCh: make(chan struct{}),
 	}
@@ -109,6 +119,37 @@ func (r *Runner) SignalSnapshot() SignalSnapshot {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.lastSignalSnapshot
+}
+
+// OpportunitySnapshot returns a race-safe read of the runner's most recently
+// evaluated opportunity snapshot.
+func (r *Runner) OpportunitySnapshot() OpportunitySnapshot {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.lastOpportunitySnapshot
+}
+
+// SetCognitionRunActive sets whether a Cognition Run is currently executing.
+// When true, Pulse does not sample optional spontaneous opportunity.
+func (r *Runner) SetCognitionRunActive(active bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.cognitionRunActive = active
+}
+
+// SetRNG swaps the RNG source used for stochastic opportunity sampling.
+// Intended for testing.
+func (r *Runner) SetRNG(rng RNG) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.rng = rng
+}
+
+// CognitionRunActive returns whether a Cognition Run is currently executing.
+func (r *Runner) CognitionRunActive() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.cognitionRunActive
 }
 
 // UpdateSubjects replaces the set of subjects Pulse observes.
@@ -224,6 +265,10 @@ func (r *Runner) evaluate() {
 
 	sigSnap := EvaluateSignals(now, r.cfg, sigPulseState, subjects, inhibition)
 	r.lastSignalSnapshot = sigSnap
+
+	// Evaluate opportunity from the computed signal snapshot.
+	opp := EvaluateOpportunity(now, sigSnap, sigPulseState, r.cfg, r.cognitionRunActive, r.rng)
+	r.lastOpportunitySnapshot = opp
 
 	if r.tickAckCh != nil {
 		select {

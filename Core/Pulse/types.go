@@ -65,3 +65,48 @@ type SignalSnapshot struct {
 	Cooldown float64         `json:"cooldown"`
 	Budget   float64         `json:"budget"`
 }
+
+// GuardReason is a typed constant describing why a guard blocked or allowed
+// an opportunity evaluation.
+type GuardReason string
+
+const (
+	GuardReasonMinWakeSpacing GuardReason = "min_wake_spacing"
+	GuardReasonCognitionRun   GuardReason = "cognition_run_active"
+)
+
+// GuardResult records one hard guard check for an opportunity evaluation.
+type GuardResult struct {
+	Reason  GuardReason `json:"reason"`
+	Blocked bool        `json:"blocked"`
+	Message string      `json:"message"`
+}
+
+// OpportunitySnapshot is the complete, inspectable record of one stochastic
+// opportunity evaluation by Pulse. It captures pressure calculation, soft
+// inhibition, hard guard checks, and the stochastic sample.
+type OpportunitySnapshot struct {
+	EvaluatedAt       time.Time           `json:"evaluated_at"`
+	Type              string              `json:"type"` // always "spontaneous"
+	Pressure          float64             `json:"pressure"`
+	EffectivePressure float64             `json:"effective_pressure"`
+	ActivationSignals []float64           `json:"activation_signals"`
+	Inhibition        InhibitionBreakdown `json:"inhibition"`
+	Subjects          []string            `json:"subjects"`
+	Eligible          bool                `json:"eligible"`
+	Guards            []GuardResult       `json:"guards"`
+	RandomSample      *float64            `json:"random_sample,omitempty"`
+	Opportunity       bool                `json:"opportunity"`
+}
+
+// InhibitionBreakdown records the soft-inhibition factors applied to pressure.
+type InhibitionBreakdown struct {
+	Cooldown float64 `json:"cooldown"`
+	Budget   float64 `json:"budget"`
+}
+
+// RNG abstracts random number generation so Pulse never calls math/rand
+// directly. The Float64 method returns a value in [0.0, 1.0).
+type RNG interface {
+	Float64() float64
+}
