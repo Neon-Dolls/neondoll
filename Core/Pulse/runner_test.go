@@ -235,7 +235,10 @@ func TestRunner_ContextCancellation(t *testing.T) {
 
 func TestRunner_BackwardsTime(t *testing.T) {
 	startTime := time.Date(2026, 9, 25, 12, 0, 0, 0, time.UTC)
-	r, clock, tickCh, ackCh := newTestRunner(t, config.PulseConfig{Enabled: true}, startTime)
+	r, clock, tickCh, ackCh := newTestRunner(t, config.PulseConfig{
+		Enabled:        true,
+		MinWakeSpacing: 0,
+	}, startTime)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -257,18 +260,47 @@ func TestRunner_BackwardsTime(t *testing.T) {
 			startTime.Add(5*time.Second), snap1.LastTickAt)
 	}
 
+	// Tick forward a second time to have a meaningful signal snapshot
+	clock.Advance(5 * time.Second)
+	triggerTick(t, tickCh, ackCh)
+
+	snap2 := r.Snapshot()
+	sigSnap2 := r.SignalSnapshot()
+	if snap2.TickCount != 2 {
+		t.Fatalf("expected TickCount=2, got %d", snap2.TickCount)
+	}
+
 	// Set clock backwards
 	clock.Set(startTime)
 	triggerTick(t, tickCh, ackCh)
 
-	// Backwards tick must be rejected — no state change
-	snap2 := r.Snapshot()
-	if snap2.TickCount != 1 {
-		t.Errorf("TickCount changed from 1 to %d after backwards time (should stay 1)", snap2.TickCount)
+	// Backwards tick must be rejected — no state change, no signal change
+	snap3 := r.Snapshot()
+	sigSnap3 := r.SignalSnapshot()
+
+	if snap3.TickCount != 2 {
+		t.Errorf("TickCount changed from 2 to %d after backwards time (should stay 2)", snap3.TickCount)
 	}
-	if !snap2.LastTickAt.Equal(startTime.Add(5 * time.Second)) {
+	if !snap3.LastTickAt.Equal(startTime.Add(10 * time.Second)) {
 		t.Errorf("LastTickAt changed after backwards time (should stay at %v, got %v)",
-			startTime.Add(5*time.Second), snap2.LastTickAt)
+			startTime.Add(10*time.Second), snap3.LastTickAt)
+	}
+
+	// SignalSnapshot must also be preserved — not recomputed with regressed time
+	if sigSnap3.Idle != sigSnap2.Idle ||
+		sigSnap3.Cooldown != sigSnap2.Cooldown {
+		t.Error("SignalSnapshot changed after backwards time (must be preserved)")
+	}
+
+	// Verify the signal snapshot didn't get zeroed either
+	if sigSnap3.Cooldown != sigSnap2.Cooldown {
+		t.Errorf("SignalSnapshot.Cooldown changed from %.4f to %.4f after backwards time",
+			sigSnap2.Cooldown, sigSnap3.Cooldown)
+	}
+
+	// LastSpontaneousWakeAt in bookkeeping is always zero in M2
+	if !snap3.LastSpontaneousWakeAt.IsZero() {
+		t.Errorf("expected zero LastSpontaneousWakeAt in M2, got %v", snap3.LastSpontaneousWakeAt)
 	}
 }
 
