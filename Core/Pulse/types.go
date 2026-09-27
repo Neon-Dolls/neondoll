@@ -1,6 +1,9 @@
 package pulse
 
-import "time"
+import (
+	"context"
+	"time"
+)
 
 // LifecycleStateUnresolved is the explicit lifecycle state value that causes
 // the unfinished activation signal to saturate at 1.0. Core sets this on a
@@ -121,4 +124,37 @@ type InhibitionBreakdown struct {
 // directly. The Float64 method returns a value in [0.0, 1.0).
 type RNG interface {
 	Float64() float64
+}
+
+// PulseWake is the operational evidence that admits a spontaneous cognition
+// run. It is machine-readable runtime context, not semantic Doll State.
+// PulseWake is produced by the Runner and consumed by DollMind via the
+// MindEntrance interface.
+type PulseWake struct {
+	AdmittedAt        time.Time           `json:"admitted_at"`
+	Pressure          float64             `json:"pressure"`
+	EffectivePressure float64             `json:"effective_pressure"`
+	ActivationSignals []float64           `json:"activation_signals"`
+	Inhibition        InhibitionBreakdown `json:"inhibition"`
+	Subjects          []SubjectActivation `json:"subjects"`
+	RandomSample      float64             `json:"random_sample"`
+}
+
+// MindEntrance is the interface Pulse uses to admit a spontaneous cognition
+// run into DollMind. Implementations must not hold the Pulse state mutex
+// through the call.
+type MindEntrance interface {
+	// EnterPulseWake admits a spontaneous Pulse wake into the cognition
+	// pipeline. It returns an error only for actual failures (inference
+	// errors, parse errors); matters=false is NOT an error.
+	EnterPulseWake(ctx context.Context, wake PulseWake) error
+}
+
+// ensureSubjects returns a non-nil empty slice when in is nil, allowing
+// JSON serialization to produce "subjects": [] rather than "subjects": null.
+func ensureSubjects(in []SubjectActivation) []SubjectActivation {
+	if in == nil {
+		return []SubjectActivation{}
+	}
+	return in
 }

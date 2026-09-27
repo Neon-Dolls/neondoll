@@ -57,6 +57,10 @@ func L0Reflex(eventType events.Type) MindPath {
 	case events.TypeInternalWake:
 		// A self-set intention has become due — Spark must reconsider it.
 		return PathOrient
+	case events.TypePulseSpontaneous:
+		// A spontaneous Pulse opportunity — the runtime detected internal
+		// state signals that warrant cognitive attention.
+		return PathOrient
 	default:
 		// Presence, system, and unknown events are handled deterministically
 		// at the Reflex layer without inference.

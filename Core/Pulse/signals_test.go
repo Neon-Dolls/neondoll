@@ -495,7 +495,7 @@ func TestRunner_SignalSnapshotRaceSafety(t *testing.T) {
 	log := logger.New(logger.ErrorLevel, io.Discard)
 	fc := NewFakeClock(ref)
 
-	r := NewRunner(cfg, fc, nil, log)
+	r := NewRunner(cfg, fc, nil, log, nil)
 
 	var wg sync.WaitGroup
 	// Concurrent reads of SignalSnapshot while writing subjects/budget
@@ -539,7 +539,7 @@ func TestRunner_SignalSnapshotThroughEvaluate(t *testing.T) {
 	log := logger.New(logger.ErrorLevel, io.Discard)
 	fc := NewFakeClock(ref)
 
-	r := NewRunner(cfg, fc, nil, log)
+	r := NewRunner(cfg, fc, nil, log, nil)
 	tickCh := make(chan time.Time, 10)
 	ackCh := make(chan struct{}, 10)
 	r.tickTestCh = tickCh

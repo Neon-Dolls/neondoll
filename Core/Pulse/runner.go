@@ -25,6 +25,7 @@ const defaultTickInterval = 1 * time.Second
 type Runner struct {
 	cfg   config.PulseConfig
 	clock Clock
+	rng   RNG
 	log   *logger.Logger
 
 	mu      sync.Mutex
@@ -45,33 +46,42 @@ type Runner struct {
 	lastSignalSnapshot SignalSnapshot
 	// lastOpportunitySnapshot is the most recently evaluated opportunity snapshot.
 	lastOpportunitySnapshot OpportunitySnapshot
-	// cognitionRunActive indicates whether a Cognition Run is currently executing.
-	// When true, Pulse does not sample optional spontaneous opportunity.
+	// cognitionRun is the atomic occupancy flag for Cognition Run execution.
+	// 0 = free, 1 = claimed. TryClaim checks CAS 0->1; Release stores 0.
 	// This is runtime concurrency, NOT autonomy control.
-	cognitionRunActive bool
-	// rng is the RNG source for stochastic opportunity sampling.
-	// In production this wraps *math/rand.Rand; in tests a deterministic fake.
-	rng RNG
+	cognitionRun int32
+	// mindEntry is the interface to DollMind for spontaneous Pulse cognition.
+	mindEntry MindEntrance
 
 	// Test injection: when non-nil, replaces the production ticker channel.
 	// Tests send on this channel to drive evaluations deterministically.
 	tickTestCh chan time.Time
 	// Test injection: when non-nil, closed/drained after each evaluate() call
-	// completes under the lock. Tests read from this to synchronise with
+	// completes. Tests read from this to synchronise with
 	// goroutine evaluation without time.Sleep.
 	tickAckCh chan struct{}
 }
 
 // NewRunner creates a Pulse runner. It does not start the evaluation loop;
-// call Start after construction.
-func NewRunner(cfg config.PulseConfig, clock Clock, rng RNG, log *logger.Logger) *Runner {
+// call Start after construction. mindEntry may be nil; Pulse runs without
+// spontaneous wake admission until a MindEntrance is set.
+func NewRunner(cfg config.PulseConfig, clock Clock, rng RNG, log *logger.Logger, mindEntry MindEntrance) *Runner {
 	return &Runner{
-		cfg:    cfg,
-		clock:  clock,
-		rng:    rng,
-		log:    log,
-		stopCh: make(chan struct{}),
+		cfg:       cfg,
+		clock:     clock,
+		rng:       rng,
+		log:       log,
+		stopCh:    make(chan struct{}),
+		mindEntry: mindEntry,
 	}
+}
+
+// SetMindEntrance sets or replaces the MindEntrance for spontaneous cognition
+// admission. Safe to call before Start or between ticks.
+func (r *Runner) SetMindEntrance(entry MindEntrance) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.mindEntry = entry
 }
 
 // Start begins the Pulse evaluation loop. Only one evaluation loop may run;
@@ -101,7 +111,6 @@ func (r *Runner) Stop() {
 }
 
 // Snapshot returns a race-safe read of the runner's current bookkeeping.
-// LastSpontaneousWakeAt is always zero in M2 (no spontaneous-wake mutation path).
 func (r *Runner) Snapshot() PulseSnapshot {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -129,12 +138,32 @@ func (r *Runner) OpportunitySnapshot() OpportunitySnapshot {
 	return r.lastOpportunitySnapshot
 }
 
-// SetCognitionRunActive sets whether a Cognition Run is currently executing.
+// SetCognitionRunActive sets the cognition run occupancy flag atomically.
 // When true, Pulse does not sample optional spontaneous opportunity.
 func (r *Runner) SetCognitionRunActive(active bool) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.cognitionRunActive = active
+	if active {
+		atomic.StoreInt32(&r.cognitionRun, 1)
+	} else {
+		atomic.StoreInt32(&r.cognitionRun, 0)
+	}
+}
+
+// CognitionRunActive returns whether a Cognition Run is currently executing.
+func (r *Runner) CognitionRunActive() bool {
+	return atomic.LoadInt32(&r.cognitionRun) == 1
+}
+
+// TryClaimCognitionRun attempts to atomically claim the Cognition Run
+// occupancy. Returns true if the claim succeeded (was free and is now
+// claimed), false if already claimed. Safe to call without holding mu.
+func (r *Runner) TryClaimCognitionRun() bool {
+	return atomic.CompareAndSwapInt32(&r.cognitionRun, 0, 1)
+}
+
+// ReleaseCognitionRun atomically releases Cognition Run occupancy.
+// Safe to call without holding mu.
+func (r *Runner) ReleaseCognitionRun() {
+	atomic.StoreInt32(&r.cognitionRun, 0)
 }
 
 // SetRNG swaps the RNG source used for stochastic opportunity sampling.
@@ -143,13 +172,6 @@ func (r *Runner) SetRNG(rng RNG) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.rng = rng
-}
-
-// CognitionRunActive returns whether a Cognition Run is currently executing.
-func (r *Runner) CognitionRunActive() bool {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return r.cognitionRunActive
 }
 
 // UpdateSubjects replaces the set of subjects Pulse observes.
@@ -215,14 +237,15 @@ func (r *Runner) run(ctx context.Context) {
 	}
 }
 
-// evaluate performs one Pulse evaluation and updates runner state.
-// It calls the pure Evaluate function and applies its result.
-// Backwards-time results are rejected: state is not updated, a warning
-// is logged, and the previous LastTickAt, TickCount, and SignalSnapshot
-// are all preserved.
+// evaluate performs one Pulse evaluation and, if an opportunity is detected,
+// attempts to admit a spontaneous cognition run through the MindEntrance.
+//
+// State mutation (tick, signals, opportunity) happens under mu. The mu is
+// released before any Mind entry to satisfy the invariant that inference
+// never runs under the Pulse state mutex. The Cognition Run occupancy is
+// managed atomically (not under mu).
 func (r *Runner) evaluate() {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 
 	prev := PulseSnapshot{
 		TickCount:       r.tickCount,
@@ -233,18 +256,12 @@ func (r *Runner) evaluate() {
 	result := Evaluate(r.clock, prev)
 
 	if result.BackwardsTime {
+		r.mu.Unlock()
 		r.log.Warn("pulse backwards time", map[string]any{
 			"last_tick_at": r.lastTickAt,
 			"now":          result.At,
 		})
-		// Preserve the previous valid SignalSnapshot; do not recompute
-		// signals using the regressed time.
-		if r.tickAckCh != nil {
-			select {
-			case r.tickAckCh <- struct{}{}:
-			default:
-			}
-		}
+		r.sendTickAck()
 		return
 	}
 
@@ -266,14 +283,72 @@ func (r *Runner) evaluate() {
 	sigSnap := EvaluateSignals(now, r.cfg, sigPulseState, subjects, inhibition)
 	r.lastSignalSnapshot = sigSnap
 
-	// Evaluate opportunity from the computed signal snapshot.
-	opp := EvaluateOpportunity(now, sigSnap, sigPulseState, r.cfg, r.cognitionRunActive, r.rng)
+	// Evaluate opportunity: read the atomic cognition flag (no mu needed).
+	cognActive := atomic.LoadInt32(&r.cognitionRun) == 1
+	opp := EvaluateOpportunity(now, sigSnap, sigPulseState, r.cfg, cognActive, r.rng)
 	r.lastOpportunitySnapshot = opp
 
-	if r.tickAckCh != nil {
-		select {
-		case r.tickAckCh <- struct{}{}:
-		default:
-		}
+	// State updates complete. Release mu before any Mind entry.
+	r.mu.Unlock()
+
+	if opp.Opportunity {
+		r.admitPulseWake(now, opp)
+	}
+
+	r.sendTickAck()
+}
+
+// admitPulseWake claims cognition run occupancy and, if successful, enters
+// the Mind via the MindEntrance interface. Occupancy is released on every
+// exit path (success, error, nil mindEntry).
+func (r *Runner) admitPulseWake(now time.Time, opp OpportunitySnapshot) {
+	if !opp.Opportunity {
+		r.log.Debug("pulse wake not admitted: opportunity is false", nil)
+		return
+	}
+
+	if r.mindEntry == nil {
+		r.log.Warn("pulse spontaneous opportunity but no MindEntrance set", nil)
+		return
+	}
+
+	if !r.TryClaimCognitionRun() {
+		r.log.Debug("pulse spontaneous opportunity skipped: cognition run already active", nil)
+		return
+	}
+
+	var sample float64
+	if opp.RandomSample != nil {
+		sample = *opp.RandomSample
+	}
+
+	wake := PulseWake{
+		AdmittedAt:        now,
+		Pressure:          opp.Pressure,
+		EffectivePressure: opp.EffectivePressure,
+		ActivationSignals: opp.ActivationSignals,
+		Inhibition:        opp.Inhibition,
+		Subjects:          ensureSubjects(opp.Subjects),
+		RandomSample:      sample,
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	err := r.mindEntry.EnterPulseWake(ctx, wake)
+	if err != nil {
+		r.log.Error("pulse wake cognition failed", map[string]any{"error": err})
+	}
+
+	r.ReleaseCognitionRun()
+}
+
+func (r *Runner) sendTickAck() {
+	if r.tickAckCh == nil {
+		return
+	}
+	select {
+	case r.tickAckCh <- struct{}{}:
+	default:
 	}
 }

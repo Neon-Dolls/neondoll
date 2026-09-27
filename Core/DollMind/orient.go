@@ -101,6 +101,8 @@ func buildOrientPrompt(state *dollstate.DollState, eventType events.Type, input 
 	var eventLine string
 	if eventType == events.TypeInternalWake {
 		eventLine = "An intention from within your own mind has become due.\n\n" + input
+	} else if eventType == events.TypePulseSpontaneous {
+		eventLine = input
 	} else {
 		eventLine = "Event type: " + string(eventType) + "\nEvent: " + input
 	}
