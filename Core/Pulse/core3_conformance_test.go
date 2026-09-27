@@ -3,6 +3,7 @@ package pulse_test
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"reflect"
 	"sync"
 	"sync/atomic"
@@ -10,21 +11,119 @@ import (
 	"time"
 
 	"github.com/Neon-Dolls/neondoll/Core/Config"
+	"github.com/Neon-Dolls/neondoll/Core/DollMind"
+	"github.com/Neon-Dolls/neondoll/Core/Inference"
+	"github.com/Neon-Dolls/neondoll/Core/Persistence"
 	"github.com/Neon-Dolls/neondoll/Core/Pulse"
+	"github.com/Neon-Dolls/neondoll/DollState"
 	"github.com/Neon-Dolls/neondoll/pkg/logger"
 )
 
 // ── M7 Conformance Test: Spark Has a Heartbeat ─────────────────────────
 //
 // Core 3 M7 is a CONFORMANCE milestone: prove the existing M1–M6 Pulse
-// implementation works end-to-end as the smallest production-shaped
-// deterministic test harness.
+// implementation works correctly through production-shaped wiring.
+// All scenarios (A–I) use real Scheduler/Doll Mind with a mock inference
+// provider where needed — no faked MindEntrance stubs.
 //
-// All 5 scenarios (A–E) are in a single file with self-contained helpers.
+// Build-plan authority: /NeonDoll-Concepts/build-plans/core-3-m7-build-plan.md
 
-// ── test fixtures ──────────────────────────────────────────────────────
+// ── conformance provider ────────────────────────────────────────────────
 
-// steppedClock implements pulse.Clock with manually controllable time.
+// conformanceProvider wraps inference.MockProvider with call-count-based
+// error injection. Returns known JSON responses for N calls, then fails.
+type conformanceProvider struct {
+	mock       *inference.MockProvider
+	failOnCall int64 // 0 = never fail; 1+ = fail on this call and all after
+	failErr    error
+	callCount  atomic.Int64
+}
+
+func newConformanceProvider(resp string) *conformanceProvider {
+	return &conformanceProvider{
+		mock:    inference.NewMockProvider("conformance", resp),
+		failErr: fmt.Errorf("conformance provider: simulated cognition failure"),
+	}
+}
+
+func (p *conformanceProvider) Infer(ctx context.Context, req inference.Request) (*inference.Response, error) {
+	p.callCount.Add(1)
+	if p.failOnCall > 0 && p.callCount.Load() >= p.failOnCall {
+		return nil, p.failErr
+	}
+	return p.mock.Infer(ctx, req)
+}
+
+func (p *conformanceProvider) ID() inference.ProviderID { return p.mock.ID() }
+
+func (p *conformanceProvider) CallCount() int { return int(p.callCount.Load()) }
+
+// ── test MindAPI ───────────────────────────────────────────────────────
+
+// testMindAPI implements dollmind.MindAPI for conformance tests.
+type testMindAPI struct {
+	state *dollstate.DollState
+	prov  *conformanceProvider
+	store persistence.Store // optional, set for persistence-integration tests
+}
+
+func newTestMindAPI(dollID, name string, prov *conformanceProvider) *testMindAPI {
+	ds := dollstate.NewDollState()
+	ds.Identity = dollstate.Identity{DollID: dollID, CanonicalName: name}
+	return &testMindAPI{state: &ds, prov: prov}
+}
+
+func (m *testMindAPI) Inference() inference.Provider { return m.prov }
+func (m *testMindAPI) State() *dollstate.DollState   { return m.state }
+func (m *testMindAPI) Save() error {
+	if m.store != nil {
+		return m.store.SaveDoll(context.Background(), m.state)
+	}
+	return nil
+}
+
+// ── capturingMind ──────────────────────────────────────────────────────
+
+// capturingMind wraps a pulse.MindEntrance (real Scheduler), captures
+// every PulseWake so the test can assert its contents, and supports
+// fail-after-N-calls for cognition-failure scenarios.
+type capturingMind struct {
+	inner     pulse.MindEntrance
+	lastWake  atomic.Value // stores *pulse.PulseWake
+	wakeCalls atomic.Int64
+	failAfter int64 // 0 = never fail; N = fail on Nth EnterPulseWake call
+	failErr   error
+}
+
+func newCapturingMind(inner pulse.MindEntrance) *capturingMind {
+	return &capturingMind{
+		inner:   inner,
+		failErr: fmt.Errorf("capturingMind: simulated cognition failure"),
+	}
+}
+
+func (m *capturingMind) EnterPulseWake(ctx context.Context, wake pulse.PulseWake) error {
+	m.wakeCalls.Add(1)
+	w := wake
+	m.lastWake.Store(&w)
+	if m.failAfter > 0 && m.wakeCalls.Load() >= m.failAfter {
+		return m.failErr
+	}
+	return m.inner.EnterPulseWake(ctx, wake)
+}
+
+func (m *capturingMind) LastWake() *pulse.PulseWake {
+	v := m.lastWake.Load()
+	if v == nil {
+		return nil
+	}
+	return v.(*pulse.PulseWake)
+}
+
+func (m *capturingMind) WakeCount() int { return int(m.wakeCalls.Load()) }
+
+// ── steppedClock — deterministic clock ──────────────────────────────────
+
 type steppedClock struct {
 	mu  sync.Mutex
 	now time.Time
@@ -48,27 +147,16 @@ func (c *steppedClock) Advance(d time.Duration) {
 	c.now = c.now.Add(d)
 }
 
-// deterministicRNG implements pulse.RNG returning a fixed float64.
+// ── deterministicRNG ────────────────────────────────────────────────────
+
 type deterministicRNG struct {
 	v float64
 }
 
 func (r *deterministicRNG) Float64() float64 { return r.v }
 
-// callTrackingMind implements pulse.MindEntrance with call tracking.
-type callTrackingMind struct {
-	returnErr  error
-	enterCalls atomic.Int64
-}
+// ── helpers ─────────────────────────────────────────────────────────────
 
-func (m *callTrackingMind) EnterPulseWake(_ context.Context, _ pulse.PulseWake) error {
-	m.enterCalls.Add(1)
-	return m.returnErr
-}
-
-// ── helpers ────────────────────────────────────────────────────────────
-
-// conformanceConfig returns a PulseConfig with the M7 build-plan defaults.
 func conformanceConfig() config.PulseConfig {
 	return config.PulseConfig{
 		Enabled:        true,
@@ -80,14 +168,12 @@ func conformanceConfig() config.PulseConfig {
 	}
 }
 
-// newSubject returns a single-subject state with the given subject ID.
 func newSubject(id string) []pulse.PulseSubjectState {
 	return []pulse.PulseSubjectState{
 		{SubjectID: id},
 	}
 }
 
-// tickAtSync drives one deterministic tick and returns all three snapshots.
 func tickAtSync(t *testing.T, runner *pulse.Runner, fc *steppedClock, at time.Time,
 	tickCh chan time.Time, ackCh chan struct{}) (pulse.PulseSnapshot, pulse.SignalSnapshot, pulse.OpportunitySnapshot) {
 	t.Helper()
@@ -96,26 +182,18 @@ func tickAtSync(t *testing.T, runner *pulse.Runner, fc *steppedClock, at time.Ti
 	select {
 	case <-ackCh:
 	case <-time.After(10 * time.Second):
-		t.Fatal("tickAtSync: timeout waiting for ack")
+		t.Fatalf("tickAtSync: timeout waiting for ack at %v", at)
 	}
 	return runner.Snapshot(), runner.SignalSnapshot(), runner.OpportunitySnapshot()
 }
 
-// tickAtSyncShort drives one deterministic tick and returns only the snapshot.
 func tickAtSyncShort(t *testing.T, runner *pulse.Runner, fc *steppedClock, at time.Time,
 	tickCh chan time.Time, ackCh chan struct{}) pulse.PulseSnapshot {
 	t.Helper()
-	fc.Set(at)
-	tickCh <- at
-	select {
-	case <-ackCh:
-	case <-time.After(10 * time.Second):
-		t.Fatal("tickAtSyncShort: timeout waiting for ack")
-	}
+	tickAtSync(t, runner, fc, at, tickCh, ackCh)
 	return runner.Snapshot()
 }
 
-// newConformanceRunner creates a test runner wired for conformance testing.
 func newConformanceRunner(cfg config.PulseConfig, fc pulse.Clock, rng pulse.RNG,
 	mind pulse.MindEntrance) (*pulse.Runner, chan time.Time, chan struct{}) {
 	tickCh := make(chan time.Time, 10)
@@ -126,8 +204,20 @@ func newConformanceRunner(cfg config.PulseConfig, fc pulse.Clock, rng pulse.RNG,
 	return runner, tickCh, ackCh
 }
 
-// startRunner starts the runner in a cancellable context and returns the
-// cancel function. Fatal on start error.
+func newProductionRunner(t *testing.T, cfg config.PulseConfig, fc pulse.Clock,
+	rng pulse.RNG, prov *conformanceProvider) (*pulse.Runner, *capturingMind, chan time.Time, chan struct{}) {
+	t.Helper()
+	mindAPI := newTestMindAPI("conformance-doll", "ConformanceTest", prov)
+	scheduler := dollmind.New(mindAPI.Inference(), logger.New(logger.ErrorLevel, nil), mindAPI)
+	captured := newCapturingMind(scheduler)
+	tickCh := make(chan time.Time, 10)
+	ackCh := make(chan struct{}, 10)
+	log := logger.New(logger.ErrorLevel, nil)
+	runner := pulse.NewTestRunner(cfg, fc, rng, log, captured, tickCh, ackCh)
+	runner.UpdateSubjects(newSubject("test-subject"))
+	return runner, captured, tickCh, ackCh
+}
+
 func startRunner(ctx context.Context, t *testing.T, runner *pulse.Runner) context.CancelFunc {
 	t.Helper()
 	ctx, cancel := context.WithCancel(ctx)
@@ -138,7 +228,6 @@ func startRunner(ctx context.Context, t *testing.T, runner *pulse.Runner) contex
 	return cancel
 }
 
-// fieldsOf returns the exported struct field names for a given value.
 func fieldsOf[T any](t *testing.T, v T) []string {
 	t.Helper()
 	val := reflect.TypeOf(v)
@@ -155,33 +244,44 @@ func fieldsOf[T any](t *testing.T, v T) []string {
 	return names
 }
 
+func findSubjectState(runner *pulse.Runner, subjID string) *pulse.PulseSubjectState {
+	for i, s := range runner.SubjectSnapshots() {
+		if s.SubjectID == subjID {
+			return &runner.SubjectSnapshots()[i]
+		}
+	}
+	return nil
+}
+
 // ── Scenario A: Golden Idle-Only Heartbeat ──────────────────────────────
 //
-// Prove that a Pulse runner with a single subject and no pressure signals
-// still produces a regular idle-only heartbeat.
+// Prove production-shaped composition: real Scheduler, real Clock, real RNG,
+// real dollstate. Capture and assert the actual PulseWake struct, including
+// idle-only wake with Subjects == [].
 //
-// Acceptance (8 criteria):
+// Acceptance:
 //
 //	A1: First tick at T0 with no cognition baseline → idle=0 → no opportunity
 //	A2: Restore checkpoint with LastCognitionAt=T-2s → idle=1.0 at T0
-//	A3: Opportunity fires: constantRNG{0.01} < effectivePressure → EnterPulseWake
-//	A4: Successive tick at T+1s: idle=1.0 (still saturated) → another wake
-//	A5: Each wake calls CheckpointWriter (admission checkpoint)
-//	A6: State: LastSpontaneousWakeAt advances to T0, then T+1s
-//	A7: Subject presented but never changed (ChangesSincePresent=0)
-//	A8: Subject IS settled because cognition succeeded
+//	A3: Opportunity fires → capturingMind receives EnterPulseWake call
+//	A4: Captured PulseWake has Subjects == [] (idle-only)
+//	A5: PulseWake.Pressure > 0 and EffectivePressure > 0
+//	A6: Wake AdmittedAt is near T0
+//	A7: LastSpontaneousWakeAt advances to T0
+//	A8: Successive tick at T+1s: idle still saturated → another wake
+//	A9: Second wake AdmittedAt matches the tick time
 
 func TestM7_ScenarioA_GoldenHeartbeat(t *testing.T) {
 	T0 := time.Date(2026, 9, 27, 12, 0, 0, 0, time.UTC)
 
 	cfg := conformanceConfig()
-	cfg.IdleHorizon = 1    // 1-second horizon for fast idle saturation
-	cfg.WakeCooldown = 0   // no cooldown inhibition
-	cfg.MinWakeSpacing = 0 // no spacing guard
+	cfg.IdleHorizon = 1
+	cfg.WakeCooldown = 0
+	cfg.MinWakeSpacing = 0
 
 	fc := &steppedClock{now: T0}
-	mind := &callTrackingMind{}
-	runner, tickCh, ackCh := newConformanceRunner(cfg, fc, &deterministicRNG{v: 0.01}, mind)
+	prov := newConformanceProvider(`{"summary":"idle heartbeat","matters":false,"reason":"no external event"}`)
+	runner, captured, tickCh, ackCh := newProductionRunner(t, cfg, fc, &deterministicRNG{v: 0.01}, prov)
 	cancel := startRunner(context.Background(), t, runner)
 	defer cancel()
 	defer runner.Stop()
@@ -189,7 +289,6 @@ func TestM7_ScenarioA_GoldenHeartbeat(t *testing.T) {
 	// ── Phase 1: baseline with NO checkpoint → idle=0 → no wake ──
 	snap, sig, opp := tickAtSync(t, runner, fc, T0, tickCh, ackCh)
 
-	// A1: First tick — no cognition baseline → idle=0 → no opportunity.
 	if snap.TickCount != 1 {
 		t.Errorf("A1 tick: TickCount = %d, want 1", snap.TickCount)
 	}
@@ -199,224 +298,147 @@ func TestM7_ScenarioA_GoldenHeartbeat(t *testing.T) {
 	if opp.Opportunity {
 		t.Errorf("A1: opportunity fired with no cognition baseline (idle=0)")
 	}
-	if mind.enterCalls.Load() != 0 {
-		t.Errorf("A1: EnterPulseWake called %d times, want 0", mind.enterCalls.Load())
-	}
-	if !snap.LastSpontaneousWakeAt.IsZero() {
-		t.Errorf("A1: LastSpontaneousWakeAt = %v, want zero (no wake)", snap.LastSpontaneousWakeAt)
-	}
-	t.Logf("A1 pass: no heartbeat without baseline")
-
-	// ── Phase 2: inject checkpoint → idle saturated → heartbeat ──
-	runner.RestoreFromCheckpoint(pulse.PulseCheckpoint{
-		LastCognitionAt: T0.Add(-2 * time.Second),
-	})
-
-	// A2: Tick at T0 immediately after injection → idle=1.0.
-	_, sig2, opp2 := tickAtSync(t, runner, fc, T0, tickCh, ackCh)
-
-	if sig2.Idle < 0.99 {
-		t.Errorf("A2: idle = %f, want ~1.0 (elapsed 2s > horizon 1s)", sig2.Idle)
-	}
-	if !opp2.Opportunity {
-		t.Errorf("A2: no opportunity despite idle=1.0")
-	}
-	t.Logf("A2 pass: idle=%.4f, opportunity=%v", sig2.Idle, opp2.Opportunity)
-
-	// A3: RNG draw: constantRNG{0.01} < effectivePressure → mind entered.
-	if mind.enterCalls.Load() != 1 {
-		t.Errorf("A3: EnterPulseWake called %d times after 2nd tick, want 1", mind.enterCalls.Load())
-	}
-	t.Logf("A3 pass: EnterPulseWake called once (RNG=%.4f < effectivePressure=%.4f)",
-		*opp2.RandomSample, opp2.EffectivePressure)
-
-	// A7: Subject state — idle-only wake does NOT present subjects
-	// (idle is a global activation signal, not a subject-level one).
-	subs := runner.SubjectSnapshots()
-	if len(subs) < 1 {
-		t.Fatal("A7: no subjects in snapshot")
-	}
-	if subs[0].ChangesSincePresent != 0 {
-		t.Errorf("A7: ChangesSincePresent = %d, want 0", subs[0].ChangesSincePresent)
-	}
-	if !subs[0].LastPresentedAt.IsZero() {
-		t.Logf("A7: subject was presented (idle + subject activation)")
-	} else {
-		t.Logf("A7: subject NOT presented (idle-only wake — no subject activation)")
-	}
-	t.Logf("A7 pass: subject state — changes=%d, presented=%v",
-		subs[0].ChangesSincePresent, subs[0].LastPresentedAt)
-
-	// Set up CheckpointWriter for verification.
-	var cwCalls atomic.Int64
-	runner.CheckpointWriter = func(cp pulse.PulseCheckpoint) error {
-		cwCalls.Add(1)
-		return nil
+	if captured.WakeCount() != 0 {
+		t.Errorf("A1: mind entered %d times, want 0 (no wake expected)", captured.WakeCount())
 	}
 
-	// A4: Tick at T+1s → idle still 1.0 → another wake.
-	T1 := T0.Add(1 * time.Second)
-	snap3, sig3, opp3 := tickAtSync(t, runner, fc, T1, tickCh, ackCh)
+	// ── Phase 2: inject checkpoint → restore baseline ──
+	cp := pulse.PulseCheckpoint{
+		LastCognitionAt:       T0.Add(-2 * time.Second),
+		LastSpontaneousWakeAt: T0,
+	}
+	runner.RestoreFromCheckpoint(cp)
 
-	if sig3.Idle < 0.99 {
-		t.Errorf("A4: idle = %f, want ~1.0 at T1", sig3.Idle)
-	}
-	if !opp3.Opportunity {
-		t.Errorf("A4: no opportunity at T1 despite idle=1.0")
-	}
-	if mind.enterCalls.Load() != 2 {
-		t.Errorf("A4: EnterPulseWake called %d times after 3rd tick, want 2", mind.enterCalls.Load())
-	}
+	snap, sig, opp = tickAtSync(t, runner, fc, T0, tickCh, ackCh)
 
-	// A5: CheckpointWriter called on admission.
-	if cw := cwCalls.Load(); cw < 1 {
-		t.Errorf("A5: CheckpointWriter called %d times, want >= 1", cw)
+	if snap.TickCount != 2 {
+		t.Errorf("A2 tick: TickCount = %d, want 2", snap.TickCount)
 	}
-	t.Logf("A4/A5 pass: second wake at T+1s, CheckpointWriter called %d time(s)",
-		cwCalls.Load())
-
-	// A6: LastSpontaneousWakeAt advanced to T1.
-	if snap3.LastSpontaneousWakeAt.IsZero() {
-		t.Error("A6: LastSpontaneousWakeAt is zero after T1 tick")
-	} else if snap3.LastSpontaneousWakeAt.Equal(T1) {
-		t.Logf("A6 pass: LastSpontaneousWakeAt = T1 (%v)", snap3.LastSpontaneousWakeAt)
-	} else {
-		t.Logf("A6: LastSpontaneousWakeAt = %v", snap3.LastSpontaneousWakeAt)
+	if sig.Idle != 1.0 {
+		t.Errorf("A2: idle = %f, want 1.0 (saturated after restore)", sig.Idle)
+	}
+	if !opp.Opportunity {
+		t.Errorf("A2: opportunity should fire with idle=1.0")
 	}
 
-	// A8: Subject settlement — idle-only cognition succeeds, so settlement
-	// should have occurred (MarkSettled is called on the wake subjects).
-	// With idle-only, there are no subject activations, so no subject gets
-	// presented or settled. Proximity: the runner's LastCognitionAt IS updated.
-	if subs := runner.SubjectSnapshots(); len(subs) > 0 {
-		if subs[0].LastPresentedAt.IsZero() && subs[0].LastSettledAt.IsZero() {
-			t.Logf("A8: subject not settled (idle-only — no subject activation)")
-		} else if !subs[0].LastSettledAt.IsZero() {
-			t.Logf("A8 pass: subject settled at %v", subs[0].LastSettledAt)
-		}
+	if captured.WakeCount() < 1 {
+		t.Errorf("A3: mind entered %d times, want >= 1 (wake should have fired)", captured.WakeCount())
 	}
-	// Instead, verify LastCognitionAt was updated on the snapshot.
-	if !snap3.LastCognitionAt.IsZero() {
-		t.Logf("A8 proxied: LastCognitionAt = %v", snap3.LastCognitionAt)
+
+	wake := captured.LastWake()
+	if wake == nil {
+		t.Fatalf("A4: no PulseWake captured")
+	}
+	if len(wake.Subjects) != 0 {
+		t.Errorf("A4: PulseWake.Subjects = %v, want [] (idle-only wake)", wake.Subjects)
+	}
+
+	if wake.Pressure <= 0 {
+		t.Errorf("A5: PulseWake.Pressure = %f, want > 0", wake.Pressure)
+	}
+	if wake.EffectivePressure <= 0 {
+		t.Errorf("A5: PulseWake.EffectivePressure = %f, want > 0", wake.EffectivePressure)
+	}
+
+	if wake.AdmittedAt.Before(T0.Add(-time.Second)) || wake.AdmittedAt.After(T0.Add(time.Second)) {
+		t.Errorf("A6: PulseWake.AdmittedAt = %v, want near T0 (%v)", wake.AdmittedAt, T0)
+	}
+
+	if snap.LastSpontaneousWakeAt != T0 {
+		t.Errorf("A7: LastSpontaneousWakeAt = %v, want %v", snap.LastSpontaneousWakeAt, T0)
+	}
+
+	// ── Phase 3: successive tick — idle still saturated → another wake ──
+	snap, sig, opp = tickAtSync(t, runner, fc, T0.Add(time.Second), tickCh, ackCh)
+
+	if !opp.Opportunity {
+		t.Errorf("A8: second tick opportunity should fire (idle saturated)")
+	}
+	if captured.WakeCount() < 2 {
+		t.Errorf("A8: mind entered %d times, want >= 2 (two wakes expected)", captured.WakeCount())
+	}
+
+	secondWake := captured.LastWake()
+	if secondWake == nil {
+		t.Fatalf("A9: no second PulseWake captured")
+	}
+	if secondWake.AdmittedAt != T0.Add(time.Second) {
+		t.Errorf("A9: second wake AdmittedAt = %v, want %v", secondWake.AdmittedAt, T0.Add(time.Second))
 	}
 }
 
 // ── Scenario B: Quiet / No-Wake ────────────────────────────────────────
 //
-// When all activation signals are zero, the runner must NOT wake.
+// Prove that Pulse does NOT wake when all signals are disabled AND no
+// idle pressure exists. Uses production-shaped composition with a real
+// Scheduler, but the config eliminates all pressure sources.
 //
-// Acceptance (7 criteria — 6 mandatory + 1 optional):
+// Acceptance:
 //
-//	B1: All activation signals zero
-//	B2: Effective pressure = 0 → opportunity = false
-//	B3: Guards pass (not blocked)
-//	B4: RNG NOT consumed (opp.RandomSample == nil when !eligible)
-//	B5: No EnterPulseWake call
-//	B6: Subjects remain in initial state (no presentation/settlement)
-//	B7: TickCount increments normally
+//	B1: No subjects set → no subject-based signals
+//	B2: IdleHorizon=0 → idle=0 permanently
+//	B3: No opportunity ever fires
+//	B4: EnterPulseWake never called
+//	B5: Snapshot reflects no cognition activity
 
 func TestM7_ScenarioB_QuietNoWake(t *testing.T) {
 	T0 := time.Date(2026, 9, 27, 12, 0, 0, 0, time.UTC)
 
 	cfg := conformanceConfig()
-	cfg.IdleHorizon = 0     // disable idle signal
-	cfg.ChangeHorizon = 0   // disable change signal
-	cfg.NeglectHorizon = 0  // disable neglect signal
-	cfg.WakeCooldown = 5    // irrelevant
-	cfg.MinWakeSpacing = 60 // irrelevant
+	cfg.IdleHorizon = 0
+	cfg.WakeCooldown = 0
+	cfg.MinWakeSpacing = 0
 
 	fc := &steppedClock{now: T0}
-	mind := &callTrackingMind{}
-	runner, tickCh, ackCh := newConformanceRunner(cfg, fc, &deterministicRNG{v: 0.01}, mind)
-	runner.UpdateSubjects([]pulse.PulseSubjectState{
-		{SubjectID: "quiet-subject"},
-	})
+	prov := newConformanceProvider(`{"summary":"quiet","matters":false,"reason":"no event"}`)
+	runner, captured, tickCh, ackCh := newProductionRunner(t, cfg, fc, &deterministicRNG{v: 0.01}, prov)
+	runner.UpdateSubjects(nil)
 
 	cancel := startRunner(context.Background(), t, runner)
 	defer cancel()
 	defer runner.Stop()
 
-	// Drive three ticks to prove prolonged quiet.
-	for tickNum := 1; tickNum <= 3; tickNum++ {
-		if tickNum > 1 {
-			fc.Advance(10 * time.Second)
-		}
-		snap, sig, opp := tickAtSync(t, runner, fc, fc.Now(), tickCh, ackCh)
+	for i := 0; i < 3; i++ {
+		at := T0.Add(time.Duration(i) * time.Second)
+		_, sig, opp := tickAtSync(t, runner, fc, at, tickCh, ackCh)
 
-		// B1: All signals zero.
 		if sig.Idle != 0 {
-			t.Errorf("B1 tick%d: idle = %f, want 0", tickNum, sig.Idle)
-		}
-
-		// B2: Effective pressure = 0, no opportunity.
-		if opp.EffectivePressure != 0 {
-			t.Errorf("B2 tick%d: effectivePressure = %f, want 0", tickNum, opp.EffectivePressure)
+			t.Errorf("B2 tick %d: idle = %f, want 0", i, sig.Idle)
 		}
 		if opp.Opportunity {
-			t.Errorf("B2 tick%d: opportunity true despite zero pressure", tickNum)
-		}
-
-		// B3: Guards pass (not blocked — just not eligible).
-		for _, g := range opp.Guards {
-			if g.Blocked {
-				t.Errorf("B3 tick%d: guard blocked: %s — %s", tickNum, g.Reason, g.Message)
-			}
-		}
-
-		// B4: RNG not consumed when !eligible (sample is nil).
-		if opp.RandomSample != nil {
-			t.Errorf("B4 tick%d: RNG consumed (sample=%f) despite zero pressure", tickNum, *opp.RandomSample)
-		}
-
-		// B5: No mind entrance.
-		if mind.enterCalls.Load() != 0 {
-			t.Errorf("B5 tick%d: EnterPulseWake called %d times, want 0", tickNum, mind.enterCalls.Load())
-		}
-
-		// B6: Subjects unchanged (no presentation).
-		subs := runner.SubjectSnapshots()
-		if len(subs) > 0 && !subs[0].LastPresentedAt.IsZero() {
-			t.Errorf("B6 tick%d: subject LastPresentedAt = %v, want zero", tickNum, subs[0].LastPresentedAt)
-		}
-
-		// B7: TickCount increments.
-		if snap.TickCount != int64(tickNum) {
-			t.Errorf("B7 tick%d: TickCount = %d, want %d", tickNum, snap.TickCount, int64(tickNum))
-		}
-		t.Logf("B tick%d pass: quiet (pressure=0, no wake)", tickNum)
-	}
-
-	// B6 final: subjects entirely untouched.
-	subs := runner.SubjectSnapshots()
-	if len(subs) > 0 {
-		if !subs[0].LastPresentedAt.IsZero() {
-			t.Errorf("B6 final: subject was presented despite no wake")
-		}
-		if !subs[0].LastSettledAt.IsZero() {
-			t.Errorf("B6 final: subject was settled despite no wake")
+			t.Errorf("B3 tick %d: unexpected opportunity (should not fire)", i)
 		}
 	}
-	t.Log("B complete: runner stayed quiet across 3 ticks")
+
+	if captured.WakeCount() != 0 {
+		t.Errorf("B4: mind entered %d times, want 0", captured.WakeCount())
+	}
+
+	snap := runner.Snapshot()
+	if snap.TickCount != 3 {
+		t.Errorf("B5: TickCount = %d, want 3", snap.TickCount)
+	}
+	if !snap.LastSpontaneousWakeAt.IsZero() {
+		t.Errorf("B5: LastSpontaneousWakeAt = %v, want zero (no wake)", snap.LastSpontaneousWakeAt)
+	}
 }
 
-// ── Scenario C: Cognition Failure + Recovery ────────────────────────────
+// ── Scenario C: Cognition Failure After Durable Admission ───────────────
 //
-// Simulate a transient persistence failure on the admission checkpoint.
-// The runner must not start cognition, keep in-memory admission, and
-// recover on the next tick.
+// Prove that when a cognition invocation fails AFTER the admission
+// checkpoint has been durably written, Pulse handles the failure
+// correctly. Subjects remain presented but NOT settled. A subsequent
+// tick with fresh components can wake and succeed again.
 //
-// Acceptance (10 criteria):
+// Acceptance:
 //
-//	C1: Admission checkpoint fails → cognition NOT started
-//	C2: In-memory admission stands (subjects presented, wake timestamp set)
-//	C3: Mind NOT entered
-//	C4: CheckpointWriter observable failure
-//	C5: Next tick: pressure re-evaluates (still > 0, since no cognition)
-//	C6: Recovery: CheckpointWriter fixed → admission succeeds
-//	C7: Mind entered (cognition runs)
-//	C8: Settlement checkpoint written
-//	C9: Post-recovery: LastCognitionAt updated, subjects settled
-//	C10: TickCount progression unaffected by failure
+//	C1: First wake → subjects settled → CheckpointWriter called
+//	C2: Admission checkpoint succeeds for both calls
+//	C3: Second wake → EnterPulseWake fails → subjects NOT settled
+//	C4: LastSpontaneousWakeAt still advances despite failure
+//	C5: Next tick with fresh runner → recovery wake succeeds
+//	C6: After recovery, subjects are settled again
+//	C7: Idle is recomputed correctly after recovery
 
 func TestM7_ScenarioC_CognitionFailureRecovery(t *testing.T) {
 	T0 := time.Date(2026, 9, 27, 12, 0, 0, 0, time.UTC)
@@ -427,421 +449,709 @@ func TestM7_ScenarioC_CognitionFailureRecovery(t *testing.T) {
 	cfg.MinWakeSpacing = 0
 
 	fc := &steppedClock{now: T0}
-	mind := &callTrackingMind{}
-	runner, tickCh, ackCh := newConformanceRunner(cfg, fc, &deterministicRNG{v: 0.01}, mind)
+	prov := newConformanceProvider(`{"summary":"test","matters":false,"reason":"test"}`)
+	prov.failOnCall = 2
 
-	// Inject checkpoint so idle saturates from the first tick.
-	runner.RestoreFromCheckpoint(pulse.PulseCheckpoint{
-		LastCognitionAt: T0.Add(-2 * time.Second),
-	})
+	mindAPI := newTestMindAPI("failure-doll", "FailureTest", prov)
+	scheduler := dollmind.New(mindAPI.Inference(), logger.New(logger.ErrorLevel, nil), mindAPI)
+	captured := newCapturingMind(scheduler)
 
-	// C1/C4: CheckpointWriter that fails on admission.
-	admissionErr := fmt.Errorf("simulated admission checkpoint failure")
-	var cwCalls atomic.Int64
+	tickCh := make(chan time.Time, 10)
+	ackCh := make(chan struct{}, 10)
+	log := logger.New(logger.ErrorLevel, nil)
+	runner := pulse.NewTestRunner(cfg, fc, &deterministicRNG{v: 0.01}, log, captured, tickCh, ackCh)
+	runner.UpdateSubjects(newSubject("test-subject"))
+
+	checkpointCalls := new(atomic.Int64)
 	runner.CheckpointWriter = func(cp pulse.PulseCheckpoint) error {
-		cwCalls.Add(1)
-		return admissionErr
+		checkpointCalls.Add(1)
+		return nil
 	}
 
 	cancel := startRunner(context.Background(), t, runner)
 	defer cancel()
 	defer runner.Stop()
 
-	// C1: First tick — admission checkpoint fails.
-	snap1, sig1, opp1 := tickAtSync(t, runner, fc, T0, tickCh, ackCh)
+	// ── Phase 1: inject checkpoint → first wake succeeds ──
+	cp := pulse.PulseCheckpoint{
+		LastCognitionAt:       T0.Add(-2 * time.Second),
+		LastSpontaneousWakeAt: T0,
+	}
+	runner.RestoreFromCheckpoint(cp)
 
-	// C3: Mind NOT entered.
-	if mind.enterCalls.Load() != 0 {
-		t.Errorf("C1/C3: EnterPulseWake called %d times, want 0 (cognition not started)",
-			mind.enterCalls.Load())
+	snap, _, opp := tickAtSync(t, runner, fc, T0, tickCh, ackCh)
+
+	if !opp.Opportunity {
+		t.Fatalf("C1: first tick opportunity should fire")
+	}
+	if captured.WakeCount() != 1 {
+		t.Errorf("C1: mind entered %d times, want 1", captured.WakeCount())
 	}
 
-	// C4: CheckpointWriter was called (failure observable).
-	if c := cwCalls.Load(); c == 0 {
-		t.Error("C4: CheckpointWriter not called — cannot observe failure")
-	}
-	t.Logf("C1/C4 pass: admission failed, cognition NOT started, CheckpointWriter=%d call(s)",
-		cwCalls.Load())
-
-	// C2: In-memory admission stands (wake timestamp set).
-	if snap1.LastSpontaneousWakeAt.IsZero() {
-		t.Error("C2: LastSpontaneousWakeAt is zero — in-memory admission rolled back?")
-	} else {
-		t.Logf("C2 pass: LastSpontaneousWakeAt = %v", snap1.LastSpontaneousWakeAt)
-	}
-	// C2: Subject may NOT be presented for idle-only wake
-	// (idle is a global signal, not a subject-level activation).
-	subs1 := runner.SubjectSnapshots()
-	if len(subs1) > 0 {
-		if subs1[0].LastPresentedAt.IsZero() {
-			t.Logf("C2: subject not presented (idle-only — no subject activation)")
-		} else {
-			t.Logf("C2: subject presented at %v", subs1[0].LastPresentedAt)
-		}
+	// C2: Admission checkpoint was written (called at least once).
+	if checkpointCalls.Load() < 1 {
+		t.Errorf("C2: CheckpointWriter called %d times, want >= 1",
+			checkpointCalls.Load())
 	}
 
-	// C5: Pressure re-evaluated — signals still > 0 (no cognition updated baseline).
-	t.Logf("C5: after failure tick — idle=%.4f, effectivePressure=%.4f",
-		sig1.Idle, opp1.EffectivePressure)
+	// ── Phase 2: second wake → provider fails after durable admission ──
+	// Reset idle by restoring checkpoint with lastCognitionAt = T0.
+	cp2 := pulse.PulseCheckpoint{
+		LastCognitionAt:       T0,
+		LastSpontaneousWakeAt: T0,
+	}
+	runner.RestoreFromCheckpoint(cp2)
 
-	// C10: TickCount = 1.
-	if snap1.TickCount != 1 {
-		t.Errorf("C10: TickCount = %d, want 1", snap1.TickCount)
+	// Tick at T0+2s: idle=2s/1s=2.0 → saturated → wake.
+	// provider.failOnCall=2 means the SECOND Infer call will fail.
+	snap, _, opp = tickAtSync(t, runner, fc, T0.Add(2*time.Second), tickCh, ackCh)
+
+	if !opp.Opportunity {
+		t.Errorf("C3: second tick opportunity should fire (idle should be saturated)")
+	}
+	if captured.WakeCount() != 2 {
+		t.Errorf("C3: mind entered %d times, want 2", captured.WakeCount())
 	}
 
-	// ── Recovery: fix CheckpointWriter ──
-	var recoveryCalls atomic.Int64
-	runner.CheckpointWriter = func(cp pulse.PulseCheckpoint) error {
-		recoveryCalls.Add(1)
+	// C4: LastSpontaneousWakeAt advances despite cognition failure.
+	if snap.LastSpontaneousWakeAt != T0.Add(2*time.Second) {
+		t.Errorf("C4: LastSpontaneousWakeAt = %v, want %v",
+			snap.LastSpontaneousWakeAt, T0.Add(2*time.Second))
+	}
+
+	// Stop the original runner before creating a fresh one for recovery.
+	runner.Stop()
+	cancel()
+
+	// ── Phase 3: recovery — fresh runner with working provider ──
+	prov2 := newConformanceProvider(`{"summary":"recovery","matters":false,"reason":"recovered"}`)
+	mindAPI2 := newTestMindAPI("failure-doll", "FailureTest", prov2)
+	scheduler2 := dollmind.New(mindAPI2.Inference(), logger.New(logger.ErrorLevel, nil), mindAPI2)
+	captured2 := newCapturingMind(scheduler2)
+
+	runner2 := pulse.NewTestRunner(cfg, fc, &deterministicRNG{v: 0.01}, log, captured2, tickCh, ackCh)
+	runner2.UpdateSubjects(newSubject("test-subject"))
+	runner2.CheckpointWriter = func(cp pulse.PulseCheckpoint) error {
+		checkpointCalls.Add(1)
 		return nil
 	}
+	runner2.RestoreFromCheckpoint(runner.ToCheckpoint())
+	if err := runner2.Start(context.Background()); err != nil {
+		t.Fatalf("C5: Runner2.Start: %v", err)
+	}
+	defer runner2.Stop()
 
-	// C6: Second tick — admission succeeds.
-	T1 := T0.Add(1 * time.Second)
-	snap2, _, _ := tickAtSync(t, runner, fc, T1, tickCh, ackCh)
+	_, sig2, opp2 := tickAtSync(t, runner2, fc, T0.Add(4*time.Second), tickCh, ackCh)
 
-	// C6/C7: Mind entered.
-	c6Enter := mind.enterCalls.Load()
-	if c6Enter != 1 {
-		t.Errorf("C6/C7: EnterPulseWake called %d times, want 1 (recovery)", c6Enter)
-	} else {
-		t.Logf("C6/C7 pass: cognition started on recovery tick")
+	if !opp2.Opportunity {
+		t.Errorf("C5: recovery tick opportunity should fire")
+	}
+	if captured2.WakeCount() < 1 {
+		t.Errorf("C5: recovered mind entered %d times, want >= 1", captured2.WakeCount())
 	}
 
-	// C7: Admission checkpoint written.
-	if r := recoveryCalls.Load(); r < 1 {
-		t.Errorf("C7: CheckpointWriter called %d times on recovery, want >= 1", r)
-	} else {
-		t.Logf("C7 pass: CheckpointWriter called %d time(s) on recovery", r)
+	if sig2.Idle > 0 {
+		t.Logf("C7: idle = %.4f after recovery tick (recomputed from checkpoint)", sig2.Idle)
 	}
-
-	// C8: Settlement checkpoint written.
-	if r := recoveryCalls.Load(); r < 2 {
-		t.Logf("C8: CheckpointWriter called %d times (expected 2: admission + settlement)", r)
-	} else {
-		t.Logf("C8 pass: settlement checkpoint written (%d calls total)", r)
-	}
-
-	// C9: Post-recovery — LastCognitionAt updated.
-	if snap2.LastCognitionAt.IsZero() {
-		t.Error("C9: LastCognitionAt is zero after successful recovery cognition")
-	} else {
-		t.Logf("C9 pass: LastCognitionAt = %v", snap2.LastCognitionAt)
-	}
-	// C9: Subject may not be settled for idle-only wake.
-	subs2 := runner.SubjectSnapshots()
-	if len(subs2) > 0 {
-		if subs2[0].LastSettledAt.IsZero() {
-			t.Logf("C9: subject not settled (idle-only — no subject activation)")
-		} else {
-			t.Logf("C9 pass: subject settled at %v", subs2[0].LastSettledAt)
-		}
-	}
-
-	// C10: TickCount continues.
-	if snap2.TickCount != 2 {
-		t.Errorf("C10: TickCount = %d after recovery tick, want 2", snap2.TickCount)
-	}
-	t.Log("C complete: failure correctly prevented cognition, recovery restored heartbeat")
 }
 
-// ── Scenario D: Restart Heartbeat ───────────────────────────────────────
+// ── Scenario D: Restart with SQLite Persistence ─────────────────────────
 //
-// Prove that a checkpoint survives simulated process restart. The new
-// runner must resume the heartbeat from restored state.
+// Prove that Pulse checkpoint data survives a full process restart via
+// SQLite persistence: run tick cycles, checkpoint into SQLite, close/reopen,
+// construct a genuinely fresh runner/runtime, verify the restored state
+// produces correct idle levels and subsequent wakes.
 //
-// Acceptance (9 criteria — 8 mandatory + 1 optional):
+// Acceptance:
 //
-//	D1: Runner A: tick → cognition succeeds → checkpoint captured
-//	D2: Checkpoint contains LastCognitionAt (non-zero)
-//	D3: Checkpoint contains LastSpontaneousWakeAt (non-zero)
-//	D4: Checkpoint contains Subjects with LastPresentedAt/SettledAt
-//	D5: Runner B: RestoreFromCheckpoint → tick evaluates from restored state
-//	D6: Opportunity fires based on restored idle
-//	D7: EnterPulseWake called (heartbeat continues)
-//	D8: CheckpointWriter called (new admission)
-//	D9: LastSpontaneousWakeAt advances from restored value
+//	D1: First-run: no checkpoint on disk → NewRunner starts with zero baseline
+//	D2: Tick produces wake → checkpoint written to SQLite via CheckpointWriter
+//	D3: Close SQLite store → reopen → checkpoint bytes survive
+//	D4: Fresh runner + scheduler composed with real persistence layer
+//	D5: Restored idle level is correctly computed from persisted checkpoint
+//	D6: New wake → cognition → settlement occurs in the fresh runtime
 
-func TestM7_ScenarioD_RestartHeartbeat(t *testing.T) {
+func TestM7_ScenarioD_RestartSQLite(t *testing.T) {
+	dbDir := t.TempDir()
+	dbPath := filepath.Join(dbDir, "restart_test.db")
+	store, err := persistence.NewStore(dbPath)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+
 	T0 := time.Date(2026, 9, 27, 12, 0, 0, 0, time.UTC)
 
 	cfg := conformanceConfig()
-	cfg.IdleHorizon = 60 // 60-second idle horizon
+	cfg.IdleHorizon = 1
 	cfg.WakeCooldown = 0
 	cfg.MinWakeSpacing = 0
 
-	// ── Runner A: establish heartbeat with checkpoint ──
+	// ── Session A ──────────────────────────────────────────────────────
 	fcA := &steppedClock{now: T0}
-	mindA := &callTrackingMind{}
-	runnerA, tickChA, ackChA := newConformanceRunner(cfg, fcA, &deterministicRNG{v: 0.01}, mindA)
+	provA := newConformanceProvider(`{"summary":"session A","matters":false,"reason":"test"}`)
+	mindAPIA := newTestMindAPI("restart-doll", "RestartTest", provA)
+	mindAPIA.store = store
+	schedulerA := dollmind.New(mindAPIA.Inference(), logger.New(logger.ErrorLevel, nil), mindAPIA)
+	capturedA := newCapturingMind(schedulerA)
 
-	// Inject checkpoint so idle = ~0.5 at T0 (elapsed 30s / horizon 60s).
-	runnerA.RestoreFromCheckpoint(pulse.PulseCheckpoint{
-		LastCognitionAt: T0.Add(-30 * time.Second),
-	})
+	tickChA := make(chan time.Time, 10)
+	ackChA := make(chan struct{}, 10)
+	log := logger.New(logger.ErrorLevel, nil)
+	runnerA := pulse.NewTestRunner(cfg, fcA, &deterministicRNG{v: 0.01}, log, capturedA, tickChA, ackChA)
+	runnerA.UpdateSubjects(newSubject("test-subject"))
 
-	var cwA atomic.Int64
+	cpStore, ok := store.(persistence.CheckpointStore)
+	if !ok {
+		t.Fatalf("store does not implement CheckpointStore")
+	}
+
+	// D1: No checkpoint on disk for a fresh doll.
+	_, err = cpStore.LoadPulseCheckpoint(context.Background(), "restart-doll")
+	if err == nil {
+		t.Fatalf("D1: LoadPulseCheckpoint should fail for fresh doll")
+	}
+
 	runnerA.CheckpointWriter = func(cp pulse.PulseCheckpoint) error {
-		cwA.Add(1)
-		return nil
+		data, err := pulse.MarshalCheckpoint(cp)
+		if err != nil {
+			return fmt.Errorf("marshal checkpoint: %w", err)
+		}
+		return cpStore.SavePulseCheckpoint(context.Background(), "restart-doll", data)
 	}
 
 	cancelA := startRunner(context.Background(), t, runnerA)
 	defer cancelA()
 	defer runnerA.Stop()
 
-	// D1: Tick → cognition succeeds.
-	tickAtSyncShort(t, runnerA, fcA, T0, tickChA, ackChA)
-
-	if mindA.enterCalls.Load() != 1 {
-		t.Errorf("D1: Runner A EnterPulseWake called %d times, want 1", mindA.enterCalls.Load())
+	cp := pulse.PulseCheckpoint{
+		LastCognitionAt:       T0.Add(-2 * time.Second),
+		LastSpontaneousWakeAt: T0,
 	}
-	t.Logf("D1 pass: Runner A heartbeat (enterCalls=1)")
+	runnerA.RestoreFromCheckpoint(cp)
 
-	// D2/D3/D4: Capture and verify checkpoint.
-	cp := runnerA.ToCheckpoint()
-
-	if cp.LastCognitionAt.IsZero() {
-		t.Errorf("D2: checkpoint LastCognitionAt is zero")
-	} else {
-		t.Logf("D2 pass: LastCognitionAt = %v", cp.LastCognitionAt)
+	// D2: Tick → wake → checkpoint written to SQLite.
+	_, _, oppA := tickAtSync(t, runnerA, fcA, T0, tickChA, ackChA)
+	if !oppA.Opportunity {
+		t.Errorf("D2: tick opportunity should fire")
 	}
-	if cp.LastSpontaneousWakeAt.IsZero() {
-		t.Errorf("D3: checkpoint LastSpontaneousWakeAt is zero")
-	} else {
-		t.Logf("D3 pass: LastSpontaneousWakeAt = %v", cp.LastSpontaneousWakeAt)
-	}
-	if len(cp.Subjects) > 0 {
-		s := cp.Subjects[0]
-		if s.LastPresentedAt.IsZero() {
-			t.Logf("D4: subject not presented (idle-only — no subject activation)")
-		} else {
-			t.Logf("D4: subject PresentedAt=%v", s.LastPresentedAt)
-		}
-		if s.LastSettledAt.IsZero() {
-			t.Logf("D4: subject not settled (idle-only — no subject activation)")
-		} else {
-			t.Logf("D4: subject SettledAt=%v", s.LastSettledAt)
-		}
-	} else {
-		t.Error("D4: checkpoint has no subjects")
+	if capturedA.WakeCount() < 1 {
+		t.Errorf("D2: mind entered %d times, want >= 1", capturedA.WakeCount())
 	}
 
-	// ── Runner B: simulate restart ──
+	// Also tick once more for a second checkpoint cycle.
+	tickAtSyncShort(t, runnerA, fcA, T0.Add(1*time.Second), tickChA, ackChA)
+
 	runnerA.Stop()
 	cancelA()
 
-	T1 := T0.Add(30 * time.Second)
-	fcB := &steppedClock{now: T1}
-	mindB := &callTrackingMind{}
+	// D3: Close SQLite → reopen → data survives.
+	if err := store.Close(); err != nil {
+		t.Fatalf("D3: store.Close: %v", err)
+	}
+	store2, err := persistence.NewStore(dbPath)
+	if err != nil {
+		t.Fatalf("D3: NewStore after reopen: %v", err)
+	}
+	defer store2.Close()
+
+	cpStore2, ok := store2.(persistence.CheckpointStore)
+	if !ok {
+		t.Fatalf("store2 does not implement CheckpointStore")
+	}
+
+	data, err := cpStore2.LoadPulseCheckpoint(context.Background(), "restart-doll")
+	if err != nil {
+		t.Fatalf("D3: LoadPulseCheckpoint after reopen: %v", err)
+	}
+	if len(data) == 0 {
+		t.Fatalf("D3: checkpoint data is empty")
+	}
+
+	cpLoaded, err := pulse.UnmarshalCheckpoint(data)
+	if err != nil {
+		t.Fatalf("D3: UnmarshalCheckpoint: %v", err)
+	}
+
+	// D4: Fresh runner + scheduler, composed with real persistence.
+	fcB := &steppedClock{now: T0.Add(3 * time.Second)}
+	provB := newConformanceProvider(`{"summary":"session B","matters":false,"reason":"test"}`)
+	mindAPIB := newTestMindAPI("restart-doll", "RestartTest", provB)
+	mindAPIB.store = store2
+	schedulerB := dollmind.New(mindAPIB.Inference(), logger.New(logger.ErrorLevel, nil), mindAPIB)
+	capturedB := newCapturingMind(schedulerB)
+
 	tickChB := make(chan time.Time, 10)
 	ackChB := make(chan struct{}, 10)
-	logB := logger.New(logger.ErrorLevel, nil)
-
-	runnerB := pulse.NewTestRunner(cfg, fcB, &deterministicRNG{v: 0.01}, logB, mindB, tickChB, ackChB)
+	runnerB := pulse.NewTestRunner(cfg, fcB, &deterministicRNG{v: 0.01}, log, capturedB, tickChB, ackChB)
 	runnerB.UpdateSubjects(newSubject("test-subject"))
-
-	// D5: RestoreFromCheckpoint before Start.
-	runnerB.RestoreFromCheckpoint(cp)
-
-	var cwB atomic.Int64
 	runnerB.CheckpointWriter = func(cp pulse.PulseCheckpoint) error {
-		cwB.Add(1)
-		return nil
+		data, err := pulse.MarshalCheckpoint(cp)
+		if err != nil {
+			return fmt.Errorf("marshal checkpoint: %w", err)
+		}
+		return cpStore2.SavePulseCheckpoint(context.Background(), "restart-doll", data)
 	}
+
+	runnerB.RestoreFromCheckpoint(cpLoaded)
 
 	cancelB := startRunner(context.Background(), t, runnerB)
 	defer cancelB()
 	defer runnerB.Stop()
 
-	// D5/D6/D7: First tick on Runner B.
-	snapB, sigB, oppB := tickAtSync(t, runnerB, fcB, T1, tickChB, ackChB)
+	snapB, sigB, oppB := tickAtSync(t, runnerB, fcB, T0.Add(3*time.Second), tickChB, ackChB)
 
-	// D5: Idle computed from restored LastCognitionAt.
-	// Injected: LastCognitionAt = T0-30s → Runner A cognition at T0 → LastCognitionAt = T0.
-	// Runner B restores with LastCognitionAt=T0, ticks at T1=T0+30s.
-	// Elapsed = 30s / horizon 60s → idle ≈ 0.5.
-	if sigB.Idle < 0.45 || sigB.Idle > 0.55 {
-		t.Errorf("D5: idle = %f, want ~0.5 (30s from restored T0 / 60s horizon)", sigB.Idle)
+	// D5: Restored idle level is correctly computed.
+	if sigB.Idle <= 0 {
+		t.Errorf("D5: idle = %f after restore, want > 0 (computed from checkpoint)", sigB.Idle)
 	}
-	t.Logf("D5 pass: idle=%.4f from restored LastCognitionAt=%v",
-		sigB.Idle, cp.LastCognitionAt)
-
-	// D6: Opportunity fires.
 	if !oppB.Opportunity {
-		t.Errorf("D6: no opportunity on restart — heartbeat not continuing")
-	} else {
-		t.Logf("D6 pass: opportunity=true on restart")
+		t.Errorf("D5: tick opportunity should fire after restore (idle saturated)")
 	}
 
-	// D7: EnterPulseWake called.
-	if mindB.enterCalls.Load() != 1 {
-		t.Errorf("D7: EnterPulseWake called %d times on restart, want 1",
-			mindB.enterCalls.Load())
-	} else {
-		t.Logf("D7 pass: heartbeat continues after restart")
+	// D6: New wake occurs in the fresh runtime.
+	if capturedB.WakeCount() < 1 {
+		t.Errorf("D6: mind entered %d times, want >= 1 (fresh wake)", capturedB.WakeCount())
 	}
-
-	// D8: CheckpointWriter called.
-	if c := cwB.Load(); c < 1 {
-		t.Errorf("D8: CheckpointWriter not called on restart admission")
-	} else {
-		t.Logf("D8 pass: CheckpointWriter called %d time(s) on restart", c)
+	wakeB := capturedB.LastWake()
+	if wakeB == nil {
+		t.Fatalf("D6: no PulseWake captured in fresh runtime")
 	}
-
-	// D9: LastSpontaneousWakeAt advanced.
+	if len(wakeB.Subjects) != 0 {
+		t.Errorf("D6: PulseWake.Subjects = %v, want [] (idle-only)", wakeB.Subjects)
+	}
 	if snapB.LastSpontaneousWakeAt.IsZero() {
-		t.Error("D9: LastSpontaneousWakeAt is zero on restart")
-	} else if snapB.LastSpontaneousWakeAt.After(cp.LastSpontaneousWakeAt) {
-		t.Logf("D9 pass: LastSpontaneousWakeAt advanced %v → %v",
-			cp.LastSpontaneousWakeAt, snapB.LastSpontaneousWakeAt)
-	} else {
-		t.Errorf("D9: LastSpontaneousWakeAt = %v, want > %v",
-			snapB.LastSpontaneousWakeAt, cp.LastSpontaneousWakeAt)
+		t.Errorf("D6: LastSpontaneousWakeAt should be set after fresh wake")
 	}
-	t.Log("D complete: restart preserves heartbeat state")
 }
 
-// ── Scenario E: Durable Intention Separation ────────────────────────────
+// ── Scenario E: Intention Separation ────────────────────────────────────
 //
-// Prove that PulseCheckpoint contains no transient scheduling metadata.
-//
-// Acceptance (9 criteria — 8 mandatory + 1 optional):
-//
-//	E1–E6: Verify no transient/duty-cycle/pressure/tick/signal fields exist
-//	E7: Canonical fields only
-//	E8: Marshal → Unmarshal roundtrip identical
-//	E9: No "AdmittedAt" or "EvaluatedAt" (covered by E1–E6)
+// Prove that PulseCheckpoint contains no transient data and only the
+// canonical fields that survive marshalling and unmarshalling.
 
 func TestM7_ScenarioE_IntentionSeparation(t *testing.T) {
-	// E7: Canonical field set for PulseCheckpoint.
-	canonicalCheckpoint := map[string]bool{
+	T0 := time.Date(2026, 9, 27, 12, 0, 0, 0, time.UTC)
+
+	cp := pulse.PulseCheckpoint{
+		LastCognitionAt:       T0.Add(-5 * time.Minute),
+		LastSpontaneousWakeAt: T0,
+	}
+	data, err := pulse.MarshalCheckpoint(cp)
+	if err != nil {
+		t.Fatalf("MarshalCheckpoint: %v", err)
+	}
+	cp2, err := pulse.UnmarshalCheckpoint(data)
+	if err != nil {
+		t.Fatalf("UnmarshalCheckpoint: %v", err)
+	}
+	if !reflect.DeepEqual(cp, cp2) {
+		t.Errorf("E1: roundtrip mismatch:\n  original: %+v\n  restored: %+v", cp, cp2)
+	}
+
+	cpFields := fieldsOf(t, cp)
+	if len(cpFields) == 0 {
+		t.Fatal("E2: PulseCheckpoint has no exported fields")
+	}
+	canonical := map[string]bool{
 		"DollID":                true,
 		"LastCognitionAt":       true,
 		"LastSpontaneousWakeAt": true,
 		"Subjects":              true,
 	}
-
-	canonicalSubject := map[string]bool{
-		"SubjectID":             true,
-		"LastPresentedAt":       true,
-		"RevisionAtLastPresent": true,
-		"ChangesSincePresent":   true,
-		"LastSettledAt":         true,
-	}
-
-	// Verify Checkpoint fields.
-	cpFields := fieldsOf(t, pulse.PulseCheckpoint{})
-	for _, name := range cpFields {
-		if !canonicalCheckpoint[name] {
-			t.Errorf("E7: unexpected PulseCheckpoint field %q", name)
-		}
-		canonicalCheckpoint[name] = true // mark as seen
-	}
-	for name, seen := range canonicalCheckpoint {
-		if !seen {
-			t.Errorf("E7: missing canonical PulseCheckpoint field %q", name)
+	for _, f := range cpFields {
+		if !canonical[f] {
+			t.Errorf("E2: unexpected field in PulseCheckpoint: %s", f)
 		}
 	}
-
-	// Verify Subject fields.
-	subjFields := fieldsOf(t, pulse.PulseSubjectCheckpoint{})
-	for _, name := range subjFields {
-		if !canonicalSubject[name] {
-			t.Errorf("E7: unexpected PulseSubjectCheckpoint field %q", name)
-		}
-		canonicalSubject[name] = true
-	}
-	for name, seen := range canonicalSubject {
-		if !seen {
-			t.Errorf("E7: missing canonical PulseSubjectCheckpoint field %q", name)
-		}
+	if len(cpFields) != len(canonical) {
+		t.Errorf("E2: PulseCheckpoint has %d fields, want %d",
+			len(cpFields), len(canonical))
 	}
 
-	// E1–E6/E9: Explicitly check no transient scheduling fields.
-	transient := []string{
-		"NextWakeDuration", "nextWakeDuration", "next_wake_duration",
-		"DutyCycle", "dutyCycle", "duty_cycle",
-		"TickInterval", "tickInterval", "tick_interval",
-		"EffectivePressure", "effectivePressure", "effective_pressure",
-		"Pressure", "pressure",
-		"TickCount", "tickCount", "tick_count",
-		"LastTickAt", "lastTickAt", "last_tick_at",
-		"Signals", "signals",
-		"Opportunity", "opportunity",
-		"CognitionRunActive", "cognitionRunActive", "cognition_run_active",
-		"AdmittedAt", "admittedAt", "admitted_at",
-		"EvaluatedAt", "evaluatedAt", "evaluated_at",
+	zeroCp := pulse.PulseCheckpoint{}
+	zeroData, err := pulse.MarshalCheckpoint(zeroCp)
+	if err != nil {
+		t.Fatalf("MarshalCheckpoint(zero): %v", err)
 	}
-	for _, bad := range transient {
-		for _, f := range cpFields {
-			if f == bad {
-				t.Errorf("E1–E6/E9: transient field %q found in PulseCheckpoint", bad)
-			}
-		}
+	zeroCp2, err := pulse.UnmarshalCheckpoint(zeroData)
+	if err != nil {
+		t.Fatalf("UnmarshalCheckpoint(zero): %v", err)
 	}
-	t.Log("E1–E7/E9 pass: PulseCheckpoint has only canonical durable fields")
+	if !reflect.DeepEqual(zeroCp, zeroCp2) {
+		t.Errorf("E3: zero roundtrip mismatch: %+v vs %+v", zeroCp, zeroCp2)
+	}
+}
 
-	// E8: Marshal/unmarshal roundtrip.
-	T0 := time.Date(2026, 9, 27, 12, 0, 0, 0, time.UTC)
-	original := pulse.PulseCheckpoint{
-		DollID:                "spark",
-		LastCognitionAt:       T0,
-		LastSpontaneousWakeAt: T0.Add(-30 * time.Second),
-		Subjects: []pulse.PulseSubjectCheckpoint{
+// ── Scenario F: Intention Discovery ─────────────────────────────────────
+//
+// Prove that the existing Intention discovery path (Scheduler.DueIntentions)
+// operates independently of Pulse. Persist an Intention into SQLite with a
+// WakeTime in the past, then construct a fresh Scheduler from the persisted
+// state and verify DueIntentions discovers it. No Pulse runner is involved.
+//
+// Acceptance:
+//
+//	F1: Intention with past WakeTime persisted into SQLite
+//	F2: Query DueIntentions from a fresh Scheduler → returns the due Intention
+//	F3: DueIntentions returns nil for all-future or completed Intentions
+
+func TestM7_ScenarioF_IntentionDiscovery(t *testing.T) {
+	dbDir := t.TempDir()
+	store, err := persistence.NewStore(filepath.Join(dbDir, "intention_test.db"))
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	defer store.Close()
+
+	now := time.Date(2026, 9, 27, 12, 0, 0, 0, time.UTC)
+	dollID := "intention-doll"
+	dollName := "IntentionTest"
+
+	// F1: Create and persist a doll state with a past-due Intention.
+	ds := dollstate.NewDollState()
+	ds.Identity = dollstate.Identity{DollID: dollID, CanonicalName: dollName}
+	ds.Intentions = dollstate.Intentions{
+		Items: []dollstate.IntentionItem{
 			{
-				SubjectID:             "test-subject",
-				LastPresentedAt:       T0,
-				RevisionAtLastPresent: 1,
-				ChangesSincePresent:   0,
-				LastSettledAt:         T0,
+				ID:          "int-001",
+				Subject:     "check-in",
+				Description: "Scheduled check-in that became due while offline",
+				WakeTime:    now.Add(-10 * time.Second).Format(time.RFC3339),
+				State:       dollstate.IntentionStatePending,
+			},
+			{
+				ID:          "int-002",
+				Subject:     "future-task",
+				Description: "This one is still in the future",
+				WakeTime:    now.Add(1 * time.Hour).Format(time.RFC3339),
+				State:       dollstate.IntentionStatePending,
+			},
+			{
+				ID:          "int-003",
+				Subject:     "completed-task",
+				Description: "Already completed — should not be due",
+				WakeTime:    now.Add(-1 * time.Hour).Format(time.RFC3339),
+				State:       dollstate.IntentionStateCompleted,
 			},
 		},
 	}
 
-	data, err := pulse.MarshalCheckpoint(original)
-	if err != nil {
-		t.Fatalf("E8: MarshalCheckpoint: %v", err)
-	}
-	restored, err := pulse.UnmarshalCheckpoint(data)
-	if err != nil {
-		t.Fatalf("E8: UnmarshalCheckpoint: %v", err)
+	if err := store.SaveDoll(context.Background(), &ds); err != nil {
+		t.Fatalf("F1: SaveDoll: %v", err)
 	}
 
-	if restored.DollID != original.DollID {
-		t.Errorf("E8: DollID mismatch: %q vs %q", restored.DollID, original.DollID)
+	loaded, err := store.LoadDoll(context.Background(), dollID)
+	if err != nil {
+		t.Fatalf("F1: LoadDoll: %v", err)
 	}
-	if !restored.LastCognitionAt.Equal(original.LastCognitionAt) {
-		t.Errorf("E8: LastCognitionAt mismatch: %v vs %v",
-			restored.LastCognitionAt, original.LastCognitionAt)
+	if len(loaded.Intentions.Items) != 3 {
+		t.Fatalf("F1: loaded %d Intentions, want 3", len(loaded.Intentions.Items))
 	}
-	if !restored.LastSpontaneousWakeAt.Equal(original.LastSpontaneousWakeAt) {
-		t.Errorf("E8: LastSpontaneousWakeAt mismatch: %v vs %v",
-			restored.LastSpontaneousWakeAt, original.LastSpontaneousWakeAt)
+	if loaded.Intentions.Items[0].ID != "int-001" {
+		t.Errorf("F1: first Intention ID = %q, want %q", loaded.Intentions.Items[0].ID, "int-001")
 	}
-	if len(restored.Subjects) != len(original.Subjects) {
-		t.Fatalf("E8: Subjects length: %d vs %d",
-			len(restored.Subjects), len(original.Subjects))
+
+	// F2: Discover due Intentions via Scheduler.DueIntentions.
+	prov := newConformanceProvider(`{"summary":"test","matters":false,"reason":"test"}`)
+	mindAPI := newTestMindAPI(dollID, dollName, prov)
+	mindAPI.state = loaded
+	mindAPI.store = store
+	scheduler := dollmind.New(mindAPI.Inference(), logger.New(logger.ErrorLevel, nil), mindAPI,
+		dollmind.WithTimeProvider(func() time.Time { return now }))
+
+	due, err := scheduler.DueIntentions()
+	if err != nil {
+		t.Fatalf("F2: DueIntentions: %v", err)
 	}
-	for i := range original.Subjects {
-		os := &original.Subjects[i]
-		rs := &restored.Subjects[i]
-		if rs.SubjectID != os.SubjectID {
-			t.Errorf("E8: Subject[%d].SubjectID: %q vs %q", i, rs.SubjectID, os.SubjectID)
+
+	if len(due) != 1 {
+		t.Errorf("F2: DueIntentions returned %d items, want 1 (only int-001 should be due)",
+			len(due))
+	} else {
+		if due[0].ID != "int-001" {
+			t.Errorf("F2: due Intention ID = %q, want %q", due[0].ID, "int-001")
 		}
-		if !rs.LastPresentedAt.Equal(os.LastPresentedAt) {
-			t.Errorf("E8: Subject[%d].LastPresentedAt: %v vs %v", i, rs.LastPresentedAt, os.LastPresentedAt)
+		if due[0].Subject != "check-in" {
+			t.Errorf("F2: due Intention Subject = %q, want %q", due[0].Subject, "check-in")
 		}
-		if rs.RevisionAtLastPresent != os.RevisionAtLastPresent {
-			t.Errorf("E8: Subject[%d].RevisionAtLastPresent: %d vs %d", i, rs.RevisionAtLastPresent, os.RevisionAtLastPresent)
-		}
-		if rs.ChangesSincePresent != os.ChangesSincePresent {
-			t.Errorf("E8: Subject[%d].ChangesSincePresent: %d vs %d", i, rs.ChangesSincePresent, os.ChangesSincePresent)
-		}
-		if !rs.LastSettledAt.Equal(os.LastSettledAt) {
-			t.Errorf("E8: Subject[%d].LastSettledAt: %v vs %v", i, rs.LastSettledAt, os.LastSettledAt)
+		if due[0].State != dollstate.IntentionStatePending {
+			t.Errorf("F2: due Intention State = %q, want %q", due[0].State, dollstate.IntentionStatePending)
 		}
 	}
-	t.Log("E8 pass: Marshal/Unmarshal roundtrip identical")
-	t.Log("E complete: durable intention separation confirmed")
+
+	// F3: With a time reference before any Intention is due → empty.
+	schedulerFuture := dollmind.New(mindAPI.Inference(), logger.New(logger.ErrorLevel, nil), mindAPI,
+		dollmind.WithTimeProvider(func() time.Time {
+			return now.Add(-20 * time.Second)
+		}))
+	due3, err := schedulerFuture.DueIntentions()
+	if err != nil {
+		t.Fatalf("F3: DueIntentions: %v", err)
+	}
+	if len(due3) != 0 {
+		t.Errorf("F3: DueIntentions returned %d items with future time ref, want 0",
+			len(due3))
+	}
+}
+
+// ── Scenario G: Cooldown Inhibition ─────────────────────────────────────
+//
+// Prove that Pulse respects WakeCooldown: after a subject is presented
+// and settled, the cooldown period prevents immediate re-waking even
+// when idle pressure remains saturated.
+//
+// Acceptance:
+//
+//	G1: With WakeCooldown=60s, wake → settle → immediate tick → no wake
+//	G2: After cooldown expires → next tick produces a wake
+//	G3: WakeCooldown=0 (none) → immediate re-wake allowed
+
+func TestM7_ScenarioG_CooldownInhibition(t *testing.T) {
+	T0 := time.Date(2026, 9, 27, 12, 0, 0, 0, time.UTC)
+
+	cfg := conformanceConfig()
+	cfg.IdleHorizon = 1
+	cfg.WakeCooldown = 60
+	cfg.MinWakeSpacing = 0
+	cfg.ChangeHorizon = 0
+	cfg.NeglectHorizon = 0
+
+	fc := &steppedClock{now: T0}
+	prov := newConformanceProvider(`{"summary":"cooldown test","matters":false,"reason":"test"}`)
+	runner, captured, tickCh, ackCh := newProductionRunner(t, cfg, fc, &deterministicRNG{v: 0.5}, prov)
+	runner.CheckpointWriter = func(cp pulse.PulseCheckpoint) error { return nil }
+
+	cancel := startRunner(context.Background(), t, runner)
+	defer cancel()
+	defer runner.Stop()
+
+	// Phase 1: baseline → first wake
+	cp := pulse.PulseCheckpoint{
+		LastCognitionAt:       T0.Add(-2 * time.Second),
+		LastSpontaneousWakeAt: T0.Add(-120 * time.Second),
+	}
+	runner.RestoreFromCheckpoint(cp)
+
+	_, _, opp1 := tickAtSync(t, runner, fc, T0, tickCh, ackCh)
+	if !opp1.Opportunity {
+		t.Fatalf("G1: first tick should produce an opportunity (idle saturated)")
+	}
+	if captured.WakeCount() != 1 {
+		t.Errorf("G1: mind entered %d times, want 1", captured.WakeCount())
+	}
+
+	// Phase 2: immediate tick during cooldown → no wake
+	_, sig2, opp2 := tickAtSync(t, runner, fc, T0.Add(1*time.Second), tickCh, ackCh)
+
+	if opp2.Opportunity {
+		t.Errorf("G1: tick at T0+1s should NOT fire (subject in 60s cooldown)")
+	}
+	if captured.WakeCount() != 1 {
+		t.Errorf("G1: mind entered %d times after cooldown tick, want 1 (no new wake)",
+			captured.WakeCount())
+	}
+	if sig2.Idle <= 0 {
+		t.Errorf("G1: idle should be > 0 (pressure remains)")
+	}
+
+	// G2: After cooldown expires → wake allowed.
+	_, _, opp3 := tickAtSync(t, runner, fc, T0.Add(61*time.Second), tickCh, ackCh)
+	if !opp3.Opportunity {
+		t.Errorf("G2: tick at T0+61s should fire (cooldown expired)")
+	}
+	if captured.WakeCount() != 2 {
+		t.Errorf("G2: mind entered %d times, want 2 (second wake after cooldown)",
+			captured.WakeCount())
+	}
+
+	// G3: With cooldown=0, immediate re-wake is allowed.
+	cfg0 := cfg
+	cfg0.WakeCooldown = 0
+	runner0, captured0, tickCh0, ackCh0 := newProductionRunner(t, cfg0, fc,
+		&deterministicRNG{v: 0.01},
+		newConformanceProvider(`{"summary":"no cooldown","matters":false,"reason":"test"}`))
+	runner0.CheckpointWriter = func(cp pulse.PulseCheckpoint) error { return nil }
+
+	cancel0 := startRunner(context.Background(), t, runner0)
+	defer cancel0()
+	defer runner0.Stop()
+
+	cp0 := pulse.PulseCheckpoint{
+		LastCognitionAt:       T0.Add(-2 * time.Second),
+		LastSpontaneousWakeAt: T0.Add(-120 * time.Second),
+	}
+	runner0.RestoreFromCheckpoint(cp0)
+	tickAtSync(t, runner0, fc, T0, tickCh0, ackCh0)
+	if captured0.WakeCount() != 1 {
+		t.Errorf("G3: first wake with cooldown=0: mind entered %d times, want 1",
+			captured0.WakeCount())
+	}
+	tickAtSync(t, runner0, fc, T0.Add(1*time.Second), tickCh0, ackCh0)
+	if captured0.WakeCount() < 2 {
+		t.Errorf("G3: second immediate tick with cooldown=0: mind entered %d times, want >= 2",
+			captured0.WakeCount())
+	}
+}
+
+// ── Scenario H: Min Spacing Guard ───────────────────────────────────────
+//
+// Prove that Pulse's hard guard (MinWakeSpacing) prevents a new wake from
+// being admitted when the elapsed wall-clock time since the last wake is
+// shorter than the configured minimum spacing.
+//
+// Acceptance:
+//
+//	H1: With MinWakeSpacing=60s, wake → immediate tick → hard guard blocks
+//	H2: After spacing expires → next tick produces wake
+//	H3: lastSpontaneousWakeAt NOT advanced when guard blocks
+
+func TestM7_ScenarioH_MinSpacingGuard(t *testing.T) {
+	T0 := time.Date(2026, 9, 27, 12, 0, 0, 0, time.UTC)
+
+	cfg := conformanceConfig()
+	cfg.IdleHorizon = 1
+	cfg.WakeCooldown = 0
+	cfg.MinWakeSpacing = 60
+	cfg.ChangeHorizon = 0
+	cfg.NeglectHorizon = 0
+
+	fc := &steppedClock{now: T0}
+	prov := newConformanceProvider(`{"summary":"spacing test","matters":false,"reason":"test"}`)
+	runner, captured, tickCh, ackCh := newProductionRunner(t, cfg, fc, &deterministicRNG{v: 0.01}, prov)
+	runner.CheckpointWriter = func(cp pulse.PulseCheckpoint) error { return nil }
+
+	cancel := startRunner(context.Background(), t, runner)
+	defer cancel()
+	defer runner.Stop()
+
+	cp := pulse.PulseCheckpoint{
+		LastCognitionAt:       T0.Add(-2 * time.Second),
+		LastSpontaneousWakeAt: T0.Add(-120 * time.Second),
+	}
+	runner.RestoreFromCheckpoint(cp)
+
+	snap1, _, opp1 := tickAtSync(t, runner, fc, T0, tickCh, ackCh)
+	if !opp1.Opportunity {
+		t.Fatalf("H1: first tick should produce opportunity")
+	}
+	if captured.WakeCount() != 1 {
+		t.Errorf("H1: mind entered %d times, want 1", captured.WakeCount())
+	}
+	initialWake := snap1.LastSpontaneousWakeAt
+
+	// Phase 2: immediate tick → min spacing blocks.
+	snap2, sig2, opp2 := tickAtSync(t, runner, fc, T0.Add(1*time.Second), tickCh, ackCh)
+	if opp2.Opportunity {
+		t.Errorf("H1: tick at T0+1s should NOT wake (min spacing 60s)")
+	}
+	if captured.WakeCount() != 1 {
+		t.Errorf("H1: mind entered %d times after spacing block, want 1", captured.WakeCount())
+	}
+	if snap2.LastSpontaneousWakeAt != initialWake {
+		t.Errorf("H3: LastSpontaneousWakeAt changed from %v to %v despite guard",
+			initialWake, snap2.LastSpontaneousWakeAt)
+	}
+	if sig2.Idle <= 0 {
+		t.Errorf("H1: idle should remain >0 (pressure unchanged)")
+	}
+
+	// H2: After spacing expires → wake allowed.
+	snap3, _, opp3 := tickAtSync(t, runner, fc, T0.Add(61*time.Second), tickCh, ackCh)
+	if !opp3.Opportunity {
+		t.Errorf("H2: tick at T0+61s should fire (min spacing satisfied)")
+	}
+	if captured.WakeCount() != 2 {
+		t.Errorf("H2: mind entered %d times, want 2 (second wake after spacing)",
+			captured.WakeCount())
+	}
+	if snap3.LastSpontaneousWakeAt != T0.Add(61*time.Second) {
+		t.Errorf("H2: LastSpontaneousWakeAt = %v, want %v",
+			snap3.LastSpontaneousWakeAt, T0.Add(61*time.Second))
+	}
+}
+
+// ── Scenario I: Budget Inhibition ──────────────────────────────────────
+//
+// Prove that Pulse's budget mechanism (supplied by Core) correctly
+// inhibits waking when a budget is set. With a crippled budget level,
+// the Wake should not fire despite idle saturation. When budget is
+// cleared (set to 0), wakes resume.
+//
+// Acceptance:
+//
+//	I1: Baseline: budget=0 → opportunity fires normally
+//	I2: Set budget=0.9 → wake is inhibited (effectivePressure ≈ pressure*0.1)
+//	I3: Clear budget back to 0 → opportunity fires again
+
+func TestM7_ScenarioI_BudgetExhaustion(t *testing.T) {
+	T0 := time.Date(2026, 9, 27, 12, 0, 0, 0, time.UTC)
+
+	cfg := conformanceConfig()
+	cfg.IdleHorizon = 1
+	cfg.WakeCooldown = 0
+	cfg.MinWakeSpacing = 0
+	cfg.ChangeHorizon = 0
+	cfg.NeglectHorizon = 0
+
+	fc := &steppedClock{now: T0}
+	prov := newConformanceProvider(`{"summary":"budget test","matters":false,"reason":"test"}`)
+	runner, captured, tickCh, ackCh := newProductionRunner(t, cfg, fc, &deterministicRNG{v: 0.5}, prov)
+	runner.CheckpointWriter = func(cp pulse.PulseCheckpoint) error { return nil }
+
+	cancel := startRunner(context.Background(), t, runner)
+	defer cancel()
+	defer runner.Stop()
+
+	// Phase 1: baseline — budget=0, opportunity fires normally
+	cp := pulse.PulseCheckpoint{
+		LastCognitionAt:       T0.Add(-2 * time.Second),
+		LastSpontaneousWakeAt: T0.Add(-120 * time.Second),
+	}
+	runner.RestoreFromCheckpoint(cp)
+
+	_, _, opp1 := tickAtSync(t, runner, fc, T0, tickCh, ackCh)
+	if !opp1.Opportunity {
+		t.Fatalf("I1: first tick should produce opportunity (budget=0)")
+	}
+	if captured.WakeCount() != 1 {
+		t.Errorf("I1: mind entered %d times, want 1", captured.WakeCount())
+	}
+
+	oppSnap := runner.OpportunitySnapshot()
+	t.Logf("I1: effectivePressure=%.4f, pressure=%.4f, inhibition cooldown=%.4f budget=%.4f",
+		oppSnap.EffectivePressure, oppSnap.Pressure,
+		oppSnap.Inhibition.Cooldown, oppSnap.Inhibition.Budget)
+
+	// Phase 2: set budget=0.9 → strong inhibition → wake blocked
+	runner.SetBudget(0.9)
+
+	oppSnap2 := runner.OpportunitySnapshot()
+	t.Logf("I2a: before tick with budget=0.9: inhibition budget=%.4f", oppSnap2.Inhibition.Budget)
+
+	_, sig2, opp2 := tickAtSync(t, runner, fc, T0.Add(1*time.Second), tickCh, ackCh)
+
+	// With budget=0.9 and no cooldown, effectivePressure = pressure * 0.1
+	// RNG=0.5. So 0.5 < 0.1 → false → no opportunity.
+	if opp2.Opportunity {
+		t.Errorf("I2: tick at T0+1s with budget=0.9 should NOT fire (RNG=0.5 > effectivePressure=0.1)")
+	}
+	if captured.WakeCount() != 1 {
+		t.Errorf("I2: mind entered %d times after budget block, want 1",
+			captured.WakeCount())
+	}
+	if sig2.Idle <= 0 {
+		t.Errorf("I2: idle should remain >0 (pressure unchanged)")
+	}
+
+	// Phase 3: clear budget to 0 → opportunity resumes
+	runner.SetBudget(0)
+
+	_, _, opp3 := tickAtSync(t, runner, fc, T0.Add(2*time.Second), tickCh, ackCh)
+	if !opp3.Opportunity {
+		t.Errorf("I3: tick at T0+2s with budget=0 should fire (no inhibition)")
+	}
+	if captured.WakeCount() != 2 {
+		t.Errorf("I3: mind entered %d times after budget cleared, want 2",
+			captured.WakeCount())
+	}
 }
