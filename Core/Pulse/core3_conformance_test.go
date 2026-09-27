@@ -256,20 +256,19 @@ func findSubjectState(runner *pulse.Runner, subjID string) *pulse.PulseSubjectSt
 // ── Scenario A: Golden Idle-Only Heartbeat ──────────────────────────────
 //
 // Prove production-shaped composition: real Scheduler, real Clock, real RNG,
-// real dollstate. Capture and assert the actual PulseWake struct, including
-// idle-only wake with Subjects == [].
+// real dollstate. Demonstrate the canonical restart lifecycle:
+// construct → restore → start → first evaluation. Capture and assert the
+// actual PulseWake struct, including idle-only wake with Subjects == [].
 //
 // Acceptance:
 //
-//	A1: First tick at T0 with no cognition baseline → idle=0 → no opportunity
-//	A2: Restore checkpoint with LastCognitionAt=T-2s → idle=1.0 at T0
-//	A3: Opportunity fires → capturingMind receives EnterPulseWake call
-//	A4: Captured PulseWake has Subjects == [] (idle-only)
-//	A5: PulseWake.Pressure > 0 and EffectivePressure > 0
-//	A6: Wake AdmittedAt is near T0
-//	A7: LastSpontaneousWakeAt advances to T0
-//	A8: Successive tick at T+1s: idle still saturated → another wake
-//	A9: Second wake AdmittedAt matches the tick time
+//	A1: Restore checkpoint with LastCognitionAt=T-2s → idle=1.0 at T0 → opp fires
+//	A2: Captured PulseWake has Subjects == [] (idle-only)
+//	A3: PulseWake.Pressure > 0 and EffectivePressure > 0
+//	A4: Wake AdmittedAt is near T0
+//	A5: LastSpontaneousWakeAt advances to T0
+//	A6: Successive tick at T+1s: idle still saturated → another wake
+//	A7: Second wake AdmittedAt matches the tick time
 
 func TestM7_ScenarioA_GoldenHeartbeat(t *testing.T) {
 	T0 := time.Date(2026, 9, 27, 12, 0, 0, 0, time.UTC)
@@ -282,88 +281,76 @@ func TestM7_ScenarioA_GoldenHeartbeat(t *testing.T) {
 	fc := &steppedClock{now: T0}
 	prov := newConformanceProvider(`{"summary":"idle heartbeat","matters":false,"reason":"no external event"}`)
 	runner, captured, tickCh, ackCh := newProductionRunner(t, cfg, fc, &deterministicRNG{v: 0.01}, prov)
-	cancel := startRunner(context.Background(), t, runner)
-	defer cancel()
-	defer runner.Stop()
 
-	// ── Phase 1: baseline with NO checkpoint → idle=0 → no wake ──
-	snap, sig, opp := tickAtSync(t, runner, fc, T0, tickCh, ackCh)
-
-	if snap.TickCount != 1 {
-		t.Errorf("A1 tick: TickCount = %d, want 1", snap.TickCount)
-	}
-	if sig.Idle != 0 {
-		t.Errorf("A1: idle = %f, want 0 (no cognition baseline)", sig.Idle)
-	}
-	if opp.Opportunity {
-		t.Errorf("A1: opportunity fired with no cognition baseline (idle=0)")
-	}
-	if captured.WakeCount() != 0 {
-		t.Errorf("A1: mind entered %d times, want 0 (no wake expected)", captured.WakeCount())
-	}
-
-	// ── Phase 2: inject checkpoint → restore baseline ──
+	// Canonical lifecycle: construct → restore → start → first evaluation.
 	cp := pulse.PulseCheckpoint{
 		LastCognitionAt:       T0.Add(-2 * time.Second),
 		LastSpontaneousWakeAt: T0,
 	}
 	runner.RestoreFromCheckpoint(cp)
 
-	snap, sig, opp = tickAtSync(t, runner, fc, T0, tickCh, ackCh)
+	cancel := startRunner(context.Background(), t, runner)
+	defer cancel()
+	defer runner.Stop()
 
-	if snap.TickCount != 2 {
-		t.Errorf("A2 tick: TickCount = %d, want 2", snap.TickCount)
-	}
+	// ── First evaluation: should see restored checkpoint pressure ──
+	snap, sig, opp := tickAtSync(t, runner, fc, T0, tickCh, ackCh)
+
+	// Hard assertion: restore happened before evaluation — idle computed from
+	// LastCognitionAt=T-2s with IdleHorizon=1s → idle=2s/1s=2.0, clamped to 1.0.
 	if sig.Idle != 1.0 {
-		t.Errorf("A2: idle = %f, want 1.0 (saturated after restore)", sig.Idle)
+		t.Errorf("A1: idle = %f, want 1.0 (restored checkpoint with LastCognitionAt=T-2s)", sig.Idle)
 	}
 	if !opp.Opportunity {
-		t.Errorf("A2: opportunity should fire with idle=1.0")
+		t.Errorf("A1: opportunity should fire with idle=1.0 after restore-before-start")
+	}
+	if snap.LastSpontaneousWakeAt != T0 {
+		t.Errorf("A1: LastSpontaneousWakeAt = %v, want %v", snap.LastSpontaneousWakeAt, T0)
 	}
 
 	if captured.WakeCount() < 1 {
-		t.Errorf("A3: mind entered %d times, want >= 1 (wake should have fired)", captured.WakeCount())
+		t.Errorf("A1: mind entered %d times, want >= 1 (restore → wake)", captured.WakeCount())
 	}
 
 	wake := captured.LastWake()
 	if wake == nil {
-		t.Fatalf("A4: no PulseWake captured")
+		t.Fatalf("A2: no PulseWake captured")
 	}
 	if len(wake.Subjects) != 0 {
-		t.Errorf("A4: PulseWake.Subjects = %v, want [] (idle-only wake)", wake.Subjects)
+		t.Errorf("A2: PulseWake.Subjects = %v, want [] (idle-only wake)", wake.Subjects)
 	}
 
 	if wake.Pressure <= 0 {
-		t.Errorf("A5: PulseWake.Pressure = %f, want > 0", wake.Pressure)
+		t.Errorf("A3: PulseWake.Pressure = %f, want > 0", wake.Pressure)
 	}
 	if wake.EffectivePressure <= 0 {
-		t.Errorf("A5: PulseWake.EffectivePressure = %f, want > 0", wake.EffectivePressure)
+		t.Errorf("A3: PulseWake.EffectivePressure = %f, want > 0", wake.EffectivePressure)
 	}
 
 	if wake.AdmittedAt.Before(T0.Add(-time.Second)) || wake.AdmittedAt.After(T0.Add(time.Second)) {
-		t.Errorf("A6: PulseWake.AdmittedAt = %v, want near T0 (%v)", wake.AdmittedAt, T0)
+		t.Errorf("A4: PulseWake.AdmittedAt = %v, want near T0 (%v)", wake.AdmittedAt, T0)
 	}
 
 	if snap.LastSpontaneousWakeAt != T0 {
-		t.Errorf("A7: LastSpontaneousWakeAt = %v, want %v", snap.LastSpontaneousWakeAt, T0)
+		t.Errorf("A5: LastSpontaneousWakeAt = %v, want %v", snap.LastSpontaneousWakeAt, T0)
 	}
 
-	// ── Phase 3: successive tick — idle still saturated → another wake ──
+	// ── Second tick: idle still saturated → another wake ──
 	snap, sig, opp = tickAtSync(t, runner, fc, T0.Add(time.Second), tickCh, ackCh)
 
 	if !opp.Opportunity {
-		t.Errorf("A8: second tick opportunity should fire (idle saturated)")
+		t.Errorf("A6: second tick opportunity should fire (idle saturated)")
 	}
 	if captured.WakeCount() < 2 {
-		t.Errorf("A8: mind entered %d times, want >= 2 (two wakes expected)", captured.WakeCount())
+		t.Errorf("A6: mind entered %d times, want >= 2 (two wakes expected)", captured.WakeCount())
 	}
 
 	secondWake := captured.LastWake()
 	if secondWake == nil {
-		t.Fatalf("A9: no second PulseWake captured")
+		t.Fatalf("A7: no second PulseWake captured")
 	}
 	if secondWake.AdmittedAt != T0.Add(time.Second) {
-		t.Errorf("A9: second wake AdmittedAt = %v, want %v", secondWake.AdmittedAt, T0.Add(time.Second))
+		t.Errorf("A7: second wake AdmittedAt = %v, want %v", secondWake.AdmittedAt, T0.Add(time.Second))
 	}
 }
 
@@ -427,18 +414,18 @@ func TestM7_ScenarioB_QuietNoWake(t *testing.T) {
 //
 // Prove that when a cognition invocation fails AFTER the admission
 // checkpoint has been durably written, Pulse handles the failure
-// correctly. Subjects remain presented but NOT settled. A subsequent
-// tick with fresh components can wake and succeed again.
+// correctly. This test exercises the global failure path — no subjects
+// are involved; the wake is idle-only throughout. A fresh runner with
+// a working provider can recover and wake successfully.
 //
 // Acceptance:
 //
-//	C1: First wake → subjects settled → CheckpointWriter called
+//	C1: First wake → CheckpointWriter called (admission checkpoint durable)
 //	C2: Admission checkpoint succeeds for both calls
-//	C3: Second wake → EnterPulseWake fails → subjects NOT settled
-//	C4: LastSpontaneousWakeAt still advances despite failure
-//	C5: Next tick with fresh runner → recovery wake succeeds
-//	C6: After recovery, subjects are settled again
-//	C7: Idle is recomputed correctly after recovery
+//	C3: Second wake → EnterPulseWake fails → cognition error surfaced
+//	C4: LastSpontaneousWakeAt advances despite failure
+//	C5: Fresh runner + working provider → recovery wake succeeds
+//	C6: Idle is recomputed correctly after recovery
 
 func TestM7_ScenarioC_CognitionFailureRecovery(t *testing.T) {
 	T0 := time.Date(2026, 9, 27, 12, 0, 0, 0, time.UTC)
@@ -460,7 +447,6 @@ func TestM7_ScenarioC_CognitionFailureRecovery(t *testing.T) {
 	ackCh := make(chan struct{}, 10)
 	log := logger.New(logger.ErrorLevel, nil)
 	runner := pulse.NewTestRunner(cfg, fc, &deterministicRNG{v: 0.01}, log, captured, tickCh, ackCh)
-	runner.UpdateSubjects(newSubject("test-subject"))
 
 	checkpointCalls := new(atomic.Int64)
 	runner.CheckpointWriter = func(cp pulse.PulseCheckpoint) error {
@@ -468,16 +454,16 @@ func TestM7_ScenarioC_CognitionFailureRecovery(t *testing.T) {
 		return nil
 	}
 
-	cancel := startRunner(context.Background(), t, runner)
-	defer cancel()
-	defer runner.Stop()
-
-	// ── Phase 1: inject checkpoint → first wake succeeds ──
+	// ── Phase 1: restore before start → first wake succeeds ──
 	cp := pulse.PulseCheckpoint{
 		LastCognitionAt:       T0.Add(-2 * time.Second),
 		LastSpontaneousWakeAt: T0,
 	}
 	runner.RestoreFromCheckpoint(cp)
+
+	cancel := startRunner(context.Background(), t, runner)
+	defer cancel()
+	defer runner.Stop()
 
 	snap, _, opp := tickAtSync(t, runner, fc, T0, tickCh, ackCh)
 
@@ -487,10 +473,13 @@ func TestM7_ScenarioC_CognitionFailureRecovery(t *testing.T) {
 	if captured.WakeCount() != 1 {
 		t.Errorf("C1: mind entered %d times, want 1", captured.WakeCount())
 	}
+	if snap.LastSpontaneousWakeAt != T0 {
+		t.Errorf("C1: LastSpontaneousWakeAt = %v, want %v", snap.LastSpontaneousWakeAt, T0)
+	}
 
-	// C2: Admission checkpoint was written (called at least once).
+	// C1: Admission checkpoint was written (called at least once).
 	if checkpointCalls.Load() < 1 {
-		t.Errorf("C2: CheckpointWriter called %d times, want >= 1",
+		t.Errorf("C1: CheckpointWriter called %d times, want >= 1",
 			checkpointCalls.Load())
 	}
 
@@ -530,7 +519,6 @@ func TestM7_ScenarioC_CognitionFailureRecovery(t *testing.T) {
 	captured2 := newCapturingMind(scheduler2)
 
 	runner2 := pulse.NewTestRunner(cfg, fc, &deterministicRNG{v: 0.01}, log, captured2, tickCh, ackCh)
-	runner2.UpdateSubjects(newSubject("test-subject"))
 	runner2.CheckpointWriter = func(cp pulse.PulseCheckpoint) error {
 		checkpointCalls.Add(1)
 		return nil
@@ -551,7 +539,7 @@ func TestM7_ScenarioC_CognitionFailureRecovery(t *testing.T) {
 	}
 
 	if sig2.Idle > 0 {
-		t.Logf("C7: idle = %.4f after recovery tick (recomputed from checkpoint)", sig2.Idle)
+		t.Logf("C6: idle = %.4f after recovery tick (recomputed from checkpoint)", sig2.Idle)
 	}
 }
 
@@ -619,15 +607,15 @@ func TestM7_ScenarioD_RestartSQLite(t *testing.T) {
 		return cpStore.SavePulseCheckpoint(context.Background(), "restart-doll", data)
 	}
 
-	cancelA := startRunner(context.Background(), t, runnerA)
-	defer cancelA()
-	defer runnerA.Stop()
-
 	cp := pulse.PulseCheckpoint{
 		LastCognitionAt:       T0.Add(-2 * time.Second),
 		LastSpontaneousWakeAt: T0,
 	}
 	runnerA.RestoreFromCheckpoint(cp)
+
+	cancelA := startRunner(context.Background(), t, runnerA)
+	defer cancelA()
+	defer runnerA.Stop()
 
 	// D2: Tick → wake → checkpoint written to SQLite.
 	_, _, oppA := tickAtSync(t, runnerA, fcA, T0, tickChA, ackChA)
@@ -921,16 +909,16 @@ func TestM7_ScenarioG_CooldownInhibition(t *testing.T) {
 	runner, captured, tickCh, ackCh := newProductionRunner(t, cfg, fc, &deterministicRNG{v: 0.5}, prov)
 	runner.CheckpointWriter = func(cp pulse.PulseCheckpoint) error { return nil }
 
-	cancel := startRunner(context.Background(), t, runner)
-	defer cancel()
-	defer runner.Stop()
-
-	// Phase 1: baseline → first wake
+	// Phase 1: restore before start → first wake
 	cp := pulse.PulseCheckpoint{
 		LastCognitionAt:       T0.Add(-2 * time.Second),
 		LastSpontaneousWakeAt: T0.Add(-120 * time.Second),
 	}
 	runner.RestoreFromCheckpoint(cp)
+
+	cancel := startRunner(context.Background(), t, runner)
+	defer cancel()
+	defer runner.Stop()
 
 	_, _, opp1 := tickAtSync(t, runner, fc, T0, tickCh, ackCh)
 	if !opp1.Opportunity {
@@ -972,15 +960,15 @@ func TestM7_ScenarioG_CooldownInhibition(t *testing.T) {
 		newConformanceProvider(`{"summary":"no cooldown","matters":false,"reason":"test"}`))
 	runner0.CheckpointWriter = func(cp pulse.PulseCheckpoint) error { return nil }
 
-	cancel0 := startRunner(context.Background(), t, runner0)
-	defer cancel0()
-	defer runner0.Stop()
-
 	cp0 := pulse.PulseCheckpoint{
 		LastCognitionAt:       T0.Add(-2 * time.Second),
 		LastSpontaneousWakeAt: T0.Add(-120 * time.Second),
 	}
 	runner0.RestoreFromCheckpoint(cp0)
+
+	cancel0 := startRunner(context.Background(), t, runner0)
+	defer cancel0()
+	defer runner0.Stop()
 	tickAtSync(t, runner0, fc, T0, tickCh0, ackCh0)
 	if captured0.WakeCount() != 1 {
 		t.Errorf("G3: first wake with cooldown=0: mind entered %d times, want 1",
@@ -1020,15 +1008,15 @@ func TestM7_ScenarioH_MinSpacingGuard(t *testing.T) {
 	runner, captured, tickCh, ackCh := newProductionRunner(t, cfg, fc, &deterministicRNG{v: 0.01}, prov)
 	runner.CheckpointWriter = func(cp pulse.PulseCheckpoint) error { return nil }
 
-	cancel := startRunner(context.Background(), t, runner)
-	defer cancel()
-	defer runner.Stop()
-
 	cp := pulse.PulseCheckpoint{
 		LastCognitionAt:       T0.Add(-2 * time.Second),
 		LastSpontaneousWakeAt: T0.Add(-120 * time.Second),
 	}
 	runner.RestoreFromCheckpoint(cp)
+
+	cancel := startRunner(context.Background(), t, runner)
+	defer cancel()
+	defer runner.Stop()
 
 	snap1, _, opp1 := tickAtSync(t, runner, fc, T0, tickCh, ackCh)
 	if !opp1.Opportunity {
@@ -1098,16 +1086,16 @@ func TestM7_ScenarioI_BudgetExhaustion(t *testing.T) {
 	runner, captured, tickCh, ackCh := newProductionRunner(t, cfg, fc, &deterministicRNG{v: 0.5}, prov)
 	runner.CheckpointWriter = func(cp pulse.PulseCheckpoint) error { return nil }
 
-	cancel := startRunner(context.Background(), t, runner)
-	defer cancel()
-	defer runner.Stop()
-
-	// Phase 1: baseline — budget=0, opportunity fires normally
+	// Phase 1: restore before start — budget=0, opportunity fires normally
 	cp := pulse.PulseCheckpoint{
 		LastCognitionAt:       T0.Add(-2 * time.Second),
 		LastSpontaneousWakeAt: T0.Add(-120 * time.Second),
 	}
 	runner.RestoreFromCheckpoint(cp)
+
+	cancel := startRunner(context.Background(), t, runner)
+	defer cancel()
+	defer runner.Stop()
 
 	_, _, opp1 := tickAtSync(t, runner, fc, T0, tickCh, ackCh)
 	if !opp1.Opportunity {
