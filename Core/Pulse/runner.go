@@ -67,9 +67,16 @@ type Runner struct {
 	//      updated)
 	// The callback receives the full checkpoint snapshot at that instant.
 	// It must NOT hold the Runner mutex through persistence calls.
-	// If the callback returns an error, admitPulseWake logs it after admission
-	// (the wake is real and cognition proceeds) and returns it after settlement
-	// so the caller can observe the durability failure.
+	//
+	// If the admission checkpoint callback returns an error, admitPulseWake
+	// returns the error early — cognition does NOT start. The in-memory
+	// admission stands (the wake was real), occupancy is released, and the
+	// caller sees the durability failure.
+	//
+	// If the settlement checkpoint callback returns an error, the cognition
+	// result is kept (it really completed) but an error is returned so the
+	// caller can observe the durability failure.
+	//
 	// Production wiring sets this to save via CheckpointStore; tests leave
 	// it nil (no persistence setup needed for unit tests).
 	CheckpointWriter CheckpointWriter
