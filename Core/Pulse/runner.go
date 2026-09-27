@@ -353,7 +353,7 @@ func (r *Runner) evaluate() {
 
 	if opp.Opportunity {
 		if err := r.admitPulseWake(now, opp); err != nil {
-			r.log.Error("pulse wake admission checkpoint error", map[string]any{"error": err})
+			r.log.Error("pulse wake error", map[string]any{"error": err})
 		}
 	}
 
@@ -370,18 +370,23 @@ func (r *Runner) evaluate() {
 // shutdown. If r.ctx is nil (tests that call admitPulseWake directly
 // without Start), fall back to context.Background().
 //
-// Lifecycle semantics:
+// Lifecycle semantics (durable-first invariant):
 //
 //	ADMISSION (before EnterPulseWake):
 //	  - wake subjects marked as presented (admission time)
 //	  - last_spontaneous_wake_at updated to admission time
+//	  - admission checkpoint persisted BEFORE cognition begins
+//	  - checkpoint FAILURE → cognition NOT started, error returned
+//	  - on checkpoint failure in-memory admission still stands (no rollback)
 //	COGNITION (blocking):
 //	  - EnterPulseWake runs the model cognition
+//	  - only reached if admission checkpoint succeeded
 //	SETTLING (on success only):
 //	  - wake subjects marked as settled (completion time)
 //	  - last_cognition_at updated to completion time
+//	  - settlement checkpoint persisted; failure is observable
 //	FAILURE (error or cancel):
-//	  - presentation from admission remains
+//	  - presentation from admission remains (both in-memory and durable)
 //	  - last_settled_at and last_cognition_at are NOT updated
 func (r *Runner) admitPulseWake(now time.Time, opp OpportunitySnapshot) error {
 	if !opp.Opportunity {
@@ -433,11 +438,16 @@ func (r *Runner) admitPulseWake(now time.Time, opp OpportunitySnapshot) error {
 	r.mu.Unlock()
 
 	// Persist checkpoint after admission, before cognition blocks.
-	// If this fails, the wake was already admitted in-memory — log the
-	// error and proceed with cognition.
+	// INVARIANT: if checkpoint write fails, cognition must NOT start.
+	// The in-memory admission (subjects presented, lastSpontaneousWakeAt)
+	// is NOT rolled back — the wake was truly admitted by Core, and the
+	// runtime exposes the persistence failure rather than fabricating a
+	// different lifecycle history.
 	if r.CheckpointWriter != nil {
 		if err := r.CheckpointWriter(r.ToCheckpoint()); err != nil {
-			r.log.Error("pulse: checkpoint write after admission failed", map[string]any{"error": err})
+			r.log.Error("pulse: admission checkpoint write FAILED — cognition NOT started",
+				map[string]any{"error": err})
+			return fmt.Errorf("pulse: admission checkpoint: %w", err)
 		}
 	}
 
