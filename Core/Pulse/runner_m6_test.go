@@ -141,7 +141,11 @@ func TestM6_CorruptCheckpointReturnsError(t *testing.T) {
 		DollID:          dollID,
 		LastCognitionAt: time.Date(2026, 9, 27, 12, 0, 0, 0, time.UTC),
 	}
-	if err := cs.SavePulseCheckpoint(ctx, dollID, cp); err != nil {
+	data, err := pulse.MarshalCheckpoint(cp)
+	if err != nil {
+		t.Fatalf("MarshalCheckpoint: %v", err)
+	}
+	if err := cs.SavePulseCheckpoint(ctx, dollID, data); err != nil {
 		t.Fatalf("SavePulseCheckpoint: %v", err)
 	}
 
@@ -159,15 +163,21 @@ func TestM6_CorruptCheckpointReturnsError(t *testing.T) {
 		t.Fatalf("corrupt DB: %v", err)
 	}
 
-	// Now LoadPulseCheckpoint should return ErrPulseCheckpointCorrupt.
-	_, err = cs.LoadPulseCheckpoint(ctx, dollID)
-	if !errors.Is(err, persistence.ErrPulseCheckpointCorrupt) {
-		t.Fatalf("expected ErrPulseCheckpointCorrupt, got: %v", err)
+	// Load raw bytes (should succeed — LoadPulseCheckpoint now returns opaque bytes).
+	rawData, err := cs.LoadPulseCheckpoint(ctx, dollID)
+	if err != nil {
+		t.Fatalf("LoadPulseCheckpoint: %v", err)
 	}
+	// Unmarshal must fail because the data is corrupt JSON.
+	_, err = pulse.UnmarshalCheckpoint(rawData)
+	if err == nil {
+		t.Fatal("expected UnmarshalCheckpoint error for corrupt data, got nil")
+	}
+	t.Logf("got expected corrupt data error: %v", err)
 }
 
 // TestM6_CorruptCheckpointByDirectWrite writes corrupt JSON via a separate
-// SQLite connection and verifies LoadPulseCheckpoint returns ErrPulseCheckpointCorrupt.
+// SQLite connection and verifies UnmarshalCheckpoint fails with an error.
 func TestM6_CorruptCheckpointByDirectWrite(t *testing.T) {
 	path, cleanup := tempDB(t)
 	defer cleanup()
@@ -183,7 +193,11 @@ func TestM6_CorruptCheckpointByDirectWrite(t *testing.T) {
 		DollID:          "test-doll",
 		LastCognitionAt: time.Date(2026, 9, 27, 12, 0, 0, 0, time.UTC),
 	}
-	if err := cs.SavePulseCheckpoint(ctx, "test-doll", cp); err != nil {
+	data, err := pulse.MarshalCheckpoint(cp)
+	if err != nil {
+		t.Fatalf("MarshalCheckpoint: %v", err)
+	}
+	if err := cs.SavePulseCheckpoint(ctx, "test-doll", data); err != nil {
 		t.Fatalf("SavePulseCheckpoint: %v", err)
 	}
 
@@ -201,11 +215,17 @@ func TestM6_CorruptCheckpointByDirectWrite(t *testing.T) {
 		t.Fatalf("corrupt DB: %v", err)
 	}
 
-	// Now LoadPulseCheckpoint should return ErrPulseCheckpointCorrupt.
-	_, err = cs.LoadPulseCheckpoint(ctx, "test-doll")
-	if !errors.Is(err, persistence.ErrPulseCheckpointCorrupt) {
-		t.Fatalf("expected ErrPulseCheckpointCorrupt, got: %v", err)
+	// Load raw bytes (should succeed — LoadPulseCheckpoint returns opaque bytes).
+	rawData, err := cs.LoadPulseCheckpoint(ctx, "test-doll")
+	if err != nil {
+		t.Fatalf("LoadPulseCheckpoint: %v", err)
 	}
+	// Unmarshal must fail because the data is corrupt JSON.
+	_, err = pulse.UnmarshalCheckpoint(rawData)
+	if err == nil {
+		t.Fatal("expected UnmarshalCheckpoint error for corrupt data, got nil")
+	}
+	t.Logf("got expected corrupt data error: %v", err)
 }
 
 // ---------------------------------------------------------------------------
@@ -249,13 +269,21 @@ func TestM6_CheckpointRoundTrip(t *testing.T) {
 		},
 	}
 
-	if err := cs.SavePulseCheckpoint(ctx, dollID, original); err != nil {
+	saveData, err := pulse.MarshalCheckpoint(original)
+	if err != nil {
+		t.Fatalf("MarshalCheckpoint: %v", err)
+	}
+	if err := cs.SavePulseCheckpoint(ctx, dollID, saveData); err != nil {
 		t.Fatalf("SavePulseCheckpoint: %v", err)
 	}
 
-	loaded, err := cs.LoadPulseCheckpoint(ctx, dollID)
+	loadData, err := cs.LoadPulseCheckpoint(ctx, dollID)
 	if err != nil {
 		t.Fatalf("LoadPulseCheckpoint: %v", err)
+	}
+	loaded, err := pulse.UnmarshalCheckpoint(loadData)
+	if err != nil {
+		t.Fatalf("UnmarshalCheckpoint: %v", err)
 	}
 
 	// Verify continuity-bearing fields.
@@ -313,8 +341,9 @@ func TestM6_CheckpointWrittenAfterAdmission(t *testing.T) {
 	r := pulse.NewRunner(defaultPulseConfig(), clock, rng, muteLogger(), nil)
 
 	var capturedCp *pulse.PulseCheckpoint
-	r.OnCheckpoint = func(cp pulse.PulseCheckpoint) {
+	r.CheckpointWriter = func(cp pulse.PulseCheckpoint) error {
 		capturedCp = &cp
+		return nil
 	}
 
 	r.UpdateSubjects([]pulse.PulseSubjectState{
@@ -326,8 +355,9 @@ func TestM6_CheckpointWrittenAfterAdmission(t *testing.T) {
 	tickCh := make(chan time.Time, 1)
 	ackCh := make(chan struct{}, 1)
 	r = pulse.NewTestRunner(defaultPulseConfig(), clock, rng, muteLogger(), mind, tickCh, ackCh)
-	r.OnCheckpoint = func(cp pulse.PulseCheckpoint) {
+	r.CheckpointWriter = func(cp pulse.PulseCheckpoint) error {
 		capturedCp = &cp
+		return nil
 	}
 	r.UpdateSubjects([]pulse.PulseSubjectState{
 		{SubjectID: "subj-1", ChangesSincePresent: 5},
@@ -575,8 +605,9 @@ func TestM6_FailedCognitionPersistsPresentationWithoutSettlement(t *testing.T) {
 	r := pulse.NewRunner(cfg, clock, rng, muteLogger(), nil)
 
 	var checkpointAfterAdmission *pulse.PulseCheckpoint
-	r.OnCheckpoint = func(cp pulse.PulseCheckpoint) {
+	r.CheckpointWriter = func(cp pulse.PulseCheckpoint) error {
 		checkpointAfterAdmission = &cp
+		return nil
 	}
 
 	subjState := pulse.PulseSubjectState{
@@ -589,8 +620,9 @@ func TestM6_FailedCognitionPersistsPresentationWithoutSettlement(t *testing.T) {
 	tickCh := make(chan time.Time, 1)
 	ackCh := make(chan struct{}, 1)
 	r = pulse.NewTestRunner(cfg, clock, rng, muteLogger(), mind, tickCh, ackCh)
-	r.OnCheckpoint = func(cp pulse.PulseCheckpoint) {
+	r.CheckpointWriter = func(cp pulse.PulseCheckpoint) error {
 		checkpointAfterAdmission = &cp
+		return nil
 	}
 	r.UpdateSubjects([]pulse.PulseSubjectState{subjState})
 	r.SetMindEntrance(mind)
@@ -694,8 +726,9 @@ func TestM6_FreshRunnerOwnership(t *testing.T) {
 	r1 := pulse.NewRunner(defaultPulseConfig(), clock, rng, muteLogger(), nil)
 
 	var cpFromR1 pulse.PulseCheckpoint
-	r1.OnCheckpoint = func(cp pulse.PulseCheckpoint) {
+	r1.CheckpointWriter = func(cp pulse.PulseCheckpoint) error {
 		cpFromR1 = cp
+		return nil
 	}
 
 	subjState := pulse.PulseSubjectState{
@@ -708,8 +741,9 @@ func TestM6_FreshRunnerOwnership(t *testing.T) {
 	tickCh1 := make(chan time.Time, 1)
 	ackCh1 := make(chan struct{}, 1)
 	r1 = pulse.NewTestRunner(defaultPulseConfig(), clock, rng, muteLogger(), mind1, tickCh1, ackCh1)
-	r1.OnCheckpoint = func(cp pulse.PulseCheckpoint) {
+	r1.CheckpointWriter = func(cp pulse.PulseCheckpoint) error {
 		cpFromR1 = cp
+		return nil
 	}
 	r1.UpdateSubjects([]pulse.PulseSubjectState{subjState})
 	r1.SetMindEntrance(mind1)
@@ -814,11 +848,17 @@ func TestM6_E2E_RestartConformance(t *testing.T) {
 	// --- First runner ---
 	mind1 := &testMindEntry{}
 	r1 := pulse.NewRunner(cfg, clock, rng, muteLogger(), nil)
-	r1.OnCheckpoint = func(cp pulse.PulseCheckpoint) {
+	r1.CheckpointWriter = func(cp pulse.PulseCheckpoint) error {
 		cp.DollID = dollID
-		if err := cs.SavePulseCheckpoint(ctx, dollID, cp); err != nil {
-			t.Logf("OnCheckpoint save error: %v", err)
+		data, err := pulse.MarshalCheckpoint(cp)
+		if err != nil {
+			return err
 		}
+		if err := cs.SavePulseCheckpoint(ctx, dollID, data); err != nil {
+			t.Logf("CheckpointWriter save error: %v", err)
+			return err
+		}
+		return nil
 	}
 
 	subjs := []pulse.PulseSubjectState{
@@ -831,11 +871,17 @@ func TestM6_E2E_RestartConformance(t *testing.T) {
 	tickCh1 := make(chan time.Time, 1)
 	ackCh1 := make(chan struct{}, 1)
 	r1 = pulse.NewTestRunner(cfg, clock, rng, muteLogger(), mind1, tickCh1, ackCh1)
-	r1.OnCheckpoint = func(cp pulse.PulseCheckpoint) {
+	r1.CheckpointWriter = func(cp pulse.PulseCheckpoint) error {
 		cp.DollID = dollID
-		if err := cs.SavePulseCheckpoint(ctx, dollID, cp); err != nil {
-			t.Logf("OnCheckpoint save error: %v", err)
+		data, err := pulse.MarshalCheckpoint(cp)
+		if err != nil {
+			return err
 		}
+		if err := cs.SavePulseCheckpoint(ctx, dollID, data); err != nil {
+			t.Logf("CheckpointWriter save error: %v", err)
+			return err
+		}
+		return nil
 	}
 	r1.UpdateSubjects(subjs)
 	r1.SetMindEntrance(mind1)
@@ -849,9 +895,13 @@ func TestM6_E2E_RestartConformance(t *testing.T) {
 	r1.Stop()
 
 	// Verify checkpoint was persisted.
-	cp1, err := cs.LoadPulseCheckpoint(ctx, dollID)
+	cpData1, err := cs.LoadPulseCheckpoint(ctx, dollID)
 	if err != nil {
 		t.Fatalf("LoadPulseCheckpoint: %v", err)
+	}
+	cp1, err := pulse.UnmarshalCheckpoint(cpData1)
+	if err != nil {
+		t.Fatalf("UnmarshalCheckpoint: %v", err)
 	}
 	if cp1.LastSpontaneousWakeAt.IsZero() {
 		t.Error("checkpoint should have non-zero LastSpontaneousWakeAt")
@@ -863,9 +913,13 @@ func TestM6_E2E_RestartConformance(t *testing.T) {
 	rng2 := fixedRNG()
 
 	// Load the checkpoint.
-	loadedCp, err := cs.LoadPulseCheckpoint(ctx, dollID)
+	cpData2, err := cs.LoadPulseCheckpoint(ctx, dollID)
 	if err != nil {
 		t.Fatalf("re-LoadPulseCheckpoint: %v", err)
+	}
+	loadedCp, err := pulse.UnmarshalCheckpoint(cpData2)
+	if err != nil {
+		t.Fatalf("UnmarshalCheckpoint: %v", err)
 	}
 
 	// Create fresh runner and restore.
@@ -966,7 +1020,11 @@ func TestM6_DueDuringDowntimeIntentionDiscoverable(t *testing.T) {
 		LastCognitionAt:       now.Add(-30 * time.Minute),
 		LastSpontaneousWakeAt: now.Add(-30 * time.Minute),
 	}
-	if err := cs.SavePulseCheckpoint(ctx, dollID, cp); err != nil {
+	cpData, err := pulse.MarshalCheckpoint(cp)
+	if err != nil {
+		t.Fatalf("MarshalCheckpoint: %v", err)
+	}
+	if err := cs.SavePulseCheckpoint(ctx, dollID, cpData); err != nil {
 		t.Fatalf("SavePulseCheckpoint: %v", err)
 	}
 
@@ -1006,9 +1064,13 @@ func TestM6_DueDuringDowntimeIntentionDiscoverable(t *testing.T) {
 	}
 
 	// Verify the checkpoint does NOT contain Intentions (they are canonical Doll State).
-	loadedCp, err := cs.LoadPulseCheckpoint(ctx, dollID)
+	loadData, err := cs.LoadPulseCheckpoint(ctx, dollID)
 	if err != nil {
 		t.Fatalf("LoadPulseCheckpoint: %v", err)
+	}
+	loadedCp, err := pulse.UnmarshalCheckpoint(loadData)
+	if err != nil {
+		t.Fatalf("UnmarshalCheckpoint: %v", err)
 	}
 	_ = loadedCp // checking that we can load the checkpoint — Intentions are not part of it.
 }
@@ -1040,10 +1102,15 @@ func TestM6_RaceSafeCheckpoint(t *testing.T) {
 		},
 	}
 
+	cpData, err := pulse.MarshalCheckpoint(cp)
+	if err != nil {
+		t.Fatalf("MarshalCheckpoint: %v", err)
+	}
+
 	done := make(chan bool, 20)
 	for i := 0; i < 10; i++ {
 		go func() {
-			_ = cs.SavePulseCheckpoint(ctx, dollID, cp)
+			_ = cs.SavePulseCheckpoint(ctx, dollID, cpData)
 			done <- true
 		}()
 		go func() {

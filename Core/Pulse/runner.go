@@ -3,6 +3,7 @@ package pulse
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -59,16 +60,19 @@ type Runner struct {
 	// mindEntry is the interface to DollMind for spontaneous Pulse cognition.
 	mindEntry MindEntrance
 
-	// OnCheckpoint is called after mutable bookkeeping changes that should
+	// CheckpointWriter is called after mutable bookkeeping changes that should
 	// be persisted as a PulseCheckpoint. When non-nil, it is invoked after:
 	//   1. Wake admission (subjects presented, lastSpontaneousWakeAt updated)
 	//   2. Successful cognition settlement (subjects settled, lastCognitionAt
 	//      updated)
 	// The callback receives the full checkpoint snapshot at that instant.
 	// It must NOT hold the Runner mutex through persistence calls.
+	// If the callback returns an error, admitPulseWake logs it after admission
+	// (the wake is real and cognition proceeds) and returns it after settlement
+	// so the caller can observe the durability failure.
 	// Production wiring sets this to save via CheckpointStore; tests leave
 	// it nil (no persistence setup needed for unit tests).
-	OnCheckpoint func(PulseCheckpoint)
+	CheckpointWriter CheckpointWriter
 
 	// Test injection: when non-nil, replaces the production ticker channel.
 	// Tests send on this channel to drive evaluations deterministically.
@@ -78,6 +82,11 @@ type Runner struct {
 	// goroutine evaluation without time.Sleep.
 	tickAckCh chan struct{}
 }
+
+// CheckpointWriter is called after mutable bookkeeping changes that should
+// be persisted. It replaces the older silent OnCheckpoint callback so that
+// durability failures are observable.
+type CheckpointWriter func(PulseCheckpoint) error
 
 // NewRunner creates a Pulse runner. It does not start the evaluation loop;
 // call Start after construction. mindEntry may be nil; Pulse runs without
@@ -343,7 +352,9 @@ func (r *Runner) evaluate() {
 	r.mu.Unlock()
 
 	if opp.Opportunity {
-		r.admitPulseWake(now, opp)
+		if err := r.admitPulseWake(now, opp); err != nil {
+			r.log.Error("pulse wake admission checkpoint error", map[string]any{"error": err})
+		}
 	}
 
 	r.sendTickAck()
@@ -372,20 +383,20 @@ func (r *Runner) evaluate() {
 //	FAILURE (error or cancel):
 //	  - presentation from admission remains
 //	  - last_settled_at and last_cognition_at are NOT updated
-func (r *Runner) admitPulseWake(now time.Time, opp OpportunitySnapshot) {
+func (r *Runner) admitPulseWake(now time.Time, opp OpportunitySnapshot) error {
 	if !opp.Opportunity {
 		r.log.Debug("pulse wake not admitted: opportunity is false", nil)
-		return
+		return nil
 	}
 
 	if r.mindEntry == nil {
 		r.log.Warn("pulse spontaneous opportunity but no MindEntrance set", nil)
-		return
+		return nil
 	}
 
 	if !r.TryClaimCognitionRun() {
 		r.log.Debug("pulse spontaneous opportunity skipped: cognition run already active", nil)
-		return
+		return nil
 	}
 	defer r.ReleaseCognitionRun()
 
@@ -422,8 +433,12 @@ func (r *Runner) admitPulseWake(now time.Time, opp OpportunitySnapshot) {
 	r.mu.Unlock()
 
 	// Persist checkpoint after admission, before cognition blocks.
-	if r.OnCheckpoint != nil {
-		r.OnCheckpoint(r.ToCheckpoint())
+	// If this fails, the wake was already admitted in-memory — log the
+	// error and proceed with cognition.
+	if r.CheckpointWriter != nil {
+		if err := r.CheckpointWriter(r.ToCheckpoint()); err != nil {
+			r.log.Error("pulse: checkpoint write after admission failed", map[string]any{"error": err})
+		}
 	}
 
 	// Derive cognition timeout from the runtime context so that Core
@@ -461,14 +476,19 @@ func (r *Runner) admitPulseWake(now time.Time, opp OpportunitySnapshot) {
 		r.mu.Unlock()
 
 		// Persist checkpoint after successful cognition settlement.
-		if r.OnCheckpoint != nil {
-			r.OnCheckpoint(r.ToCheckpoint())
+		// Failure is returned so the caller can observe the durability issue.
+		if r.CheckpointWriter != nil {
+			if err := r.CheckpointWriter(r.ToCheckpoint()); err != nil {
+				r.log.Error("pulse: checkpoint write after settlement failed", map[string]any{"error": err})
+				return fmt.Errorf("pulse: checkpoint write after settlement: %w", err)
+			}
 		}
 	}
 
 	if err != nil {
 		r.log.Error("pulse wake cognition failed", map[string]any{"error": err})
 	}
+	return nil
 }
 
 func (r *Runner) sendTickAck() {
