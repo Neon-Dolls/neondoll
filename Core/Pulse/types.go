@@ -35,11 +35,12 @@ type PulseResult struct {
 // LifecycleStateUnresolved (sets unfinished=1). Pulse never infers state
 // from semantic prose.
 type PulseSubjectState struct {
-	SubjectID           string    `json:"subject_id"`
-	LastPresentedAt     time.Time `json:"last_presented_at"`
-	ChangesSincePresent int64     `json:"changes_since_present"`
-	LastSettledAt       time.Time `json:"last_settled_at"`
-	LifecycleState      string    `json:"lifecycle_state"`
+	SubjectID             string    `json:"subject_id"`
+	LastPresentedAt       time.Time `json:"last_presented_at"`
+	RevisionAtLastPresent int64     `json:"revision_at_last_present"`
+	ChangesSincePresent   int64     `json:"changes_since_present"`
+	LastSettledAt         time.Time `json:"last_settled_at"`
+	LifecycleState        string    `json:"lifecycle_state"`
 }
 
 // MarkPresented sets last_presented_at to at if at is strictly after the

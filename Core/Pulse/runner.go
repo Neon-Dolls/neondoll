@@ -59,6 +59,17 @@ type Runner struct {
 	// mindEntry is the interface to DollMind for spontaneous Pulse cognition.
 	mindEntry MindEntrance
 
+	// OnCheckpoint is called after mutable bookkeeping changes that should
+	// be persisted as a PulseCheckpoint. When non-nil, it is invoked after:
+	//   1. Wake admission (subjects presented, lastSpontaneousWakeAt updated)
+	//   2. Successful cognition settlement (subjects settled, lastCognitionAt
+	//      updated)
+	// The callback receives the full checkpoint snapshot at that instant.
+	// It must NOT hold the Runner mutex through persistence calls.
+	// Production wiring sets this to save via CheckpointStore; tests leave
+	// it nil (no persistence setup needed for unit tests).
+	OnCheckpoint func(PulseCheckpoint)
+
 	// Test injection: when non-nil, replaces the production ticker channel.
 	// Tests send on this channel to drive evaluations deterministically.
 	tickTestCh chan time.Time
@@ -410,6 +421,11 @@ func (r *Runner) admitPulseWake(now time.Time, opp OpportunitySnapshot) {
 	}
 	r.mu.Unlock()
 
+	// Persist checkpoint after admission, before cognition blocks.
+	if r.OnCheckpoint != nil {
+		r.OnCheckpoint(r.ToCheckpoint())
+	}
+
 	// Derive cognition timeout from the runtime context so that Core
 	// shutdown cancels an in-flight Pulse cognition. Fall back to
 	// context.Background() when r.ctx is nil (direct test invocation).
@@ -443,6 +459,11 @@ func (r *Runner) admitPulseWake(now time.Time, opp OpportunitySnapshot) {
 			r.lastCognitionAt = completionTime
 		}
 		r.mu.Unlock()
+
+		// Persist checkpoint after successful cognition settlement.
+		if r.OnCheckpoint != nil {
+			r.OnCheckpoint(r.ToCheckpoint())
+		}
 	}
 
 	if err != nil {
