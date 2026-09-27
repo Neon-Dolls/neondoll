@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/Neon-Dolls/neondoll/Core/Inference"
+	"github.com/Neon-Dolls/neondoll/Core/Pulse"
 	"github.com/Neon-Dolls/neondoll/DollLink/Events"
 	"github.com/Neon-Dolls/neondoll/DollState"
 	"github.com/Neon-Dolls/neondoll/pkg/logger"
@@ -307,3 +308,76 @@ func (s *Scheduler) Run(ctx context.Context, level Level, input string) (*Result
 		map[string]any{"level": level.String(), "tokens": resp.TokensUsed})
 	return result, nil
 }
+
+// EnterPulseWake admits a spontaneous Pulse cognition run into DollMind.
+//
+// It is the first-class entry point for spontaneous cognition originating
+// from the Pulse runtime, NOT from an external event or due Intention.
+//
+// The lifecycle is minimal:
+//
+//	PulseWake → L1 Orient → matters=false: returned (no L2)
+//	                        matters=true:  existing L2 Plan path
+//
+// EnterPulseWake deliberately does NOT use EnterWake (which requires a
+// pending Intention, marks it Completed, and persists). It does NOT create
+// a synthetic user message, Intention, or Interaction Session. The wake
+// evidence is presented as operational context, not as a semantic event.
+//
+// Errors are surfaced directly; occupancy release is the caller's
+// responsibility.
+func (s *Scheduler) EnterPulseWake(ctx context.Context, wake pulse.PulseWake) error {
+	input := FormatWakeEvidence(wake)
+	_, err := s.Enter(ctx, events.TypePulseSpontaneous, input)
+	if err != nil {
+		s.log.Warn("pulse wake cognition failed",
+			map[string]any{"error": err.Error(), "pressure": wake.Pressure})
+		return fmt.Errorf("enter pulse wake: %w", err)
+	}
+	return nil
+}
+
+// FormatWakeEvidence formats a PulseWake as inference-facing context text
+// for the Orient prompt. It presents operational facts without semantic
+// interpretation — Pulse decides that a cognitive moment may begin, Doll
+// Mind decides what that moment means.
+func FormatWakeEvidence(wake pulse.PulseWake) string {
+	text := "This cognition was initiated by your own continuing internal runtime state.\n" +
+		"No external event triggered it.\n" +
+		"No Intention is due.\n\n" +
+		"Operational wake evidence:\n" +
+		"  Pressure:              " + fmt.Sprintf("%.4f", wake.Pressure) + "\n" +
+		"  Effective pressure:    " + fmt.Sprintf("%.4f", wake.EffectivePressure) + "\n"
+	if len(wake.ActivationSignals) > 0 {
+		text += "  Activation signals:    " + fmt.Sprintf("%v", wake.ActivationSignals) + "\n"
+	}
+	if wake.Inhibition.Cooldown > 0 || wake.Inhibition.Budget > 0 {
+		text += "  Inhibition (cooldown/budget): " +
+			fmt.Sprintf("%.4f/%.4f\n",
+				wake.Inhibition.Cooldown,
+				wake.Inhibition.Budget)
+	}
+	if len(wake.Subjects) > 0 {
+		text += "  Subjects:\n"
+		for _, s := range wake.Subjects {
+			var subjSignals string
+			if s.Neglect > 0 {
+				subjSignals += fmt.Sprintf("neglect=%.4f ", s.Neglect)
+			}
+			if s.Change > 0 {
+				subjSignals += fmt.Sprintf("change=%.4f ", s.Change)
+			}
+			if s.Unfinished > 0 {
+				subjSignals += fmt.Sprintf("unfinished=%.4f ", s.Unfinished)
+			}
+			text += "    - " + s.SubjectID + " (" + subjSignals + ")\n"
+		}
+	} else {
+		text += "  Subjects: (none — idle-only wake)\n"
+	}
+	text += "  Random sample:         " + fmt.Sprintf("%.4f", wake.RandomSample) + "\n"
+	return text
+}
+
+// Make Scheduler implement pulse.MindEntrance
+var _ pulse.MindEntrance = (*Scheduler)(nil)

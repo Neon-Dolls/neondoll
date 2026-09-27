@@ -6,12 +6,13 @@ import "time"
 type Type string
 
 const (
-	TypeMessage      Type = "message"
-	TypeCommand      Type = "command"
-	TypeSystem       Type = "system"
-	TypePresence     Type = "presence"
-	TypeInternalWake Type = "internal_wake"
-	TypeUnknown      Type = "unknown"
+	TypeMessage          Type = "message"
+	TypeCommand          Type = "command"
+	TypeSystem           Type = "system"
+	TypePresence         Type = "presence"
+	TypeInternalWake     Type = "internal_wake"
+	TypePulseSpontaneous Type = "pulse_spontaneous"
+	TypeUnknown          Type = "unknown"
 )
 
 // Event is the generic inbound event envelope.
@@ -130,6 +131,8 @@ func ParseType(s string) Type {
 		return TypePresence
 	case "internal_wake":
 		return TypeInternalWake
+	case "pulse_spontaneous":
+		return TypePulseSpontaneous
 	default:
 		return TypeUnknown
 	}

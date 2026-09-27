@@ -19,7 +19,7 @@ func newTestRunner(t *testing.T, cfg config.PulseConfig, startAt time.Time) (*Ru
 	tickCh := make(chan time.Time, 10)
 	ackCh := make(chan struct{}, 10)
 	log := logger.New(logger.ErrorLevel, nil)
-	r := NewRunner(cfg, clock, nil, log)
+	r := NewRunner(cfg, clock, nil, log, nil)
 	r.tickTestCh = tickCh
 	r.tickAckCh = ackCh
 	return r, clock, tickCh, ackCh
@@ -310,7 +310,7 @@ func TestRunner_RaceSafety(t *testing.T) {
 	tickCh := make(chan time.Time, 100)
 	ackCh := make(chan struct{}, 100)
 	log := logger.New(logger.ErrorLevel, nil)
-	r := NewRunner(config.PulseConfig{Enabled: true}, fc, nil, log)
+	r := NewRunner(config.PulseConfig{Enabled: true}, fc, nil, log, nil)
 	r.tickTestCh = tickCh
 	r.tickAckCh = ackCh
 

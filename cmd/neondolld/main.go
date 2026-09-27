@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
@@ -12,14 +13,28 @@ import (
 
 	"github.com/Neon-Dolls/neondoll/Core/Body"
 	"github.com/Neon-Dolls/neondoll/Core/Config"
+	"github.com/Neon-Dolls/neondoll/Core/DollMind"
 	"github.com/Neon-Dolls/neondoll/Core/Inference"
 	"github.com/Neon-Dolls/neondoll/Core/Interaction"
 	"github.com/Neon-Dolls/neondoll/Core/Persistence"
 	"github.com/Neon-Dolls/neondoll/Core/Pulse"
 	"github.com/Neon-Dolls/neondoll/DollLink/WebSocket"
+	"github.com/Neon-Dolls/neondoll/DollState"
 	"github.com/Neon-Dolls/neondoll/pkg/logger"
 	"github.com/Neon-Dolls/neondoll/pkg/version"
 )
+
+// productionMindAPI wraps the persistence store, inference provider, and a
+// loaded doll state as a dollmind.MindAPI for the production daemon.
+type productionMindAPI struct {
+	state    *dollstate.DollState
+	store    persistence.Store
+	provider inference.Provider
+}
+
+func (m *productionMindAPI) Inference() inference.Provider { return m.provider }
+func (m *productionMindAPI) State() *dollstate.DollState   { return m.state }
+func (m *productionMindAPI) Save() error                   { return m.store.SaveDoll(context.Background(), m.state) }
 
 func main() {
 	log := logger.New(logger.InfoLevel, os.Stdout)
@@ -95,15 +110,66 @@ func main() {
 	defer cancel()
 
 	// Create Pulse runner if enabled in config.
+	// When Pulse is enabled, load (or create) a host doll state and wire
+	// the real Doll Mind Scheduler as the MindEntrance, so spontaneous
+	// Pulse opportunities can actually enter cognition.
 	var pulseRunner *pulse.Runner
 	if cfg.Core.Pulse.Enabled {
-		pulseRunner = pulse.NewRunner(cfg.Core.Pulse, pulse.NewRealClock(), pulse.NewProductionRNG(), log)
+		// Determine which doll Pulse operates on behalf of.
+		dollID := cfg.Core.Profile
+		if dollID == "" {
+			dollID = "default"
+		}
+
+		// Load the host doll from persistence. If it does not exist,
+		// create a minimal initial state and persist it. Any other load
+		// failure (corruption, decoding, I/O) is fatal — never silently
+		// replace an existing Doll.
+		dollState, err := store.LoadDoll(ctx, dollID)
+		switch {
+		case err == nil:
+			// existing doll loaded successfully
+			log.Info("loaded existing doll state", map[string]any{"doll_id": dollID})
+
+		case errors.Is(err, persistence.ErrDollNotFound):
+			log.Info("no existing doll found, creating initial state",
+				map[string]any{"doll_id": dollID})
+			ds := dollstate.NewDollState()
+			ds.Identity = dollstate.Identity{
+				DollID:        dollID,
+				CanonicalName: dollID,
+			}
+			if err := store.SaveDoll(ctx, &ds); err != nil {
+				log.Error("save initial doll state error", map[string]any{"error": err.Error()})
+				os.Exit(1)
+			}
+			dollState = &ds
+			log.Info("initial doll state created", map[string]any{"doll_id": dollID})
+
+		default:
+			log.Error("fatal: failed to load existing doll — refusing to create replacement", map[string]any{
+				"doll_id": dollID,
+				"error":   err.Error(),
+			})
+			os.Exit(1)
+		}
+
+		// Create the MindAPI and Scheduler with the real provider
+		// and persist-backed API.
+		mindAPI := &productionMindAPI{state: dollState, store: store, provider: inferenceProvider}
+
+		// Create the Scheduler with the real provider and persist-backed API.
+		scheduler := dollmind.New(inferenceProvider, log, mindAPI)
+
+		// Wire the Scheduler as Pulse's MindEntrance.
+		pulseRunner = pulse.NewRunner(cfg.Core.Pulse, pulse.NewRealClock(), pulse.NewProductionRNG(), log, scheduler)
 		if err := pulseRunner.Start(ctx); err != nil {
 			log.Error("pulse runner start error", map[string]any{"error": err.Error()})
 			os.Exit(1)
 		}
 		log.Info("pulse runner started", map[string]any{
 			"enabled": cfg.Core.Pulse.Enabled,
+			"doll_id": dollID,
 		})
 	}
 
