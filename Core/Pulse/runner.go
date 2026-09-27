@@ -33,6 +33,11 @@ type Runner struct {
 	stopCh  chan struct{}
 	wg      sync.WaitGroup
 
+	// ctx is the runtime context passed to Start. It is stored for derived
+	// sub-contexts (cognition timeouts) so that Pulse-originated cognition
+	// respects Core shutdown.
+	ctx context.Context
+
 	tickCount       int64
 	lastTickAt      time.Time
 	lastCognitionAt time.Time
@@ -90,6 +95,7 @@ func (r *Runner) Start(ctx context.Context) error {
 	if !r.started.CompareAndSwap(false, true) {
 		return errors.New("pulse runner already started")
 	}
+	r.ctx = ctx
 	r.wg.Add(1)
 	go r.run(ctx)
 	return nil
@@ -299,8 +305,14 @@ func (r *Runner) evaluate() {
 }
 
 // admitPulseWake claims cognition run occupancy and, if successful, enters
-// the Mind via the MindEntrance interface. Occupancy is released on every
-// exit path (success, error, nil mindEntry).
+// the Mind via the MindEntrance interface. Occupancy is released via defer
+// on every path that successfully claims it, regardless of future code
+// structure changes.
+//
+// The cognition context is derived from the runner's stored runtime context
+// (r.ctx, set by Start) so that Pulse-originated cognition respects Core
+// shutdown. If r.ctx is nil (tests that call admitPulseWake directly
+// without Start), fall back to context.Background().
 func (r *Runner) admitPulseWake(now time.Time, opp OpportunitySnapshot) {
 	if !opp.Opportunity {
 		r.log.Debug("pulse wake not admitted: opportunity is false", nil)
@@ -316,6 +328,7 @@ func (r *Runner) admitPulseWake(now time.Time, opp OpportunitySnapshot) {
 		r.log.Debug("pulse spontaneous opportunity skipped: cognition run already active", nil)
 		return
 	}
+	defer r.ReleaseCognitionRun()
 
 	var sample float64
 	if opp.RandomSample != nil {
@@ -332,15 +345,20 @@ func (r *Runner) admitPulseWake(now time.Time, opp OpportunitySnapshot) {
 		RandomSample:      sample,
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	// Derive cognition timeout from the runtime context so that Core
+	// shutdown cancels an in-flight Pulse cognition. Fall back to
+	// context.Background() when r.ctx is nil (direct test invocation).
+	parentCtx := r.ctx
+	if parentCtx == nil {
+		parentCtx = context.Background()
+	}
+	cognCtx, cancel := context.WithTimeout(parentCtx, 30*time.Second)
 	defer cancel()
 
-	err := r.mindEntry.EnterPulseWake(ctx, wake)
+	err := r.mindEntry.EnterPulseWake(cognCtx, wake)
 	if err != nil {
 		r.log.Error("pulse wake cognition failed", map[string]any{"error": err})
 	}
-
-	r.ReleaseCognitionRun()
 }
 
 func (r *Runner) sendTickAck() {
