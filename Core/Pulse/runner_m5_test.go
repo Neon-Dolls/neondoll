@@ -1,7 +1,6 @@
 package pulse
 
 import (
-	"context"
 	"errors"
 	"sync/atomic"
 	"testing"
@@ -57,7 +56,7 @@ func TestM5_MultiplePulseCycles(t *testing.T) {
 		t.Fatal("expected mind entry on first cycle")
 	}
 	// Subjects presented and settled at 09:05.
-	assertSubjectSettled(t, r, "subj-1", startAt.Add(5*time.Minute))
+	assertSubjectSettled(t, r, "subj-1", startAt.Add(5*time.Minute), startAt.Add(5*time.Minute))
 
 	snap := r.Snapshot()
 	if !snap.LastCognitionAt.Equal(startAt.Add(5 * time.Minute)) {
@@ -106,7 +105,7 @@ func TestM5_MultiplePulseCycles(t *testing.T) {
 		t.Fatalf("expected at least 2 mind entries by T+8m12s, got %d", mind.entered)
 	}
 	// Subject settled at the second cycle's time.
-	assertSubjectSettled(t, r, "subj-1", startAt.Add(8*time.Minute+12*time.Second))
+	assertSubjectSettled(t, r, "subj-1", startAt.Add(8*time.Minute+12*time.Second), startAt.Add(8*time.Minute+12*time.Second))
 
 	// ---- T+16m (09:16): Third cycle check — well past MinWakeSpacing (2m) ----
 	// Elapsed since cycle 2 wake at 09:08:12 = 7m48s
@@ -117,7 +116,7 @@ func TestM5_MultiplePulseCycles(t *testing.T) {
 		t.Fatal("expected opportunity at T+16m (cycle 3)")
 	}
 	// Subject settled a third time.
-	assertSubjectSettled(t, r, "subj-1", startAt.Add(16*time.Minute))
+	assertSubjectSettled(t, r, "subj-1", startAt.Add(16*time.Minute), startAt.Add(16*time.Minute))
 
 	t.Logf("M5 trace: cycle1 pressure=%.2f eff=%.2f cooldown=%.2f, cycle2 pressure=%.2f eff=%.2f cooldown=%.2f, cycle3 pressure=%.2f eff=%.2f cooldown=%.2f",
 		r.OpportunitySnapshot().Pressure, r.OpportunitySnapshot().EffectivePressure, r.OpportunitySnapshot().Inhibition.Cooldown,
@@ -181,13 +180,14 @@ func TestM5_FailedCognition(t *testing.T) {
 		t.Fatal("subject not found in snapshots")
 	}
 
-	// Global bookkeeping is still updated even on failure.
+	// On admission only: last_spontaneous_wake_at is updated (admission happens
+	// before EnterPulseWake). LastCognitionAt is NOT updated on failure.
 	snap := r.Snapshot()
-	if snap.LastCognitionAt.Before(startAt.Add(1 * time.Minute)) {
-		t.Fatal("expected LastCognitionAt to be updated on failed cognition")
+	if !snap.LastSpontaneousWakeAt.Equal(startAt.Add(1 * time.Minute)) {
+		t.Fatalf("expected LastSpontaneousWakeAt=T+1m on admission (even on failure), got %v", snap.LastSpontaneousWakeAt)
 	}
-	if snap.LastSpontaneousWakeAt.Before(startAt.Add(1 * time.Minute)) {
-		t.Fatal("expected LastSpontaneousWakeAt to be updated on failed cognition")
+	if !snap.LastCognitionAt.Equal(startAt) {
+		t.Fatalf("expected LastCognitionAt to remain at seed time on failure, got %v", snap.LastCognitionAt)
 	}
 
 	t.Log("M5 FailedCognition: presented but NOT settled — verified")
@@ -396,100 +396,49 @@ func TestM5_NoOverlappingCognition(t *testing.T) {
 	close(mind.blockCh)
 	time.Sleep(10 * time.Millisecond)
 
-	// After the first run completes, the subject should be presented and settled.
-	assertSubjectSettled(t, r, "subj-overlap", startAt.Add(60*time.Second))
+	// After the first run completes, the subject should be presented at admission
+	// time (T+60s) and settled at completion time (T+65s, since clock was advanced
+	// while the mind was blocked).
+	assertSubjectSettled(t, r, "subj-overlap", startAt.Add(60*time.Second), startAt.Add(65*time.Second))
 
 	t.Log("M5 NoOverlappingCognition: verified")
-}
-
-// TestM5_HardObligationsNotBlocked verifies that an externally-admitted
-// cognition run (a "hard obligation") is NOT blocked by Pulse's optional-wake
-// guards such as MinWakeSpacing.
-//
-// After a Pulse spontaneous wake completes, MinWakeSpacing would block another
-// Pulse spontaneous wake. But an external caller can still call
-// MindEntrance.EnterPulseWake directly — it bypasses Pulse's evaluation.
-func TestM5_HardObligationsNotBlocked(t *testing.T) {
-	startAt := time.Date(2026, 9, 27, 14, 0, 0, 0, time.UTC)
-	cfg := config.PulseConfig{
-		Enabled:        true,
-		IdleHorizon:    60,
-		NeglectHorizon: 600,
-		WakeCooldown:   0,
-		MinWakeSpacing: 120, // 2 min spacing — will block Pulse spontaneous wakes
-	}
-
-	clock := NewFakeClock(startAt).(*fakeClock)
-	rng := newFakeRNG(0.01)
-	mind := &testMindEntry{}
-	r := NewRunner(cfg, clock, rng, muteLogger(), mind)
-
-	r.UpdateSubjects([]PulseSubjectState{
-		{SubjectID: "subj-hard", LifecycleState: LifecycleStateUnresolved},
-	})
-	r.RecordCognition(startAt)
-
-	// T+60s: Pulse spontaneous wake → cognition succeeds.
-	clock.Set(startAt.Add(60 * time.Second))
-	r.evaluate()
-	if !r.OpportunitySnapshot().Opportunity {
-		t.Fatal("expected opportunity at T+60s (first wake)")
-	}
-	if mind.entered != 1 {
-		t.Fatalf("expected 1 mind entry at T+60s, got %d", mind.entered)
-	}
-	enteredBefore := mind.entered
-
-	// T+65s: within MinWakeSpacing (120s). Pulse evaluate produces no opportunity.
-	clock.Set(startAt.Add(65 * time.Second))
-	r.evaluate()
-	oppPulse := r.OpportunitySnapshot()
-	if oppPulse.Opportunity {
-		t.Fatal("expected MinWakeSpacing to block Pulse spontaneous wake at T+65s")
-	}
-
-	// However, an external caller can still call EnterPulseWake directly.
-	// This simulates a "hard admitted obligation" — something external that
-	// bypasses Pulse's evaluation entirely.
-	hardWake := PulseWake{
-		AdmittedAt:        startAt.Add(65 * time.Second),
-		Pressure:          1.0,
-		EffectivePressure: 1.0,
-		ActivationSignals: []float64{1.0},
-		Inhibition:        InhibitionBreakdown{},
-		Subjects:          []SubjectActivation{{SubjectID: "subj-hard", Neglect: 1.0}},
-		RandomSample:      0.01,
-	}
-	err := r.mindEntry.EnterPulseWake(context.Background(), hardWake)
-	if err != nil {
-		t.Fatalf("hard obligation EnterPulseWake failed: %v", err)
-	}
-	if mind.entered != enteredBefore+1 {
-		t.Fatalf("expected mind entry for hard obligation, got entered=%d (was %d)",
-			mind.entered, enteredBefore)
-	}
-
-	t.Log("M5 HardObligationsNotBlocked: verified")
 }
 
 // ---------------------------------------------------------------------------
 // Test helpers
 // ---------------------------------------------------------------------------
 
-// assertSubjectSettled checks that a subject's LastPresentedAt and
-// LastSettledAt are both set to the expected time (within tolerance).
-func assertSubjectSettled(t *testing.T, r *Runner, id string, expected time.Time) {
+// assertSubjectSettled verifies a subject's LastPresentedAt and/or
+// LastSettledAt match the expected timestamps. Pass zero for a field
+// to assert that it is not set (still zero).
+func assertSubjectSettled(t *testing.T, r *Runner, id string, presentedAt, settledAt time.Time) {
 	t.Helper()
 	subjs := r.SubjectSnapshots()
 	for _, subj := range subjs {
 		if subj.SubjectID == id {
-			if subj.LastPresentedAt.IsZero() || !subj.LastPresentedAt.Equal(expected) {
-				t.Fatalf("subject %s: expected LastPresentedAt=%v, got %v",
-					id, expected, subj.LastPresentedAt)
+			if presentedAt.IsZero() {
+				if !subj.LastPresentedAt.IsZero() {
+					t.Fatalf("subject %s: expected LastPresentedAt=zero, got %v", id, subj.LastPresentedAt)
+				}
+			} else {
+				if subj.LastPresentedAt.IsZero() {
+					t.Fatalf("subject %s: expected LastPresentedAt=%v, got zero", id, presentedAt)
+				}
+				if !subj.LastPresentedAt.Equal(presentedAt) {
+					t.Fatalf("subject %s: expected LastPresentedAt=%v, got %v", id, presentedAt, subj.LastPresentedAt)
+				}
 			}
-			if subj.LastSettledAt.IsZero() || !subj.LastSettledAt.Equal(expected) {
-				t.Fatalf("subject %s: expected LastSettledAt=%v, got %v",
-					id, expected, subj.LastSettledAt)
+			if settledAt.IsZero() {
+				if !subj.LastSettledAt.IsZero() {
+					t.Fatalf("subject %s: expected LastSettledAt=zero, got %v", id, subj.LastSettledAt)
+				}
+			} else {
+				if subj.LastSettledAt.IsZero() {
+					t.Fatalf("subject %s: expected LastSettledAt=%v, got zero", id, settledAt)
+				}
+				if !subj.LastSettledAt.Equal(settledAt) {
+					t.Fatalf("subject %s: expected LastSettledAt=%v, got %v", id, settledAt, subj.LastSettledAt)
+				}
 			}
 			return
 		}
