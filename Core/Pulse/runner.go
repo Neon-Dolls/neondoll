@@ -38,9 +38,10 @@ type Runner struct {
 	// respects Core shutdown.
 	ctx context.Context
 
-	tickCount       int64
-	lastTickAt      time.Time
-	lastCognitionAt time.Time
+	tickCount             int64
+	lastTickAt            time.Time
+	lastCognitionAt       time.Time
+	lastSpontaneousWakeAt time.Time
 
 	// Subjects observed by Pulse. Core calls UpdateSubjects to push changes;
 	// evaluate() reads the latest snapshot under the lock.
@@ -141,9 +142,41 @@ func (r *Runner) Snapshot() PulseSnapshot {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return PulseSnapshot{
-		TickCount:       r.tickCount,
-		LastTickAt:      r.lastTickAt,
-		LastCognitionAt: r.lastCognitionAt,
+		TickCount:             r.tickCount,
+		LastTickAt:            r.lastTickAt,
+		LastCognitionAt:       r.lastCognitionAt,
+		LastSpontaneousWakeAt: r.lastSpontaneousWakeAt,
+	}
+}
+
+// SubjectSnapshots returns a race-safe copy of the subject states currently
+// held by the runner. Tests use this to verify that MarkPresented and
+// MarkSettled updated the expected subjects after a cognition run.
+func (r *Runner) SubjectSnapshots() []PulseSubjectState {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]PulseSubjectState, len(r.subjects))
+	copy(out, r.subjects)
+	return out
+}
+
+// RecordCognitionEnded records that a cognition run completed (or was
+// abandoned), updating both last_cognition_at and last_spontaneous_wake_at.
+// Only forward-time updates are accepted; zero and stale times are ignored.
+// This is separate from subject-level settling: a failed cognition still
+// advances the global bookkeeping so that idle/neglect signals are
+// evaluated from the last actual attempt, not from a stale earlier time.
+func (r *Runner) RecordCognitionEnded(at time.Time) {
+	if at.IsZero() {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if at.After(r.lastCognitionAt) {
+		r.lastCognitionAt = at
+	}
+	if at.After(r.lastSpontaneousWakeAt) {
+		r.lastSpontaneousWakeAt = at
 	}
 }
 
@@ -301,9 +334,10 @@ func (r *Runner) evaluate() {
 	inhibition := InhibitionInputs{Budget: r.currentBudget}
 
 	sigPulseState := PulseSnapshot{
-		TickCount:       r.tickCount,
-		LastTickAt:      r.lastTickAt,
-		LastCognitionAt: r.lastCognitionAt,
+		TickCount:             r.tickCount,
+		LastTickAt:            r.lastTickAt,
+		LastCognitionAt:       r.lastCognitionAt,
+		LastSpontaneousWakeAt: r.lastSpontaneousWakeAt,
 	}
 
 	sigSnap := EvaluateSignals(now, r.cfg, sigPulseState, subjects, inhibition)
@@ -376,6 +410,43 @@ func (r *Runner) admitPulseWake(now time.Time, opp OpportunitySnapshot) {
 	defer cancel()
 
 	err := r.mindEntry.EnterPulseWake(cognCtx, wake)
+
+	// === Settling: record what happened after cognition completes ===
+	//
+	// Update subject timestamps for any subjects involved in this wake.
+	// On success (err == nil): mark as presented AND settled.
+	// On failure/abort: mark as presented only — no successful settling
+	// recorded, so neglect signals can still reflect the unresolved subject.
+	//
+	// Also advance global bookkeeping (lastCognitionAt,
+	// lastSpontaneousWakeAt) on every attempted wake so that idle/neglect
+	// signals are evaluated from the latest attempt rather than a stale
+	// earlier timestamp.
+	//
+	// The settle step runs under the Pulse state mutex while cognition run
+	// occupancy is still held (the defer ReleaseCognitionRun fires after
+	// this function returns). This is safe and intentional: settling is
+	// a fast local operation on cached subject state, not a Mind entry.
+	r.mu.Lock()
+	for _, sa := range wake.Subjects {
+		for i := range r.subjects {
+			if r.subjects[i].SubjectID == sa.SubjectID {
+				r.subjects[i].MarkPresented(now)
+				if err == nil {
+					r.subjects[i].MarkSettled(now)
+				}
+				break
+			}
+		}
+	}
+	if now.After(r.lastCognitionAt) {
+		r.lastCognitionAt = now
+	}
+	if now.After(r.lastSpontaneousWakeAt) {
+		r.lastSpontaneousWakeAt = now
+	}
+	r.mu.Unlock()
+
 	if err != nil {
 		r.log.Error("pulse wake cognition failed", map[string]any{"error": err})
 	}
