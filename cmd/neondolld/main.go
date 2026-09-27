@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
@@ -121,11 +122,18 @@ func main() {
 		}
 
 		// Load the host doll from persistence. If it does not exist,
-		// create a minimal initial state and persist it.
+		// create a minimal initial state and persist it. Any other load
+		// failure (corruption, decoding, I/O) is fatal — never silently
+		// replace an existing Doll.
 		dollState, err := store.LoadDoll(ctx, dollID)
-		if err != nil {
-			log.Info("creating initial doll state",
-				map[string]any{"doll_id": dollID, "reason": err.Error()})
+		switch {
+		case err == nil:
+			// existing doll loaded successfully
+			log.Info("loaded existing doll state", map[string]any{"doll_id": dollID})
+
+		case errors.Is(err, persistence.ErrDollNotFound):
+			log.Info("no existing doll found, creating initial state",
+				map[string]any{"doll_id": dollID})
 			ds := dollstate.NewDollState()
 			ds.Identity = dollstate.Identity{
 				DollID:        dollID,
@@ -137,6 +145,13 @@ func main() {
 			}
 			dollState = &ds
 			log.Info("initial doll state created", map[string]any{"doll_id": dollID})
+
+		default:
+			log.Error("fatal: failed to load existing doll — refusing to create replacement", map[string]any{
+				"doll_id": dollID,
+				"error":   err.Error(),
+			})
+			os.Exit(1)
 		}
 
 		// Create the MindAPI and Scheduler with the real provider

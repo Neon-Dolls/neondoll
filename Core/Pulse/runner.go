@@ -81,6 +81,26 @@ func NewRunner(cfg config.PulseConfig, clock Clock, rng RNG, log *logger.Logger,
 	}
 }
 
+// NewTestRunner creates a Runner with deterministic test channels for
+// tick-driven testing from external packages. Tests send on tickCh to
+// trigger evaluate() calls and receive on ackCh to synchronize with
+// evaluation completion.
+//
+// Internal tests (package pulse) set tickTestCh/tickAckCh directly;
+// external tests (package pulse_test) should use this constructor.
+func NewTestRunner(cfg config.PulseConfig, clock Clock, rng RNG, log *logger.Logger, mindEntry MindEntrance, tickCh chan time.Time, ackCh chan struct{}) *Runner {
+	return &Runner{
+		cfg:        cfg,
+		clock:      clock,
+		rng:        rng,
+		log:        log,
+		stopCh:     make(chan struct{}),
+		mindEntry:  mindEntry,
+		tickTestCh: tickCh,
+		tickAckCh:  ackCh,
+	}
+}
+
 // SetMindEntrance sets or replaces the MindEntrance for spontaneous cognition
 // admission. Safe to call before Start or between ticks.
 func (r *Runner) SetMindEntrance(entry MindEntrance) {
