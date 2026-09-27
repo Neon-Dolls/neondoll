@@ -129,7 +129,7 @@ func TestM4_AdmitWake_Success(t *testing.T) {
 		t.Fatal("test setup: expected opportunity to be true")
 	}
 
-	r.admitPulseWake(now, opp)
+	_ = r.admitPulseWake(now, opp)
 
 	if mind.Entered() != 1 {
 		t.Fatalf("expected Mind entered 1 time, got %d", mind.Entered())
@@ -165,7 +165,7 @@ func TestM4_AdmitWake_OccupancySkipped(t *testing.T) {
 	r.TryClaimCognitionRun()
 
 	// Even with a passing opportunity, admission is skipped
-	r.admitPulseWake(now, OpportunitySnapshot{
+	_ = r.admitPulseWake(now, OpportunitySnapshot{
 		Opportunity:       true,
 		Pressure:          0.5,
 		EffectivePressure: 0.4,
@@ -185,7 +185,7 @@ func TestM4_AdmitWake_NilMindEntry(t *testing.T) {
 	r := &Runner{log: muteLogger()}
 	now := time.Date(2026, 9, 27, 12, 0, 0, 0, time.UTC)
 
-	r.admitPulseWake(now, OpportunitySnapshot{Opportunity: true})
+	_ = r.admitPulseWake(now, OpportunitySnapshot{Opportunity: true})
 
 	if r.CognitionRunActive() {
 		t.Error("expected cognition run inactive after nil mindEntry admit")
@@ -200,7 +200,7 @@ func TestM4_AdmitWake_Failure(t *testing.T) {
 	now := time.Date(2026, 9, 27, 12, 0, 0, 0, time.UTC)
 	r.mindEntry = mind
 
-	r.admitPulseWake(now, OpportunitySnapshot{
+	_ = r.admitPulseWake(now, OpportunitySnapshot{
 		Opportunity:       true,
 		Pressure:          0.5,
 		EffectivePressure: 0.4,
@@ -320,7 +320,7 @@ func TestM4_WakeEvidenceStructure(t *testing.T) {
 
 	mind := &testMindEntry{}
 	r := &Runner{log: muteLogger(), clock: NewFakeClock(now), mindEntry: mind}
-	r.admitPulseWake(now, opp)
+	_ = r.admitPulseWake(now, opp)
 
 	wake := mind.LastWake()
 	if wake == nil {
@@ -359,7 +359,7 @@ func TestM4_NoExternalEvent(t *testing.T) {
 		MinWakeSpacing: 60,
 	}, false, rng)
 
-	r.admitPulseWake(now, opp)
+	_ = r.admitPulseWake(now, opp)
 
 	wake := mind.LastWake()
 	if wake == nil {
@@ -380,7 +380,7 @@ func TestM4_FalseOpportunityNeverReachesMind(t *testing.T) {
 	now := time.Date(2026, 9, 27, 12, 0, 0, 0, time.UTC)
 
 	// A non-opportunity should not trigger admission
-	r.admitPulseWake(now, OpportunitySnapshot{Opportunity: false})
+	_ = r.admitPulseWake(now, OpportunitySnapshot{Opportunity: false})
 
 	if mind.Entered() != 0 {
 		t.Fatal("expected Mind not entered for false opportunity")

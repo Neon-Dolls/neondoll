@@ -163,6 +163,63 @@ func main() {
 
 		// Wire the Scheduler as Pulse's MindEntrance.
 		pulseRunner = pulse.NewRunner(cfg.Core.Pulse, pulse.NewRealClock(), pulse.NewProductionRNG(), log, scheduler)
+
+		// ── Register semantic subjects from the doll's identity ──────
+		// Pulse observes changes to core identity and soul content to
+		// detect when a doll has been "neglected" or has "changed"
+		// since the last presentation. These are the canonical subjects;
+		// additional subjects may be registered later by Core.
+		subjects := []pulse.PulseSubjectState{
+			{SubjectID: "persona", ChangesSincePresent: 0},
+			{SubjectID: "soul", ChangesSincePresent: 0},
+		}
+		pulseRunner.UpdateSubjects(subjects)
+
+		cpStore := store.(persistence.CheckpointStore)
+
+		// Load the checkpoint BEFORE creating the runner so we can
+		// decide first-run vs corrupt before constructing anything.
+		cpData, cpLoadErr := cpStore.LoadPulseCheckpoint(ctx, dollID)
+		switch {
+		case cpLoadErr == nil:
+			// Checkpoint loaded — deserialize and restore.
+			cp, cpErr := pulse.UnmarshalCheckpoint(cpData)
+			if cpErr != nil {
+				log.Error("fatal: pulse checkpoint corrupt — refusing to start", map[string]any{
+					"doll_id": dollID,
+					"error":   cpErr.Error(),
+				})
+				os.Exit(1)
+			}
+			pulseRunner.RestoreFromCheckpoint(cp)
+			log.Info("pulse checkpoint restored", map[string]any{"doll_id": dollID})
+
+		case errors.Is(cpLoadErr, persistence.ErrPulseCheckpointNotFound):
+			// Normal first-run — no checkpoint to restore.
+			log.Info("no pulse checkpoint found, starting fresh", map[string]any{"doll_id": dollID})
+
+		default:
+			log.Error("fatal: failed to load pulse checkpoint", map[string]any{
+				"doll_id": dollID,
+				"error":   cpLoadErr.Error(),
+			})
+			os.Exit(1)
+		}
+
+		// ── Wire durable checkpoint writer ───────────────────────────
+		// After every wake admission and cognition settlement, the Runner
+		// invokes this writer to persist bookkeeping. Errors are surfaced
+		// by the Runner: admission checkpoint failures are logged,
+		// settlement checkpoint failures are returned from the lifecycle.
+		pulseRunner.CheckpointWriter = func(cp pulse.PulseCheckpoint) error {
+			cp.DollID = dollID
+			data, err := pulse.MarshalCheckpoint(cp)
+			if err != nil {
+				return fmt.Errorf("marshal checkpoint: %w", err)
+			}
+			return cpStore.SavePulseCheckpoint(ctx, dollID, data)
+		}
+
 		if err := pulseRunner.Start(ctx); err != nil {
 			log.Error("pulse runner start error", map[string]any{"error": err.Error()})
 			os.Exit(1)
