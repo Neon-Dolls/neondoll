@@ -38,9 +38,10 @@ type Runner struct {
 	// respects Core shutdown.
 	ctx context.Context
 
-	tickCount       int64
-	lastTickAt      time.Time
-	lastCognitionAt time.Time
+	tickCount             int64
+	lastTickAt            time.Time
+	lastCognitionAt       time.Time
+	lastSpontaneousWakeAt time.Time
 
 	// Subjects observed by Pulse. Core calls UpdateSubjects to push changes;
 	// evaluate() reads the latest snapshot under the lock.
@@ -141,10 +142,22 @@ func (r *Runner) Snapshot() PulseSnapshot {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return PulseSnapshot{
-		TickCount:       r.tickCount,
-		LastTickAt:      r.lastTickAt,
-		LastCognitionAt: r.lastCognitionAt,
+		TickCount:             r.tickCount,
+		LastTickAt:            r.lastTickAt,
+		LastCognitionAt:       r.lastCognitionAt,
+		LastSpontaneousWakeAt: r.lastSpontaneousWakeAt,
 	}
+}
+
+// SubjectSnapshots returns a race-safe copy of the subject states currently
+// held by the runner. Tests use this to verify that MarkPresented and
+// MarkSettled updated the expected subjects after a cognition run.
+func (r *Runner) SubjectSnapshots() []PulseSubjectState {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]PulseSubjectState, len(r.subjects))
+	copy(out, r.subjects)
+	return out
 }
 
 // SignalSnapshot returns a race-safe read of the runner's most recently
@@ -301,9 +314,10 @@ func (r *Runner) evaluate() {
 	inhibition := InhibitionInputs{Budget: r.currentBudget}
 
 	sigPulseState := PulseSnapshot{
-		TickCount:       r.tickCount,
-		LastTickAt:      r.lastTickAt,
-		LastCognitionAt: r.lastCognitionAt,
+		TickCount:             r.tickCount,
+		LastTickAt:            r.lastTickAt,
+		LastCognitionAt:       r.lastCognitionAt,
+		LastSpontaneousWakeAt: r.lastSpontaneousWakeAt,
 	}
 
 	sigSnap := EvaluateSignals(now, r.cfg, sigPulseState, subjects, inhibition)
@@ -333,6 +347,20 @@ func (r *Runner) evaluate() {
 // (r.ctx, set by Start) so that Pulse-originated cognition respects Core
 // shutdown. If r.ctx is nil (tests that call admitPulseWake directly
 // without Start), fall back to context.Background().
+//
+// Lifecycle semantics:
+//
+//	ADMISSION (before EnterPulseWake):
+//	  - wake subjects marked as presented (admission time)
+//	  - last_spontaneous_wake_at updated to admission time
+//	COGNITION (blocking):
+//	  - EnterPulseWake runs the model cognition
+//	SETTLING (on success only):
+//	  - wake subjects marked as settled (completion time)
+//	  - last_cognition_at updated to completion time
+//	FAILURE (error or cancel):
+//	  - presentation from admission remains
+//	  - last_settled_at and last_cognition_at are NOT updated
 func (r *Runner) admitPulseWake(now time.Time, opp OpportunitySnapshot) {
 	if !opp.Opportunity {
 		r.log.Debug("pulse wake not admitted: opportunity is false", nil)
@@ -365,6 +393,23 @@ func (r *Runner) admitPulseWake(now time.Time, opp OpportunitySnapshot) {
 		RandomSample:      sample,
 	}
 
+	// === ADMISSION: mark subjects presented + set lastSpontaneousWakeAt ===
+	// This runs before EnterPulseWake so that the presentation timestamp
+	// reflects the admission time, not the (unknown) completion time.
+	r.mu.Lock()
+	for _, sa := range wake.Subjects {
+		for i := range r.subjects {
+			if r.subjects[i].SubjectID == sa.SubjectID {
+				r.subjects[i].MarkPresented(now)
+				break
+			}
+		}
+	}
+	if now.After(r.lastSpontaneousWakeAt) {
+		r.lastSpontaneousWakeAt = now
+	}
+	r.mu.Unlock()
+
 	// Derive cognition timeout from the runtime context so that Core
 	// shutdown cancels an in-flight Pulse cognition. Fall back to
 	// context.Background() when r.ctx is nil (direct test invocation).
@@ -376,6 +421,30 @@ func (r *Runner) admitPulseWake(now time.Time, opp OpportunitySnapshot) {
 	defer cancel()
 
 	err := r.mindEntry.EnterPulseWake(cognCtx, wake)
+
+	// === SETTLING: on success only ===
+	// Mark subjects settled and update last_cognition_at using the actual
+	// completion time (clock.Now()), which differs from the admission time
+	// when cognition blocks or takes time.
+	// On error/cancellation: presentation from admission remains, but
+	// last_settled_at and last_cognition_at are NOT updated.
+	if err == nil {
+		completionTime := r.clock.Now()
+		r.mu.Lock()
+		for _, sa := range wake.Subjects {
+			for i := range r.subjects {
+				if r.subjects[i].SubjectID == sa.SubjectID {
+					r.subjects[i].MarkSettled(completionTime)
+					break
+				}
+			}
+		}
+		if completionTime.After(r.lastCognitionAt) {
+			r.lastCognitionAt = completionTime
+		}
+		r.mu.Unlock()
+	}
+
 	if err != nil {
 		r.log.Error("pulse wake cognition failed", map[string]any{"error": err})
 	}

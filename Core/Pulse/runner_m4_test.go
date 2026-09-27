@@ -108,8 +108,8 @@ func TestM4_OccupancyRace(t *testing.T) {
 // admission constructs evidence, enters Mind, releases occupancy.
 func TestM4_AdmitWake_Success(t *testing.T) {
 	mind := &testMindEntry{}
-	r := &Runner{log: muteLogger()}
 	now := time.Date(2026, 9, 27, 12, 0, 0, 0, time.UTC)
+	r := &Runner{log: muteLogger(), clock: NewFakeClock(now)}
 	r.mindEntry = mind
 
 	sample := 0.05
@@ -319,7 +319,7 @@ func TestM4_WakeEvidenceStructure(t *testing.T) {
 	}
 
 	mind := &testMindEntry{}
-	r := &Runner{log: muteLogger(), mindEntry: mind}
+	r := &Runner{log: muteLogger(), clock: NewFakeClock(now), mindEntry: mind}
 	r.admitPulseWake(now, opp)
 
 	wake := mind.LastWake()
@@ -344,8 +344,8 @@ func TestM4_NoExternalEvent(t *testing.T) {
 	// This is proven by the FormatWakeEvidence function in dollmind package,
 	// but we verify the PulseWake struct carries no event/intention fields.
 	mind := &testMindEntry{}
-	r := &Runner{log: muteLogger(), mindEntry: mind}
 	now := time.Date(2026, 9, 27, 12, 0, 0, 0, time.UTC)
+	r := &Runner{log: muteLogger(), clock: NewFakeClock(now), mindEntry: mind}
 	rng := newFakeRNG(0.03)
 
 	opp := EvaluateOpportunity(now, SignalSnapshot{

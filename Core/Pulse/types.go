@@ -42,6 +42,36 @@ type PulseSubjectState struct {
 	LifecycleState      string    `json:"lifecycle_state"`
 }
 
+// MarkPresented sets last_presented_at to at if at is strictly after the
+// current value (forward-time update only). No-op when at is zero.
+// This method is used by the Pulse runner when the admitted Cognition Run
+// is presented to Mind, recording that the subject's current state was
+// offered for processing.
+func (s *PulseSubjectState) MarkPresented(at time.Time) {
+	if at.IsZero() {
+		return
+	}
+	if at.After(s.LastPresentedAt) {
+		s.LastPresentedAt = at
+	}
+}
+
+// MarkSettled sets last_settled_at to at if at is strictly after the current
+// value (forward-time update only). No-op when at is zero.
+// This method is used by the Pulse runner after a cognition run completes
+// successfully, recording that the subject's state was fully processed.
+// Failed or aborted cognition MUST NOT call MarkSettled — call
+// MarkPresented alone so that neglect signals reflect the presentation
+// without a successful settling.
+func (s *PulseSubjectState) MarkSettled(at time.Time) {
+	if at.IsZero() {
+		return
+	}
+	if at.After(s.LastSettledAt) {
+		s.LastSettledAt = at
+	}
+}
+
 // InhibitionInputs is the narrow input seam through which Core supplies
 // inhibition values. Pulse does not invent, calculate, or budget-manage
 // these — it only reads them. Budget must be in [0, 1]; values outside
