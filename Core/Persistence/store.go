@@ -150,6 +150,19 @@ func createSchema(db *sql.DB) error {
 			}
 		}
 	}
+
+	// M6: Pulse checkpoint table — Core-local runtime bookkeeping, NOT doll identity.
+	_, err := db.Exec(`
+		CREATE TABLE IF NOT EXISTS pulse_checkpoints (
+			doll_id         TEXT PRIMARY KEY,
+			checkpoint_json TEXT NOT NULL,
+			updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
+		);
+	`)
+	if err != nil {
+		return fmt.Errorf("pulse_checkpoints table: %v", err)
+	}
+
 	return nil
 }
 
