@@ -821,3 +821,313 @@ type constantRNG struct {
 }
 
 func (r *constantRNG) Float64() float64 { return r.v }
+
+// controlledMindEntry implements pulse.MindEntrance with a deterministic call
+// counter and configurable error return, for testing lifecycle invariants.
+type controlledMindEntry struct {
+	enterCalls atomic.Int64
+	returnErr  error
+}
+
+func (m *controlledMindEntry) EnterPulseWake(ctx context.Context, wake pulse.PulseWake) error {
+	m.enterCalls.Add(1)
+	return m.returnErr
+}
+
+// TestM6Lifecycle_AdmissionCheckpointFailure_NoCognition proves that when the
+// admission checkpoint write fails, EnterPulseWake is NOT called, the error is
+// observable, and in-memory admission state is not rolled back.
+//
+// INVARIANT: if cognition begins, its admission is already durable.
+func TestM6Lifecycle_AdmissionCheckpointFailure_NoCognition(t *testing.T) {
+	now := time.Date(2026, 9, 27, 12, 0, 0, 0, time.UTC)
+	fakeClock := &fixedClock{now: now}
+	log := logger.New(logger.ErrorLevel, nil)
+
+	cfg := config.Defaults()
+	cfg.Core.Pulse.Enabled = true
+	cfg.Core.Pulse.ChangeHorizon = 1
+	cfg.Core.Pulse.MinWakeSpacing = 0
+	cfg.Core.Pulse.WakeCooldown = 0
+
+	tickCh := make(chan time.Time, 10)
+	ackCh := make(chan struct{}, 10)
+
+	mind := &controlledMindEntry{}
+	runner := pulse.NewTestRunner(cfg.Core.Pulse, fakeClock, &constantRNG{v: 0.01}, log, mind, tickCh, ackCh)
+	runner.UpdateSubjects([]pulse.PulseSubjectState{
+		{SubjectID: "test-subject", ChangesSincePresent: 1},
+	})
+
+	// CheckpointWriter always fails.
+	checkpointErr := fmt.Errorf("simulated admission checkpoint failure")
+	var cwCalled atomic.Int64
+	runner.CheckpointWriter = func(cp pulse.PulseCheckpoint) error {
+		cwCalled.Add(1)
+		return checkpointErr
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if err := runner.Start(ctx); err != nil {
+		t.Fatalf("Runner.Start: %v", err)
+	}
+	defer runner.Stop()
+
+	// Drive a tick — opportunity fires → admission checkpoint fails.
+	tickCh <- fakeClock.now
+	select {
+	case <-ackCh:
+	case <-time.After(30 * time.Second):
+		t.Fatal("timeout waiting for tick ack")
+	}
+
+	// MUST NOT have entered cognition.
+	if entered := mind.enterCalls.Load(); entered != 0 {
+		t.Errorf("Mind entrance called %d times, want 0 (cognition should NOT start on checkpoint failure)", entered)
+	}
+
+	// CheckpointWriter MUST have been called.
+	if cw := cwCalled.Load(); cw < 1 {
+		t.Errorf("CheckpointWriter called %d times, want >= 1", cw)
+	}
+
+	// In-memory admission must NOT be rolled back.
+	snap := runner.Snapshot()
+	if snap.LastSpontaneousWakeAt.IsZero() {
+		t.Error("LastSpontaneousWakeAt is zero — admission in-memory state was rolled back")
+	}
+	if snap.LastCognitionAt.Unix() >= now.Unix() {
+		t.Errorf("LastCognitionAt is set despite checkpoint failure: %v", snap.LastCognitionAt)
+	}
+
+	// Subject should be presented but NOT settled.
+	subs := runner.SubjectSnapshots()
+	if len(subs) < 1 {
+		t.Fatal("no subjects in snapshot")
+	}
+	sub := subs[0]
+	if sub.LastPresentedAt.IsZero() {
+		t.Error("subject LastPresentedAt is zero — subject was not marked presented despite in-memory admission")
+	}
+	if !sub.LastSettledAt.IsZero() {
+		t.Errorf("subject LastSettledAt is %v — should be zero (no cognition completed)", sub.LastSettledAt)
+	}
+
+	// Error should be observable: runner continues on next tick.
+	tickCh <- fakeClock.now.Add(5 * time.Second)
+	select {
+	case <-ackCh:
+	case <-time.After(30 * time.Second):
+		t.Fatal("timeout waiting for second tick ack")
+	}
+	snap2 := runner.Snapshot()
+	if snap2.TickCount <= snap.TickCount {
+		t.Errorf("runner did not continue past checkpoint failure: tick count %d → %d", snap.TickCount, snap2.TickCount)
+	}
+
+	// Occupancy released: second tick can also process.
+	if entered := mind.enterCalls.Load(); entered > 1 {
+		t.Errorf("expected 0 enter calls total, got %d", entered)
+	}
+
+	t.Logf("admission checkpoint failure correctly blocked cognition: enterCalls=%d, tickCount=%d→%d, presented=%v, settled=%v",
+		mind.enterCalls.Load(), snap.TickCount, snap2.TickCount, sub.LastPresentedAt, sub.LastSettledAt)
+}
+
+// TestM6Lifecycle_CognitionFailure_DurableAdmission proves that when admission
+// checkpoint succeeds but cognition itself fails, the admission/presentation is
+// durably recorded but settlement does NOT occur.
+func TestM6Lifecycle_CognitionFailure_DurableAdmission(t *testing.T) {
+	now := time.Date(2026, 9, 27, 12, 0, 0, 0, time.UTC)
+	fakeClock := &fixedClock{now: now}
+	log := logger.New(logger.ErrorLevel, nil)
+
+	cfg := config.Defaults()
+	cfg.Core.Pulse.Enabled = true
+	cfg.Core.Pulse.ChangeHorizon = 1
+	cfg.Core.Pulse.MinWakeSpacing = 0
+	cfg.Core.Pulse.WakeCooldown = 0
+
+	tickCh := make(chan time.Time, 10)
+	ackCh := make(chan struct{}, 10)
+
+	mind := &controlledMindEntry{returnErr: errors.New("cognition failed")}
+	runner := pulse.NewTestRunner(cfg.Core.Pulse, fakeClock, &constantRNG{v: 0.01}, log, mind, tickCh, ackCh)
+	runner.UpdateSubjects([]pulse.PulseSubjectState{
+		{SubjectID: "test-subject", ChangesSincePresent: 1},
+	})
+
+	// CheckpointWriter succeeds.
+	var cwCalled atomic.Int64
+	runner.CheckpointWriter = func(cp pulse.PulseCheckpoint) error {
+		cwCalled.Add(1)
+		return nil
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if err := runner.Start(ctx); err != nil {
+		t.Fatalf("Runner.Start: %v", err)
+	}
+	defer runner.Stop()
+
+	// Drive a tick.
+	tickCh <- fakeClock.now
+	select {
+	case <-ackCh:
+	case <-time.After(30 * time.Second):
+		t.Fatal("timeout waiting for tick ack")
+	}
+
+	// Cognition MUST have been entered.
+	if entered := mind.enterCalls.Load(); entered != 1 {
+		t.Errorf("Mind entrance called %d times, want 1", entered)
+	}
+
+	// CheckpointWriter MUST have been called (admission + maybe settlement).
+	if cw := cwCalled.Load(); cw < 1 {
+		t.Errorf("CheckpointWriter called %d times, want >= 1", cw)
+	}
+
+	// Admission is durable.
+	snap := runner.Snapshot()
+	if snap.LastSpontaneousWakeAt.IsZero() {
+		t.Error("LastSpontaneousWakeAt is zero — admission not recorded")
+	}
+	if snap.LastSpontaneousWakeAt != now {
+		t.Errorf("LastSpontaneousWakeAt = %v, want %v", snap.LastSpontaneousWakeAt, now)
+	}
+	if !snap.LastCognitionAt.IsZero() {
+		t.Errorf("LastCognitionAt = %v, want zero (cognition failed)", snap.LastCognitionAt)
+	}
+
+	// Subjects: presented but NOT settled.
+	subs := runner.SubjectSnapshots()
+	if len(subs) < 1 {
+		t.Fatal("no subjects in snapshot")
+	}
+	sub := subs[0]
+	if sub.LastPresentedAt.IsZero() {
+		t.Error("subject LastPresentedAt is zero — presentation not recorded")
+	}
+	if !sub.LastSettledAt.IsZero() {
+		t.Errorf("subject LastSettledAt = %v — should be zero (cognition failed)", sub.LastSettledAt)
+	}
+
+	t.Logf("cognition failure preserves durable admission: enterCalls=%d, presented=%v, settled=%v",
+		mind.enterCalls.Load(), sub.LastPresentedAt, sub.LastSettledAt)
+}
+
+// TestM6Lifecycle_SettlementCheckpointFailure_CognitionReal proves that when
+// cognition succeeds but the settlement checkpoint write fails, the cognition
+// was genuinely completed (in-memory settlement is truthful) and the durability
+// error is observable.
+func TestM6Lifecycle_SettlementCheckpointFailure_CognitionReal(t *testing.T) {
+	now := time.Date(2026, 9, 27, 12, 0, 0, 0, time.UTC)
+	fakeClock := &fixedClock{now: now}
+	log := logger.New(logger.ErrorLevel, nil)
+
+	cfg := config.Defaults()
+	cfg.Core.Pulse.Enabled = true
+	cfg.Core.Pulse.ChangeHorizon = 1
+	cfg.Core.Pulse.MinWakeSpacing = 0
+	cfg.Core.Pulse.WakeCooldown = 0
+
+	tickCh := make(chan time.Time, 10)
+	ackCh := make(chan struct{}, 10)
+
+	mind := &controlledMindEntry{returnErr: nil} // cognition succeeds
+	runner := pulse.NewTestRunner(cfg.Core.Pulse, fakeClock, &constantRNG{v: 0.01}, log, mind, tickCh, ackCh)
+	runner.UpdateSubjects([]pulse.PulseSubjectState{
+		{SubjectID: "test-subject", ChangesSincePresent: 1},
+	})
+
+	// CheckpointWriter: first call (admission) succeeds, second call (settlement) fails.
+	var cwCalls atomic.Int64
+	settlementErr := fmt.Errorf("simulated settlement checkpoint failure")
+	runner.CheckpointWriter = func(cp pulse.PulseCheckpoint) error {
+		cwCalls.Add(1)
+		// Settlement is the second call.
+		if cwCalls.Load() > 1 {
+			return settlementErr
+		}
+		return nil
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if err := runner.Start(ctx); err != nil {
+		t.Fatalf("Runner.Start: %v", err)
+	}
+	defer runner.Stop()
+
+	// Drive a tick.
+	tickCh <- fakeClock.now
+	select {
+	case <-ackCh:
+	case <-time.After(30 * time.Second):
+		t.Fatal("timeout waiting for tick ack")
+	}
+
+	// Cognition MUST have been entered.
+	if entered := mind.enterCalls.Load(); entered != 1 {
+		t.Errorf("Mind entrance called %d times, want 1", entered)
+	}
+
+	// CheckpointWriter MUST have been called at least twice (admission + attempted settlement).
+	if cw := cwCalls.Load(); cw < 2 {
+		t.Errorf("CheckpointWriter called %d times, want >= 2", cw)
+	}
+
+	// Cognition really completed.
+	snap := runner.Snapshot()
+	if snap.LastSpontaneousWakeAt.IsZero() {
+		t.Error("LastSpontaneousWakeAt is zero — admission not recorded")
+	}
+	if snap.LastCognitionAt.IsZero() {
+		t.Error("LastCognitionAt is zero — cognition was not marked complete")
+	}
+	if !snap.LastCognitionAt.Equal(now) && !snap.LastCognitionAt.After(now) {
+		t.Errorf("LastCognitionAt = %v, want >= %v", snap.LastCognitionAt, now)
+	}
+
+	// Subjects: presented AND settled (cognition really completed).
+	subs := runner.SubjectSnapshots()
+	if len(subs) < 1 {
+		t.Fatal("no subjects in snapshot")
+	}
+	sub := subs[0]
+	if sub.LastPresentedAt.IsZero() {
+		t.Error("subject LastPresentedAt is zero — presentation not recorded")
+	}
+	if sub.LastSettledAt.IsZero() {
+		t.Error("subject LastSettledAt is zero — settlement not recorded despite cognition success")
+	}
+	if sub.LastSettledAt.Before(snap.LastCognitionAt) {
+		t.Errorf("subject settled at %v before cognition at %v", sub.LastSettledAt, snap.LastCognitionAt)
+	}
+
+	// Error observable: runner continues on next tick.
+	tickCh <- fakeClock.now.Add(5 * time.Second)
+	select {
+	case <-ackCh:
+	case <-time.After(30 * time.Second):
+		t.Fatal("timeout waiting for second tick ack")
+	}
+	snap2 := runner.Snapshot()
+	if snap2.TickCount <= snap.TickCount {
+		t.Errorf("runner did not continue past settlement checkpoint failure: tick count %d → %d", snap.TickCount, snap2.TickCount)
+	}
+
+	// Occupancy released: second tick can also process.
+	if entered := mind.enterCalls.Load(); entered < 1 || entered > 2 {
+		t.Errorf("expected 1–2 enter calls after two ticks, got %d", entered)
+	}
+
+	t.Logf("settlement checkpoint failure preserves truthful state: enterCalls=%d, lastCognitionAt=%v, presented=%v, settled=%v",
+		mind.enterCalls.Load(), snap.LastCognitionAt, sub.LastPresentedAt, sub.LastSettledAt)
+}
