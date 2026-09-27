@@ -44,8 +44,9 @@ type PulseSubjectState struct {
 
 // MarkPresented sets last_presented_at to at if at is strictly after the
 // current value (forward-time update only). No-op when at is zero.
-// This method is used by the Pulse runner after a cognition run begins,
-// recording that the subject's current state was presented to the model.
+// This method is used by the Pulse runner when the admitted Cognition Run
+// is presented to Mind, recording that the subject's current state was
+// offered for processing.
 func (s *PulseSubjectState) MarkPresented(at time.Time) {
 	if at.IsZero() {
 		return
