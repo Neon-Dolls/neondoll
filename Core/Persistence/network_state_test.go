@@ -2,7 +2,6 @@ package persistence
 
 import (
 	"context"
-	"os"
 	"path/filepath"
 	"testing"
 
@@ -579,6 +578,3 @@ func TestNetworkStore_RespectsMembershipStatusTransition(t *testing.T) {
 		t.Fatalf("stored membership status %q, want %q", loaded.Status, network.MembershipRevoked)
 	}
 }
-
-// Test that the unused import of "os" in this file is actually used.
-var _ = os.TempDir
