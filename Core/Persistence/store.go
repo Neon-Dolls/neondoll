@@ -163,6 +163,20 @@ func createSchema(db *sql.DB) error {
 		return fmt.Errorf("pulse_checkpoints table: %v", err)
 	}
 
+	// Core 4 M1: Network state table — Core-local persistent bookkeeping
+	// for Doll Network identity, peer identity, and Body membership.
+	_, err = db.Exec(`
+		CREATE TABLE IF NOT EXISTS network_state (
+			key         TEXT PRIMARY KEY,
+			value       TEXT NOT NULL,
+			created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+			updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+		);
+	`)
+	if err != nil {
+		return fmt.Errorf("network_state table: %v", err)
+	}
+
 	return nil
 }
 
