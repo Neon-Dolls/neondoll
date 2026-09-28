@@ -5,6 +5,10 @@ import (
 	"testing"
 )
 
+// ValidWgPubKeyBase64 is a 32-byte X25519 public key in the shared wire
+// encoding (standard base64), for exercising protocol validation.
+const ValidWgPubKeyBase64 = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8="
+
 // TestPairRequestValidation: a well-formed request validates.
 func TestPairRequestValidation(t *testing.T) {
 	r := PairRequest{
@@ -12,7 +16,7 @@ func TestPairRequestValidation(t *testing.T) {
 		InvitationID: "inv",
 		Secret:       "sec",
 		Body:         PairRequestBody{BodyID: "body_x", Implementation: "neondoll-body", Platform: "linux", Arch: "amd64"},
-		Network:      PairingNetwork{WireGuardPublicKey: "c2FsXGU="},
+		Network:      PairingNetwork{WireGuardPublicKey: ValidWgPubKeyBase64},
 	}
 	if err := r.ValidatePairRequest(); err != nil {
 		t.Fatalf("ValidatePairRequest: %v", err)
@@ -31,6 +35,27 @@ func TestPairRequestValidationRejectsMissingPublicKey(t *testing.T) {
 	}
 	if err := r.ValidatePairRequest(); err == nil {
 		t.Fatal("expected validation error for missing public key")
+	}
+}
+
+// TestPairRequestValidationRejectsHexPublicKey: Core's diagnostic
+// WireGuardPublicKey.String() is hex (64 chars); the shared wire encoding is
+// base64-of-32-bytes, so a hex-form key must be rejected at the boundary and
+// never reach the wire.
+func TestPairRequestValidationRejectsHexPublicKey(t *testing.T) {
+	hexForm := "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+	if len(hexForm) != 64 {
+		t.Fatal("test hex fixture must be 64 chars")
+	}
+	r := PairRequest{
+		Version:      ProtocolVersion,
+		InvitationID: "inv",
+		Secret:       "sec",
+		Body:         PairRequestBody{BodyID: "body_x", Implementation: "i", Platform: "p", Arch: "a"},
+		Network:      PairingNetwork{WireGuardPublicKey: hexForm},
+	}
+	if err := r.ValidatePairRequest(); err == nil {
+		t.Fatal("expected validation error for hex-encoded wg public key")
 	}
 }
 
