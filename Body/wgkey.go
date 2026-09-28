@@ -1,4 +1,4 @@
-// Package bodyruntime — WireGuard key ownership.
+// Package body — WireGuard key ownership.
 //
 // M1 requires the Body to own its WireGuard keypair: it is generated and
 // retained by the Body and MUST NEVER be transmitted to Core or Relay (Doll
@@ -14,7 +14,7 @@
 // private key only into the local, owner-controlled store). This keeps the
 // private key out of every protocol path by construction.
 
-package bodyruntime
+package body
 
 import (
 	"bytes"
@@ -50,7 +50,7 @@ type WgKeypair struct {
 func GenerateWgKeypair() (*WgKeypair, error) {
 	k, err := ecdh.X25519().GenerateKey(rand.Reader)
 	if err != nil {
-		return nil, fmt.Errorf("bodyruntime: generate wg keypair: %w", err)
+		return nil, fmt.Errorf("body: generate wg keypair: %w", err)
 	}
 	priv := k.Bytes()
 	pub := k.PublicKey().Bytes()
@@ -85,7 +85,7 @@ func (k *WgKeypair) PrivateKeyBytes() []byte {
 // recomputing the public key. Used when reconstructing identity after restart.
 func NewWgKeypair(priv []byte) (*WgKeypair, error) {
 	if len(priv) != 32 {
-		return nil, fmt.Errorf("bodyruntime: wg private key must be 32 bytes, got %d", len(priv))
+		return nil, fmt.Errorf("body: wg private key must be 32 bytes, got %d", len(priv))
 	}
 	pub, err := DerivePublicKey(priv)
 	if err != nil {
@@ -101,7 +101,7 @@ func NewWgKeypair(priv []byte) (*WgKeypair, error) {
 func DerivePublicKey(priv []byte) (*WgPublicKey, error) {
 	key, err := ecdh.X25519().NewPrivateKey(priv)
 	if err != nil {
-		return nil, fmt.Errorf("bodyruntime: wg private key invalid: %w", err)
+		return nil, fmt.Errorf("body: wg private key invalid: %w", err)
 	}
 	pub := key.PublicKey().Bytes()
 	defer Wipe(pub)

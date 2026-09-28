@@ -1,4 +1,4 @@
-package bodyruntime
+package body
 
 import (
 	"encoding/base64"
@@ -196,5 +196,51 @@ func TestNoIdentityFileInEndpoints(t *testing.T) {
 		if strings.Contains(name, "endpoint") || strings.Contains(name, "connection") {
 			t.Errorf("endpoint/connection state leaked into durable identity dir: %q", name)
 		}
+	}
+}
+
+// TestCreateFreshIsCreateOnce: a second CreateFresh on the same store must
+// refuse with ErrIdentityExists and must NOT overwrite the existing identity.
+func TestCreateFreshIsCreateOnce(t *testing.T) {
+	dir := t.TempDir()
+	s := NewStore(dir)
+	res1, err := s.CreateFresh("SparkBody", meta_())
+	if err != nil {
+		t.Fatalf("first CreateFresh: %v", err)
+	}
+	// Attempt to create again — must refuse with ErrIdentityExists.
+	_, err = s.CreateFresh("OverwriteAttempt", meta_())
+	if err != ErrIdentityExists {
+		t.Fatalf("expected ErrIdentityExists, got %v", err)
+	}
+	// The original identity must still be intact.
+	st, kp, err := s.LoadOrError()
+	if err != nil {
+		t.Fatalf("LoadOrError after refused create: %v", err)
+	}
+	if st.Identity.BodyID != res1.State.Identity.BodyID {
+		t.Errorf("second create changed body_id: %q vs %q", st.Identity.BodyID, res1.State.Identity.BodyID)
+	}
+	if st.Identity.Name != "SparkBody" {
+		t.Errorf("second create changed name: %q", st.Identity.Name)
+	}
+	if kp.PublicKeyBase64() != res1.Key.PublicKeyBase64() {
+		t.Error("second create changed WG public key")
+	}
+}
+
+// TestCreateFreshCreateOnceAcrossRestart: a fresh Store instance on the same
+// directory (simulated restart) must still refuse to overwrite an identity
+// created by a previous instance.
+func TestCreateFreshCreateOnceAcrossRestart(t *testing.T) {
+	dir := t.TempDir()
+	s1 := NewStore(dir)
+	if _, err := s1.CreateFresh("SparkBody", meta_()); err != nil {
+		t.Fatalf("CreateFresh: %v", err)
+	}
+	// A fresh Store instance on the same dir = simulated restart.
+	s2 := NewStore(dir)
+	if _, err := s2.CreateFresh("Other", meta_()); err != ErrIdentityExists {
+		t.Fatalf("expected ErrIdentityExists across restart, got %v", err)
 	}
 }

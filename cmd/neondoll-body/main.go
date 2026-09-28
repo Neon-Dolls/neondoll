@@ -1,7 +1,7 @@
 // Command: neondoll-body — headless reference Body.
 //
 // This command is intentionally THIN. All reusable logic lives in the
-// BodyRuntime package (github.com/Neon-Dolls/neondoll/BodyRuntime); this
+// Body package (github.com/Neon-Dolls/neondoll/Body); this
 // command only parses flags and prints runtime output, so future desktop and
 // mobile Bodies can reuse the same runtime without a command-line shell.
 //
@@ -24,7 +24,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/Neon-Dolls/neondoll/BodyRuntime"
+	"github.com/Neon-Dolls/neondoll/Body"
 )
 
 func main() {
@@ -51,22 +51,23 @@ func main() {
 		os.Exit(1)
 	}
 
-	store := bodyruntime.NewStore(*stateDir)
+	store := body.NewStore(*stateDir)
 
 	if *doInit {
-		meta := bodyruntime.BodyMetadata{
+		meta := body.BodyMetadata{
 			Implementation: *implementation,
 			Platform:       *platform,
 			Arch:           *arch,
 		}
-		// Fresh semantics: only an explicit init generates identity. If an
-		// identity already exists, refuse rather than silently regenerate.
-		if store.HasIdentity() {
-			fmt.Fprintf(os.Stderr, "error: identity already exists at %s (use a fresh --state-dir to re-init)\n", store.Dir())
-			os.Exit(1)
-		}
+		// Fresh semantics: CreateFresh enforces create-once. If identity
+		// already exists it returns ErrIdentityExists rather than silently
+		// regenerating.
 		res, err := store.CreateFresh(*name, meta)
 		if err != nil {
+			if err == body.ErrIdentityExists {
+				fmt.Fprintf(os.Stderr, "error: identity already exists at %s (use a fresh --state-dir to re-init)\n", store.Dir())
+				os.Exit(1)
+			}
 			fmt.Fprintf(os.Stderr, "init failed: %v\n", err)
 			os.Exit(1)
 		}
@@ -77,7 +78,7 @@ func main() {
 
 	st, kp, err := store.LoadOrError()
 	if err != nil {
-		if err == bodyruntime.ErrStateNotFound {
+		if err == body.ErrStateNotFound {
 			fmt.Fprintln(os.Stderr, "no Body identity yet — run with --init first")
 			os.Exit(1)
 		}
@@ -98,7 +99,7 @@ func main() {
 	}
 
 	if *doPairing {
-		req := bodyruntime.BuildPairRequest(*invid, *secret, st, kp)
+		req := body.BuildPairRequest(*invid, *secret, st, kp)
 		if err := req.ValidatePairRequest(); err != nil {
 			fmt.Fprintf(os.Stderr, "invalid pairing request: %v\n", err)
 			os.Exit(1)

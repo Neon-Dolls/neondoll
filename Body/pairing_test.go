@@ -1,10 +1,12 @@
-package bodyruntime
+package body
 
 import (
 	"encoding/base64"
 	"encoding/json"
 	"strings"
 	"testing"
+
+	"github.com/Neon-Dolls/neondoll/DollNetwork"
 )
 
 func mkMeta_() BodyMetadata {
@@ -111,20 +113,19 @@ func TestPairRequestValidation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("mkIdentity_: %v", err)
 	}
-	req := PairRequest{
-		Version:      ProtocolVersion,
+	req := dollnetwork.PairRequest{
+		Version:      dollnetwork.ProtocolVersion,
 		InvitationID: "i",
 		Secret:       "s",
 		Body:         BuildPairingBody(st),
-		Network:      PairingNetwork{WireGuardPublicKey: ""},
+		Network:      dollnetwork.PairingNetwork{WireGuardPublicKey: ""},
 	}
 	if err := req.ValidatePairRequest(); err == nil {
 		t.Fatal("expected validation error for missing public key")
 	}
 }
 
-// ValidatePairRequest renders and validates a real request end-to-end via the
-// JSON round trip.
+// TestPairRequestToJSONParseable: a real request round-trips as valid JSON.
 func TestPairRequestToJSONParseable(t *testing.T) {
 	st, err := mkIdentity_()
 	if err != nil {
@@ -145,7 +146,8 @@ func TestPairRequestToJSONParseable(t *testing.T) {
 	}
 }
 
-// base64 helper to keep the private-key leak assertion readable.
+// TestLeakCheckNeedsPrivateKey: the serialized request never contains the WG
+// private key.
 func TestLeakCheckNeedsPrivateKey(t *testing.T) {
 	kp, err := GenerateWgKeypair()
 	if err != nil {

@@ -1,4 +1,4 @@
-// Package bodyruntime implements the reusable, Core-independent runtime for
+// Package body implements the reusable, Core-independent runtime for
 // a NeonDoll reference Body.
 //
 // This runtime is the executable specification for the Body Contract and the
@@ -14,7 +14,7 @@
 //     connection/endpoint state;
 //   - canonical pairing-request data containing only the public key.
 
-package bodyruntime
+package body
 
 import (
 	"encoding/hex"
@@ -38,7 +38,7 @@ type BodyID string
 func NewBodyID() (BodyID, error) {
 	buf := make([]byte, 16)
 	if _, err := io.ReadFull(rand.Reader, buf); err != nil {
-		return "", fmt.Errorf("bodyruntime: generate body id: %w", err)
+		return "", fmt.Errorf("body: generate body id: %w", err)
 	}
 	return BodyID("body_" + hex.EncodeToString(buf)), nil
 }
@@ -94,7 +94,7 @@ func NewIdentityState(name string, meta BodyMetadata) (*IdentityState, error) {
 func (s *IdentityState) Marshal() (string, error) {
 	data, err := json.MarshalIndent(s, "", "  ")
 	if err != nil {
-		return "", fmt.Errorf("bodyruntime: marshal identity: %w", err)
+		return "", fmt.Errorf("body: marshal identity: %w", err)
 	}
 	return string(data), nil
 }
@@ -103,16 +103,16 @@ func (s *IdentityState) Marshal() (string, error) {
 func UnmarshalIdentity(raw string) (*IdentityState, error) {
 	var st IdentityState
 	if err := json.Unmarshal([]byte(raw), &st); err != nil {
-		return nil, fmt.Errorf("bodyruntime: unmarshal identity: %w", err)
+		return nil, fmt.Errorf("body: unmarshal identity: %w", err)
 	}
 	if st.Version != CurrentIdentityVersion {
-		return nil, fmt.Errorf("bodyruntime: unsupported identity version %d", st.Version)
+		return nil, fmt.Errorf("body: unsupported identity version %d", st.Version)
 	}
 	if st.Identity.BodyID == "" {
-		return nil, errors.New("bodyruntime: identity missing body_id")
+		return nil, errors.New("body: identity missing body_id")
 	}
 	if st.Identity.Meta.Implementation == "" {
-		return nil, errors.New("bodyruntime: identity missing implementation")
+		return nil, errors.New("body: identity missing implementation")
 	}
 	return &st, nil
 }

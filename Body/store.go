@@ -1,17 +1,19 @@
-// Package bodyruntime — local persistent store for Body identity.
+// Package body — reusable, Core-independent reference Body runtime.
 //
 // M1 persistence semantics:
 //   - a fresh installation creates the Body identity (and WG keypair) exactly
 //     once;
 //   - a restart loads the same Body/WG identity;
-//   - missing or corrupt state fails safely — it is NEVER silently replaced.
-//     Regeneration happens only under explicit fresh-state semantics
-//     (ForceFresh), never implicitly on load.
+//   - missing or corrupt state fails safely — it is NEVER silently replaced;
+//   - identity is written atomically (temp file + rename) so an interrupted
+//     write never leaves a truncated or corrupt identity file;
+//   - regeneration happens only under explicit fresh-state semantics
+//     (CreateFresh), never implicitly on load.
 //
 // The store keeps the private WG key in a separate, owner-local file with
 // restricted permissions, and never embeds it in any protocol-facing file.
 
-package bodyruntime
+package body
 
 import (
 	"encoding/base64"
@@ -41,13 +43,18 @@ type StateError struct {
 // Error returns a short description of the state error.
 func (e *StateError) Error() string {
 	if e.Err != nil {
-		return "bodyruntime: " + e.Op + ": " + e.Err.Error()
+		return "body: " + e.Op + ": " + e.Err.Error()
 	}
-	return "bodyruntime: " + e.Op
+	return "body: " + e.Op
 }
 
 // ErrStateNotFound is returned when no identity exists yet (fresh install).
 var ErrStateNotFound error = &StateError{Op: "not_found"}
+
+// ErrIdentityExists is returned when a fresh create is attempted but an
+// identity already exists. NeonDoll treats the Body identity as create-once:
+// a second create must never destroy the existing identity.
+var ErrIdentityExists error = &StateError{Op: "identity_exists"}
 
 // NewStore returns a store rooted at the given state directory.
 func NewStore(dir string) *Store {
@@ -59,7 +66,7 @@ func (s *Store) Dir() string {
 	return s.dir
 }
 
-// EnsureDir creates the state directory if missing.
+// EnsureDir creates the state directory (and parents) if missing.
 func (s *Store) EnsureDir() error {
 	if err := os.MkdirAll(s.dir, 0700); err != nil {
 		return &StateError{Op: "mkdir", Err: err}
@@ -81,6 +88,39 @@ func (s *Store) wgPrivatePath() string {
 func (s *Store) HasIdentity() bool {
 	_, err := os.Stat(s.statePath())
 	return err == nil
+}
+
+// writeFileAtomic writes data to path via a temp file in the same directory
+// followed by a rename. This guarantees the destination file is never left in
+// a partially-written state: readers either see the old full content or the
+// new full content, never a truncated middle.
+func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, ".write-*.tmp")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	// Ensure cleanup of the temp file if anything below fails.
+	defer func() {
+		_ = os.Remove(tmpName)
+	}()
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Chmod(perm); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, path)
 }
 
 // LoadIdentity reads the persisted identity. If no identity exists yet it
@@ -123,8 +163,9 @@ func (s *Store) LoadWgKeypair() (*WgKeypair, error) {
 	return kp, nil
 }
 
-// SaveIdentity persists the identity state file. This is idempotent: if the
-// identity already exists it is simply rewritten, not regenerated.
+// SaveIdentity persists the identity state file atomically. This is
+// idempotent: if the identity already exists it is simply rewritten (with the
+// same body_id), not regenerated.
 func (s *Store) SaveIdentity(st *IdentityState) error {
 	if st == nil || st.Identity.BodyID == "" {
 		return &StateError{Op: "save identity", Err: errors.New("empty identity")}
@@ -136,14 +177,14 @@ func (s *Store) SaveIdentity(st *IdentityState) error {
 	if err != nil {
 		return &StateError{Op: "marshal identity", Err: err}
 	}
-	if err := os.WriteFile(s.statePath(), data, 0600); err != nil {
+	if err := writeFileAtomic(s.statePath(), data, 0600); err != nil {
 		return &StateError{Op: "write identity", Err: err}
 	}
 	return nil
 }
 
-// SaveWgKeypair persists the WG private key with owner-only permissions. The
-// public key is recomputed and not stored separately.
+// SaveWgKeypair persists the WG private key atomically with owner-only
+// permissions. The public key is recomputed and not stored separately.
 func (s *Store) SaveWgKeypair(kp *WgKeypair) error {
 	if kp == nil {
 		return &StateError{Op: "save wg key", Err: errors.New("empty keypair")}
@@ -154,7 +195,7 @@ func (s *Store) SaveWgKeypair(kp *WgKeypair) error {
 	priv := kp.PrivateKeyBytes()
 	defer Wipe(priv)
 	enc := base64.StdEncoding.EncodeToString(priv)
-	if err := os.WriteFile(s.wgPrivatePath(), []byte(enc), 0600); err != nil {
+	if err := writeFileAtomic(s.wgPrivatePath(), []byte(enc), 0600); err != nil {
 		return &StateError{Op: "write wg key", Err: err}
 	}
 	return nil
@@ -187,10 +228,19 @@ type FreshResult struct {
 	Key   *WgKeypair
 }
 
-// CreateFresh forces a brand-new identity and WG keypair and persists them.
-// This is the ONLY path that generates new identity material; it is invoked
-// explicitly (e.g. an --init flag), never implicitly by Load.
+// CreateFresh creates and persists a brand-new identity and WG keypair.
+//
+// The Body identity is create-once: if an identity already exists on disk,
+// CreateFresh returns ErrIdentityExists and does NOT overwrite it. This
+// invariant is enforced here in the store (not just by callers) so that the
+// Body's identity can never be silently destroyed by a second --init, a
+// re-entrant call, or concurrent initialization. Callers that need to
+// (re)initialise a truly fresh volume must point the store at a new, empty
+// directory.
 func (s *Store) CreateFresh(name string, meta BodyMetadata) (*FreshResult, error) {
+	if s.HasIdentity() {
+		return nil, ErrIdentityExists
+	}
 	st, err := NewIdentityState(name, meta)
 	if err != nil {
 		return nil, err

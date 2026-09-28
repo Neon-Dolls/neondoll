@@ -1,4 +1,4 @@
-// Package bodyruntime — persistent Body state.
+// Package body — persistent Body state.
 //
 // M1 separation invariant: persistent identity/membership state is kept
 // separate from transient connection/endpoint state.
@@ -14,7 +14,7 @@
 // Network: "Implementations MUST NOT derive identity or authority from an
 // overlay address" and "Source IP is not identity").
 
-package bodyruntime
+package body
 
 import (
 	"bytes"
@@ -105,7 +105,7 @@ func (s *EndpointSet) Count() int {
 type MembershipConflictError struct{}
 
 func (MembershipConflictError) Error() string {
-	return "bodyruntime: operation would mutate a stable body identity"
+	return "body: operation would mutate a stable body identity"
 }
 
 // ErrConflict creates a membership-conflict error.
@@ -116,7 +116,7 @@ func ErrConflict() error {
 // ParseHex decodes a lowercase hex string to bytes (used by tests/fixtures).
 func ParseHex(s string) ([]byte, error) {
 	if len(s)%2 != 0 {
-		return nil, errors.New("bodyruntime: odd-length hex string")
+		return nil, errors.New("body: odd-length hex string")
 	}
 	out := make([]byte, len(s)/2)
 	if _, err := hex.Decode(out, []byte(s)); err != nil {

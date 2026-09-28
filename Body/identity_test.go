@@ -1,4 +1,4 @@
-package bodyruntime
+package body
 
 import (
 	"strings"
