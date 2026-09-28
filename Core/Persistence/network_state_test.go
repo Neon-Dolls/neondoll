@@ -346,6 +346,41 @@ func TestNetworkStore_ReconstructNetwork(t *testing.T) {
 			t.Fatalf("peer_id %s not found after reconstruction", peer)
 		}
 	}
+
+	// Phase 3: verify allocator reconstruction from persisted NetworkID.
+	// After restart, the allocator is absent runtime state and is lazily
+	// rebuilt from loaded.NetworkID. New Body allocations must still
+	// produce addresses in exactly the same Doll Network prefix.
+	alloc := network.NewIPv6Allocator(loaded.NetworkID)
+
+	// Create a new Body membership on the reconstructed Network.
+	// This exercises the lazy allocator via loaded.NewMembership → loaded.allocator().
+	newBody, err := loaded.NewMembership("new-body-after-restart")
+	if err != nil {
+		t.Fatalf("NewMembership on reconstructed Network: %v", err)
+	}
+
+	// Verify the new membership's overlay address belongs to the prefix.
+	if !alloc.Prefix().Contains(newBody.OverlayAddress) {
+		t.Fatalf("new membership address %s not in prefix %s (from NetworkID %q)",
+			newBody.OverlayAddress, alloc.Prefix(), loaded.NetworkID)
+	}
+
+	// Verify Core's overlay address is also in that same prefix.
+	if !alloc.Prefix().Contains(loaded.Core.OverlayAddress) {
+		t.Fatalf("Core overlay address %s not in prefix %s (from NetworkID %q)",
+			loaded.Core.OverlayAddress, alloc.Prefix(), loaded.NetworkID)
+	}
+
+	// Verify the address matches what a fresh allocator from NetworkID produces.
+	expectedAddr, err := alloc.BodyAddress(newBody.PeerID)
+	if err != nil {
+		t.Fatalf("BodyAddress from fresh allocator: %v", err)
+	}
+	if newBody.OverlayAddress != expectedAddr {
+		t.Fatalf("new membership address mismatch: got %s, want %s (from allocator → NetworkID)",
+			newBody.OverlayAddress, expectedAddr)
+	}
 }
 
 func TestNetworkStore_MembershipUpdate(t *testing.T) {

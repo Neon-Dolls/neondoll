@@ -254,11 +254,15 @@ func unmarshalMembership(data string) (*network.Membership, error) {
 		OverlayAddress: addr,
 		Status:         row.Status,
 	}
-	if len(row.WireGuardPublicKey) > 0 {
+	switch len(row.WireGuardPublicKey) {
+	case 0:
+		// nil is valid — the Body has not yet supplied its public key.
+	case 32:
 		var pubKey network.WireGuardPublicKey
-		if n := copy(pubKey[:], row.WireGuardPublicKey); n == 32 {
-			m.WireGuardPublicKey = &pubKey
-		}
+		copy(pubKey[:], row.WireGuardPublicKey)
+		m.WireGuardPublicKey = &pubKey
+	default:
+		return nil, fmt.Errorf("%w: wireguard public key length %d != 32", ErrCannotDecode, len(row.WireGuardPublicKey))
 	}
 
 	return m, nil
