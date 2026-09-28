@@ -49,8 +49,7 @@ func TestNetworkStore_SaveAndLoadNetwork(t *testing.T) {
 	}
 
 	// Create a network.
-	alloc := network.NewIPv6Allocator(network.GenerateNetworkID())
-	n, err := network.NewNetwork(alloc)
+	n, err := network.NewNetwork(network.GenerateNetworkID())
 	if err != nil {
 		t.Fatalf("NewNetwork: %v", err)
 	}
@@ -96,8 +95,7 @@ func TestNetworkStore_SaveAndLoadMembership(t *testing.T) {
 
 	// Create and save a network first (memberships need the allocator).
 	netID := network.GenerateNetworkID()
-	alloc := network.NewIPv6Allocator(netID)
-	n, err := network.NewNetwork(alloc)
+	n, err := network.NewNetwork(netID)
 	if err != nil {
 		t.Fatalf("NewNetwork: %v", err)
 	}
@@ -106,7 +104,7 @@ func TestNetworkStore_SaveAndLoadMembership(t *testing.T) {
 	}
 
 	// Create a membership.
-	m, err := n.NewMembership("body-test-1", alloc)
+	m, err := n.NewMembership("body-test-1")
 	if err != nil {
 		t.Fatalf("NewMembership: %v", err)
 	}
@@ -169,8 +167,7 @@ func TestNetworkStore_ListMemberships(t *testing.T) {
 
 	// Create and save network.
 	netID := network.GenerateNetworkID()
-	alloc := network.NewIPv6Allocator(netID)
-	n, err := network.NewNetwork(alloc)
+	n, err := network.NewNetwork(netID)
 	if err != nil {
 		t.Fatalf("NewNetwork: %v", err)
 	}
@@ -190,7 +187,7 @@ func TestNetworkStore_ListMemberships(t *testing.T) {
 	// Add two memberships.
 	bodies := []string{"body-alpha", "body-beta"}
 	for _, bodyID := range bodies {
-		m, err := n.NewMembership(bodyID, alloc)
+		m, err := n.NewMembership(bodyID)
 		if err != nil {
 			t.Fatalf("NewMembership %s: %v", bodyID, err)
 		}
@@ -229,12 +226,11 @@ func TestNetworkStore_DeleteMembership(t *testing.T) {
 
 	// Create network and membership.
 	netID := network.GenerateNetworkID()
-	alloc := network.NewIPv6Allocator(netID)
-	n, err := network.NewNetwork(alloc)
+	n, err := network.NewNetwork(netID)
 	if err != nil {
 		t.Fatalf("NewNetwork: %v", err)
 	}
-	m, err := n.NewMembership("body-delete-test", alloc)
+	m, err := n.NewMembership("body-delete-test")
 	if err != nil {
 		t.Fatalf("NewMembership: %v", err)
 	}
@@ -280,8 +276,7 @@ func TestNetworkStore_ReconstructNetwork(t *testing.T) {
 	ns1 := assertNetworkStore(t, s1)
 
 	netID := network.GenerateNetworkID()
-	alloc := network.NewIPv6Allocator(netID)
-	n, err := network.NewNetwork(alloc)
+	n, err := network.NewNetwork(netID)
 	if err != nil {
 		t.Fatalf("NewNetwork: %v", err)
 	}
@@ -292,7 +287,7 @@ func TestNetworkStore_ReconstructNetwork(t *testing.T) {
 	peers := make([]network.PeerID, 3)
 	for i := 0; i < 3; i++ {
 		bodyID := "body-" + string(rune('a'+i))
-		m, err := n.NewMembership(bodyID, alloc)
+		m, err := n.NewMembership(bodyID)
 		if err != nil {
 			t.Fatalf("NewMembership %s: %v", bodyID, err)
 		}
@@ -363,8 +358,7 @@ func TestNetworkStore_MembershipUpdate(t *testing.T) {
 
 	// Create network + membership.
 	netID := network.GenerateNetworkID()
-	alloc := network.NewIPv6Allocator(netID)
-	n, err := network.NewNetwork(alloc)
+	n, err := network.NewNetwork(netID)
 	if err != nil {
 		t.Fatalf("NewNetwork: %v", err)
 	}
@@ -372,7 +366,7 @@ func TestNetworkStore_MembershipUpdate(t *testing.T) {
 		t.Fatalf("SaveNetwork: %v", err)
 	}
 
-	m, err := n.NewMembership("body-update-test", alloc)
+	m, err := n.NewMembership("body-update-test")
 	if err != nil {
 		t.Fatalf("NewMembership: %v", err)
 	}
@@ -453,8 +447,7 @@ func TestStore_MigrationCreatesNetworkTable(t *testing.T) {
 	// Verify by writing to it.
 	ns := assertNetworkStore(t, s)
 	ctx := context.Background()
-	alloc := network.NewIPv6Allocator(network.GenerateNetworkID())
-	n, err := network.NewNetwork(alloc)
+	n, err := network.NewNetwork(network.GenerateNetworkID())
 	if err != nil {
 		t.Fatalf("NewNetwork: %v", err)
 	}
@@ -472,8 +465,7 @@ func TestNetworkStore_TwoNetworksRoundTrip(t *testing.T) {
 	ctx := context.Background()
 
 	// Create network A.
-	allocA := network.NewIPv6Allocator(network.GenerateNetworkID())
-	nA, err := network.NewNetwork(allocA)
+	nA, err := network.NewNetwork(network.GenerateNetworkID())
 	if err != nil {
 		t.Fatalf("NewNetwork A: %v", err)
 	}
@@ -482,8 +474,7 @@ func TestNetworkStore_TwoNetworksRoundTrip(t *testing.T) {
 	}
 
 	// Create network B (replaces A — keyed by the same key).
-	allocB := network.NewIPv6Allocator(network.GenerateNetworkID())
-	nB, err := network.NewNetwork(allocB)
+	nB, err := network.NewNetwork(network.GenerateNetworkID())
 	if err != nil {
 		t.Fatalf("NewNetwork B: %v", err)
 	}
@@ -516,8 +507,7 @@ func TestNetworkStore_PrivateKeyInDBOnly(t *testing.T) {
 
 	ctx := context.Background()
 
-	alloc := network.NewIPv6Allocator(network.GenerateNetworkID())
-	n, err := network.NewNetwork(alloc)
+	n, err := network.NewNetwork(network.GenerateNetworkID())
 	if err != nil {
 		t.Fatalf("NewNetwork: %v", err)
 	}
@@ -548,8 +538,7 @@ func TestNetworkStore_RespectsMembershipStatusTransition(t *testing.T) {
 	ctx := context.Background()
 
 	netID := network.GenerateNetworkID()
-	alloc := network.NewIPv6Allocator(netID)
-	n, err := network.NewNetwork(alloc)
+	n, err := network.NewNetwork(netID)
 	if err != nil {
 		t.Fatalf("NewNetwork: %v", err)
 	}
@@ -557,7 +546,7 @@ func TestNetworkStore_RespectsMembershipStatusTransition(t *testing.T) {
 		t.Fatalf("SaveNetwork: %v", err)
 	}
 
-	m, err := n.NewMembership("body-status-test", alloc)
+	m, err := n.NewMembership("body-status-test")
 	if err != nil {
 		t.Fatalf("NewMembership: %v", err)
 	}

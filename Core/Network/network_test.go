@@ -3,6 +3,8 @@ package network
 import (
 	"bytes"
 	"crypto/rand"
+	"encoding/hex"
+	"fmt"
 	"math/big"
 	"net/netip"
 	"testing"
@@ -29,8 +31,7 @@ func TestGenerateNetworkID_IsStable(t *testing.T) {
 func TestNewNetwork_HasStableNetworkID(t *testing.T) {
 	// A Network holds its network_id. Over time the network_id must survive
 	// reconstruction through persistence.
-	alloc := NewIPv6Allocator(GenerateNetworkID())
-	n, err := NewNetwork(alloc)
+	n, err := NewNetwork(GenerateNetworkID())
 	if err != nil {
 		t.Fatalf("NewNetwork: %v", err)
 	}
@@ -49,7 +50,7 @@ func TestNewNetwork_HasStableNetworkID(t *testing.T) {
 func TestNewCoreIdentity_HasStablePeerID(t *testing.T) {
 	netID := GenerateNetworkID()
 	alloc := NewIPv6Allocator(netID)
-	id, err := NewCoreIdentity(netID, alloc)
+	id, err := NewCoreIdentity(alloc)
 	if err != nil {
 		t.Fatalf("NewCoreIdentity: %v", err)
 	}
@@ -62,8 +63,7 @@ func TestNewCoreIdentity_HasStablePeerID(t *testing.T) {
 }
 
 func TestNewNetwork_CoreHasPeerIDAndOverlay(t *testing.T) {
-	alloc := NewIPv6Allocator(GenerateNetworkID())
-	n, err := NewNetwork(alloc)
+	n, err := NewNetwork(GenerateNetworkID())
 	if err != nil {
 		t.Fatalf("NewNetwork: %v", err)
 	}
@@ -155,7 +155,7 @@ func TestWireGuardKeypair_DifferentPrivatesProduceDifferentPublics(t *testing.T)
 func TestNewCoreIdentity_HasWireGuardKeypair(t *testing.T) {
 	netID := GenerateNetworkID()
 	alloc := NewIPv6Allocator(netID)
-	id, err := NewCoreIdentity(netID, alloc)
+	id, err := NewCoreIdentity(alloc)
 	if err != nil {
 		t.Fatalf("NewCoreIdentity: %v", err)
 	}
@@ -185,7 +185,7 @@ func TestNewCoreIdentity_HasWireGuardKeypair(t *testing.T) {
 func TestCoreIdentity_StringsExcludesPrivateKey(t *testing.T) {
 	netID := GenerateNetworkID()
 	alloc := NewIPv6Allocator(netID)
-	id, err := NewCoreIdentity(netID, alloc)
+	id, err := NewCoreIdentity(alloc)
 	if err != nil {
 		t.Fatalf("NewCoreIdentity: %v", err)
 	}
@@ -195,16 +195,19 @@ func TestCoreIdentity_StringsExcludesPrivateKey(t *testing.T) {
 		t.Fatal("Strings() returned empty")
 	}
 
-	// The private key hex representation must NOT appear in the diagnostic string.
-	privHex := id.PrivateKey.String()
+	// The private key must NOT appear in Strings() output.
+	// WireGuardPrivateKey has no String() method — format
+	// verbs (%s, %v) on [32]byte produce raw chars, not hex.
+	// Use hex explicitly to confirm exclusion from the diagnostic.
+	privHex := hex.EncodeToString(id.PrivateKey[:])
 	if privHex == "" {
-		t.Fatal("PrivateKey.String() is empty — cannot verify exclusion")
+		t.Fatal("private key bytes are empty — cannot verify exclusion")
 	}
 	if contains(s, privHex) {
-		t.Fatal("private key found in Strings() output — must NEVER be exposed")
+		t.Fatal("private key hex found in Strings() output — must NEVER be exposed")
 	}
 
-	// Public key SHOULD appear.
+	// Public key SHOULD appear in Strings().
 	pubHex := id.PublicKey.String()
 	if !contains(s, pubHex) {
 		t.Fatal("public key not found in Strings() output — it may appear")
@@ -215,17 +218,16 @@ func TestCoreIdentity_StringsExcludesPrivateKey(t *testing.T) {
 
 func TestNewMemberships_DistinctPeerIDs(t *testing.T) {
 	netID := GenerateNetworkID()
-	alloc := NewIPv6Allocator(netID)
-	n, err := NewNetwork(alloc)
+	n, err := NewNetwork(netID)
 	if err != nil {
 		t.Fatalf("NewNetwork: %v", err)
 	}
 
-	m1, err := n.NewMembership("body-001", alloc)
+	m1, err := n.NewMembership("body-001")
 	if err != nil {
 		t.Fatalf("NewMembership body-001: %v", err)
 	}
-	m2, err := n.NewMembership("body-002", alloc)
+	m2, err := n.NewMembership("body-002")
 	if err != nil {
 		t.Fatalf("NewMembership body-002: %v", err)
 	}
@@ -245,17 +247,16 @@ func TestNewMemberships_DistinctPeerIDs(t *testing.T) {
 
 func TestNewMemberships_DistinctIPv6Addresses(t *testing.T) {
 	netID := GenerateNetworkID()
-	alloc := NewIPv6Allocator(netID)
-	n, err := NewNetwork(alloc)
+	n, err := NewNetwork(netID)
 	if err != nil {
 		t.Fatalf("NewNetwork: %v", err)
 	}
 
-	m1, err := n.NewMembership("body-001", alloc)
+	m1, err := n.NewMembership("body-001")
 	if err != nil {
 		t.Fatalf("NewMembership body-001: %v", err)
 	}
-	m2, err := n.NewMembership("body-002", alloc)
+	m2, err := n.NewMembership("body-002")
 	if err != nil {
 		t.Fatalf("NewMembership body-002: %v", err)
 	}
@@ -277,14 +278,13 @@ func TestNewMemberships_DistinctIPv6Addresses(t *testing.T) {
 func TestAddressCollision_DetectedByBodyAddress(t *testing.T) {
 	// Use a fixed network ID so addresses are deterministic.
 	netID := NetworkID("test-network-id")
-	alloc := NewIPv6Allocator(netID)
-	n, err := NewNetwork(alloc)
+	n, err := NewNetwork(netID)
 	if err != nil {
 		t.Fatalf("NewNetwork: %v", err)
 	}
 
 	// Add the first membership.
-	_, err = n.NewMembership("body-001", alloc)
+	_, err = n.NewMembership("body-001")
 	if err != nil {
 		t.Fatalf("first membership: %v", err)
 	}
@@ -295,6 +295,7 @@ func TestAddressCollision_DetectedByBodyAddress(t *testing.T) {
 	// the AllocateBodyAddress function with a pre-collided set.
 
 	// First, get the allocator and see if deterministic addresses work.
+	alloc := NewIPv6Allocator(netID)
 	// Make a fake allocated set that includes an address this allocator would
 	// produce for a given peer_id.
 	fakePeerID := PeerID("test-fake-peer-id-with-known-hash")
@@ -315,8 +316,7 @@ func TestAddressCollision_DetectedByBodyAddress(t *testing.T) {
 
 func TestReconstruction_PreservesNetworkID(t *testing.T) {
 	netID := GenerateNetworkID()
-	alloc := NewIPv6Allocator(netID)
-	n, err := NewNetwork(alloc)
+	n, err := NewNetwork(netID)
 	if err != nil {
 		t.Fatalf("NewNetwork: %v", err)
 	}
@@ -364,18 +364,17 @@ func TestReconstruction_PreservesNetworkID(t *testing.T) {
 
 func TestReconstruction_PreservesMemberships(t *testing.T) {
 	netID := GenerateNetworkID()
-	alloc := NewIPv6Allocator(netID)
-	n, err := NewNetwork(alloc)
+	n, err := NewNetwork(netID)
 	if err != nil {
 		t.Fatalf("NewNetwork: %v", err)
 	}
 
 	// Add two memberships.
-	m1, err := n.NewMembership("body-alpha", alloc)
+	m1, err := n.NewMembership("body-alpha")
 	if err != nil {
 		t.Fatalf("membership alpha: %v", err)
 	}
-	_, err = n.NewMembership("body-beta", alloc)
+	_, err = n.NewMembership("body-beta")
 	if err != nil {
 		t.Fatalf("membership beta: %v", err)
 	}
@@ -438,9 +437,7 @@ func TestIdentity_NotDerivedFromIP(t *testing.T) {
 
 	netID := NetworkID("fixed-test-network-id")
 	alloc := NewIPv6Allocator(netID)
-
-	// Generate identity without any IP input.
-	coreID, err := NewCoreIdentity(netID, alloc)
+	coreID, err := NewCoreIdentity(alloc)
 	if err != nil {
 		t.Fatalf("NewCoreIdentity: %v", err)
 	}
@@ -464,14 +461,13 @@ func TestIdentity_NotDerivedFromIP(t *testing.T) {
 // ── 10. Revoked membership cannot accidentally become active ──────────────
 
 func TestRevokedMembership_CannotActivate(t *testing.T) {
-	alloc := NewIPv6Allocator(GenerateNetworkID())
-	n, err := NewNetwork(alloc)
+	n, err := NewNetwork(GenerateNetworkID())
 	if err != nil {
 		t.Fatalf("NewNetwork: %v", err)
 	}
 
 	// Create a membership.
-	m, err := n.NewMembership("body-test", alloc)
+	m, err := n.NewMembership("body-test")
 	if err != nil {
 		t.Fatalf("NewMembership: %v", err)
 	}
@@ -507,13 +503,12 @@ func TestRevokedMembership_CannotActivate(t *testing.T) {
 }
 
 func TestRevokedMembership_DoesNotBecomeActiveOnReAdd(t *testing.T) {
-	alloc := NewIPv6Allocator(GenerateNetworkID())
-	n, err := NewNetwork(alloc)
+	n, err := NewNetwork(GenerateNetworkID())
 	if err != nil {
 		t.Fatalf("NewNetwork: %v", err)
 	}
 
-	m, err := n.NewMembership("body-test", alloc)
+	m, err := n.NewMembership("body-test")
 	if err != nil {
 		t.Fatalf("NewMembership: %v", err)
 	}
@@ -523,7 +518,7 @@ func TestRevokedMembership_DoesNotBecomeActiveOnReAdd(t *testing.T) {
 	_ = n.RevokeMembership(m.PeerID)
 
 	// Trying to add a new membership with the same body_id should fail.
-	_, err = n.NewMembership("body-test", alloc)
+	_, err = n.NewMembership("body-test")
 	if err == nil {
 		t.Fatal("NewMembership with revoked body_id returned nil — expected error")
 	}
@@ -658,13 +653,12 @@ func TestIPv6Allocation_AllocatorWithoutNetworkState(t *testing.T) {
 // ── Additional: lifecycle transitions ─────────────────────────────────────
 
 func TestMembershipLifecycle_PendingToActive(t *testing.T) {
-	alloc := NewIPv6Allocator(GenerateNetworkID())
-	n, err := NewNetwork(alloc)
+	n, err := NewNetwork(GenerateNetworkID())
 	if err != nil {
 		t.Fatalf("NewNetwork: %v", err)
 	}
 
-	m, err := n.NewMembership("body-lifecycle", alloc)
+	m, err := n.NewMembership("body-lifecycle")
 	if err != nil {
 		t.Fatalf("NewMembership: %v", err)
 	}
@@ -681,13 +675,12 @@ func TestMembershipLifecycle_PendingToActive(t *testing.T) {
 }
 
 func TestMembershipLifecycle_ActiveToRevoked(t *testing.T) {
-	alloc := NewIPv6Allocator(GenerateNetworkID())
-	n, err := NewNetwork(alloc)
+	n, err := NewNetwork(GenerateNetworkID())
 	if err != nil {
 		t.Fatalf("NewNetwork: %v", err)
 	}
 
-	m, err := n.NewMembership("body-revoke", alloc)
+	m, err := n.NewMembership("body-revoke")
 	if err != nil {
 		t.Fatalf("NewMembership: %v", err)
 	}
@@ -703,13 +696,12 @@ func TestMembershipLifecycle_ActiveToRevoked(t *testing.T) {
 }
 
 func TestMembershipLifecycle_PendingToRevoked(t *testing.T) {
-	alloc := NewIPv6Allocator(GenerateNetworkID())
-	n, err := NewNetwork(alloc)
+	n, err := NewNetwork(GenerateNetworkID())
 	if err != nil {
 		t.Fatalf("NewNetwork: %v", err)
 	}
 
-	m, err := n.NewMembership("body-pending-revoke", alloc)
+	m, err := n.NewMembership("body-pending-revoke")
 	if err != nil {
 		t.Fatalf("NewMembership: %v", err)
 	}
@@ -723,13 +715,12 @@ func TestMembershipLifecycle_PendingToRevoked(t *testing.T) {
 }
 
 func TestMembershipLifecycle_RepeatedActivateIsIdempotent(t *testing.T) {
-	alloc := NewIPv6Allocator(GenerateNetworkID())
-	n, err := NewNetwork(alloc)
+	n, err := NewNetwork(GenerateNetworkID())
 	if err != nil {
 		t.Fatalf("NewNetwork: %v", err)
 	}
 
-	m, err := n.NewMembership("body-idempotent", alloc)
+	m, err := n.NewMembership("body-idempotent")
 	if err != nil {
 		t.Fatalf("NewMembership: %v", err)
 	}
@@ -744,13 +735,12 @@ func TestMembershipLifecycle_RepeatedActivateIsIdempotent(t *testing.T) {
 }
 
 func TestMembershipLifecycle_RepeatedRevokeIsIdempotent(t *testing.T) {
-	alloc := NewIPv6Allocator(GenerateNetworkID())
-	n, err := NewNetwork(alloc)
+	n, err := NewNetwork(GenerateNetworkID())
 	if err != nil {
 		t.Fatalf("NewNetwork: %v", err)
 	}
 
-	m, err := n.NewMembership("body-revoke-idempotent", alloc)
+	m, err := n.NewMembership("body-revoke-idempotent")
 	if err != nil {
 		t.Fatalf("NewMembership: %v", err)
 	}
@@ -765,18 +755,17 @@ func TestMembershipLifecycle_RepeatedRevokeIsIdempotent(t *testing.T) {
 }
 
 func TestMembershipLifecycle_DuplicateBodyID(t *testing.T) {
-	alloc := NewIPv6Allocator(GenerateNetworkID())
-	n, err := NewNetwork(alloc)
+	n, err := NewNetwork(GenerateNetworkID())
 	if err != nil {
 		t.Fatalf("NewNetwork: %v", err)
 	}
 
-	_, err = n.NewMembership("body-dup", alloc)
+	_, err = n.NewMembership("body-dup")
 	if err != nil {
 		t.Fatalf("first NewMembership: %v", err)
 	}
 
-	_, err = n.NewMembership("body-dup", alloc)
+	_, err = n.NewMembership("body-dup")
 	if err == nil {
 		t.Fatal("expected ErrMembershipAlreadyExists for duplicate body_id")
 	}
@@ -796,13 +785,12 @@ func TestMembership_NotSerializingBodyIdentityInconsistently(t *testing.T) {
 // ── Additional: RemoveMembership operation ────────────────────────────────
 
 func TestNetwork_RemoveMembership(t *testing.T) {
-	alloc := NewIPv6Allocator(GenerateNetworkID())
-	n, err := NewNetwork(alloc)
+	n, err := NewNetwork(GenerateNetworkID())
 	if err != nil {
 		t.Fatalf("NewNetwork: %v", err)
 	}
 
-	m, err := n.NewMembership("body-remove", alloc)
+	m, err := n.NewMembership("body-remove")
 	if err != nil {
 		t.Fatalf("NewMembership: %v", err)
 	}
@@ -864,6 +852,91 @@ func hasSuffix(s, suffix string) bool {
 		return false
 	}
 	return s[len(s)-len(suffix):] == suffix
+}
+
+// ── WireGuard private key formatting ────────────────────────────────────
+//
+// WireGuardPrivateKey MUST NOT have a String() method. Format verbs (%s, %v)
+// on a [32]byte produce raw bytes, not hex — making accidental exposure
+// impossible.
+func TestWireGuardPrivateKey_HasNoStringer(t *testing.T) {
+	priv, _, err := GenerateWireGuardKeypair()
+	if err != nil {
+		t.Fatalf("GenerateWireGuardKeypair: %v", err)
+	}
+
+	// The definitive test: format as %v. If there were a String() returning
+	// 64 hex chars, the output would be 64 characters.
+	formatted := fmt.Sprintf("%v", priv)
+	if len(formatted) == 64 {
+		t.Fatal("WireGuardPrivateKey appears to have a String() " +
+			"method that returns 64 hex chars — must NOT expose secret")
+	}
+
+	// %s on a [32]byte also produces raw bytes, never 64-char hex.
+	formattedS := fmt.Sprintf("%s", priv)
+	if len(formattedS) == 64 {
+		t.Fatal("fmt.Sprintf with the percent-s verb on privateKey produced" +
+			" 64 chars (hex) — String() must not expose the full secret")
+	}
+
+	// Verify it's still usable as [32]byte (type identity preserved).
+	var _ [32]byte = priv
+}
+
+// ── NetworkID is the allocator source of truth ──────────────────────────
+//
+// NewNetwork(netID) must use the provided NetworkID as the single source
+// of truth for the IPv6 ULA allocator. Two networks created from the same
+// NetworkID must produce addresses in the same ULA prefix.
+func TestNewNetwork_NetworkIDIsAllocatorSource(t *testing.T) {
+	const netID = NetworkID("test-source-of-truth-id")
+
+	n, err := NewNetwork(netID)
+	if err != nil {
+		t.Fatalf("NewNetwork: %v", err)
+	}
+	if n.NetworkID != netID {
+		t.Fatalf("NewNetwork modified the NetworkID: got %q, want %q",
+			n.NetworkID, netID)
+	}
+
+	// Add a membership and check it gets a valid ULA address from the
+	// allocator derived from netID.
+	m, err := n.NewMembership("body-source-test")
+	if err != nil {
+		t.Fatalf("NewMembership: %v", err)
+	}
+	if !m.OverlayAddress.Is6() {
+		t.Fatal("membership address is not IPv6")
+	}
+	if !m.OverlayAddress.IsGlobalUnicast() {
+		// ULA is fd00::/8; IsGlobalUnicast returns true.
+	}
+	// Explicitly check first nibble is 0xf (ULA).
+	slice := m.OverlayAddress.AsSlice()
+	if slice[0]&0xf0 != 0xf0 {
+		t.Fatalf("membership address first nibble %02x, expected f for ULA",
+			slice[0])
+	}
+
+	// Create a second network from the SAME netID — simulating reconstruction.
+	n2, err := NewNetwork(netID)
+	if err != nil {
+		t.Fatalf("NewNetwork (reconstructed): %v", err)
+	}
+	m2, err := n2.NewMembership("body-reconstruction")
+	if err != nil {
+		t.Fatalf("NewMembership on reconstructed network: %v", err)
+	}
+
+	// Both addresses must be in the same /48 ULA prefix derived from netID.
+	prefix1 := m.OverlayAddress.AsSlice()[:6]
+	prefix2 := m2.OverlayAddress.AsSlice()[:6]
+	if !bytes.Equal(prefix1, prefix2) {
+		t.Fatalf("same NetworkID produced different ULA prefixes: %x vs %x",
+			prefix1, prefix2)
+	}
 }
 
 // TestAllocationUsesCryptoRand verifies that random IDs and keys use crypto/rand.

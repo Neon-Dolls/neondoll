@@ -44,13 +44,12 @@ const (
 // WireGuardPrivateKey is a 32-byte Curve25519 secret key, owned by Core.
 // It must NEVER appear in network protocol documents, Body-visible
 // structures, Relay-visible structures, logs, or diagnostic serialization.
+//
+// String() is intentionally absent — any accidental formatting via %s, %v,
+// or diagnostic output is caught at compile time. The raw bytes are only
+// accessible through an explicit [32]byte conversion or persistence code
+// that knows what it is doing.
 type WireGuardPrivateKey [32]byte
-
-// String returns a hex representation of the private key.
-// The zero value is detectable but not exposed as a valid key.
-func (k WireGuardPrivateKey) String() string {
-	return hex.EncodeToString(k[:])
-}
 
 // WireGuardPublicKey is a 32-byte Curve25519 public key, derivable from
 // the private key via ScalarBaseMult. It MAY cross network boundaries
@@ -98,7 +97,8 @@ type Membership struct {
 
 // Network represents the Core-side view of a Doll Network: a private
 // overlay network for a Doll House. It bundles the network identity,
-// Core's own peer identity, and the set of Body memberships.
+// Core's own peer identity, the internal allocator, and the set of
+// Body memberships.
 type Network struct {
 	// NetworkID is the stable opaque identity of this network.
 	NetworkID NetworkID
@@ -109,6 +109,11 @@ type Network struct {
 	// Memberships indexes Body memberships by PeerID.
 	// Order is non-deterministic; use ListMemberships for stable iteration.
 	Memberships map[PeerID]*Membership
+
+	// alloc is the internal IPv6 ULA allocator for this network.
+	// Derived from NetworkID during construction; lazily initialized on
+	// deserialization via allocator(). Never serialized.
+	alloc *IPv6Allocator
 }
 
 // ErrAddressCollision is returned when an IPv6 address allocation

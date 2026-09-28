@@ -52,7 +52,7 @@ func GenerateWireGuardKeypair() (WireGuardPrivateKey, WireGuardPublicKey, error)
 // NewCoreIdentity creates a new Core peer identity with a fresh WireGuard
 // keypair and reserved overlay address. The overlay address is the first
 // valid host address in the network's ULA prefix (::1 within the subnet).
-func NewCoreIdentity(netID NetworkID, alloc *IPv6Allocator) (*CoreIdentity, error) {
+func NewCoreIdentity(alloc *IPv6Allocator) (*CoreIdentity, error) {
 	peerID := GeneratePeerID()
 	priv, pub, err := GenerateWireGuardKeypair()
 	if err != nil {
@@ -72,11 +72,14 @@ func NewCoreIdentity(netID NetworkID, alloc *IPv6Allocator) (*CoreIdentity, erro
 	}, nil
 }
 
-// NewNetwork creates a new Doll Network with a fresh network ID, a new
-// Core identity, and an empty membership set.
-func NewNetwork(alloc *IPv6Allocator) (*Network, error) {
-	netID := GenerateNetworkID()
-	coreID, err := NewCoreIdentity(netID, alloc)
+// NewNetwork creates a new Doll Network with the given network ID, a new
+// Core identity derived from that network ID, and an empty membership set.
+// The NetworkID is the single source of truth: the allocator is constructed
+// from it, ensuring the IPv6 ULA prefix is always consistent with the
+// network identity.
+func NewNetwork(netID NetworkID) (*Network, error) {
+	alloc := NewIPv6Allocator(netID)
+	coreID, err := NewCoreIdentity(alloc)
 	if err != nil {
 		return nil, err
 	}
@@ -85,7 +88,17 @@ func NewNetwork(alloc *IPv6Allocator) (*Network, error) {
 		NetworkID:   netID,
 		Core:        *coreID,
 		Memberships: make(map[PeerID]*Membership),
+		alloc:       alloc,
 	}, nil
+}
+
+// allocator returns the internal IPv6 allocator, lazily initialising it
+// from the NetworkID if necessary (for deserialised/reconstructed Networks).
+func (n *Network) allocator() *IPv6Allocator {
+	if n.alloc == nil {
+		n.alloc = NewIPv6Allocator(n.NetworkID)
+	}
+	return n.alloc
 }
 
 // Strings returns a non-secret diagnostic summary of the Core identity.
@@ -108,10 +121,11 @@ func WireGuardPublicKeyFromPrivate(priv WireGuardPrivateKey) (WireGuardPublicKey
 }
 
 // NewMembership creates a new Body membership in the Pending state.
-// It assigns a unique peer_id, allocates an IPv6 address, and verifies
-// there is no collision. The Body's WireGuard public key is initially nil
-// and will be set during the pairing protocol.
-func (n *Network) NewMembership(bodyID string, alloc *IPv6Allocator) (*Membership, error) {
+// It assigns a unique peer_id, allocates an IPv6 address via the
+// network's internal allocator, and verifies there is no collision.
+// The Body's WireGuard public key is initially nil and will be set
+// during the pairing protocol.
+func (n *Network) NewMembership(bodyID string) (*Membership, error) {
 	if bodyID == "" {
 		return nil, fmt.Errorf("network: body_id must not be empty")
 	}
@@ -128,7 +142,7 @@ func (n *Network) NewMembership(bodyID string, alloc *IPv6Allocator) (*Membershi
 	}
 
 	peerID := GeneratePeerID()
-	addr, err := alloc.BodyAddress(peerID)
+	addr, err := n.allocator().BodyAddress(peerID)
 	if err != nil {
 		return nil, err
 	}
