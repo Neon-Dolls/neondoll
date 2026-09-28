@@ -31,3 +31,6 @@ Thumbs.db
 # Build output
 /build
 /dist
+
+# Body binary
+cmd/neondoll-body/neondoll-body
