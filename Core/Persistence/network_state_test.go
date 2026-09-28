@@ -2,6 +2,8 @@ package persistence
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"path/filepath"
 	"testing"
 
@@ -612,4 +614,214 @@ func TestNetworkStore_RespectsMembershipStatusTransition(t *testing.T) {
 	if loaded.Status != network.MembershipRevoked {
 		t.Fatalf("stored membership status %q, want %q", loaded.Status, network.MembershipRevoked)
 	}
+}
+
+// TestNetworkStore_RestoredMembershipsBlockRecreation verifies that after a
+// full save → close → reopen → LoadNetwork cycle, persisted memberships are
+// reattached to the reconstructed Network, and body_id collision/revocation
+// semantics work correctly across restart.
+func TestNetworkStore_RestoredMembershipsBlockRecreation(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+
+	ctx := context.Background()
+
+	// Phase 1: create network, save, create two memberships, persist them.
+	s1, err := NewStore(dbPath)
+	if err != nil {
+		t.Fatalf("NewStore phase 1: %v", err)
+	}
+	ns1 := assertNetworkStore(t, s1)
+
+	netID := network.GenerateNetworkID()
+	n, err := network.NewNetwork(netID)
+	if err != nil {
+		t.Fatalf("NewNetwork: %v", err)
+	}
+	if err := ns1.SaveNetwork(ctx, n); err != nil {
+		t.Fatalf("SaveNetwork: %v", err)
+	}
+
+	// Create an active membership.
+	activeBodyID := "active-body"
+	activeMem, err := n.NewMembership(activeBodyID)
+	if err != nil {
+		t.Fatalf("NewMembership %s: %v", activeBodyID, err)
+	}
+	if err := n.ActivateMembership(activeMem.PeerID); err != nil {
+		t.Fatalf("ActivateMembership: %v", err)
+	}
+	if err := ns1.SaveMembership(ctx, n.Memberships[activeMem.PeerID]); err != nil {
+		t.Fatalf("SaveMembership (active): %v", err)
+	}
+	activePeerID := activeMem.PeerID
+
+	// Create and revoke a membership.
+	revokedBodyID := "revoked-body"
+	revokedMem, err := n.NewMembership(revokedBodyID)
+	if err != nil {
+		t.Fatalf("NewMembership %s: %v", revokedBodyID, err)
+	}
+	if err := n.RevokeMembership(revokedMem.PeerID); err != nil {
+		t.Fatalf("RevokeMembership: %v", err)
+	}
+	if err := ns1.SaveMembership(ctx, n.Memberships[revokedMem.PeerID]); err != nil {
+		t.Fatalf("SaveMembership (revoked): %v", err)
+	}
+	revokedPeerID := revokedMem.PeerID
+
+	s1.Close()
+
+	// Phase 2: reopen store and reconstruct Network.
+	s2, err := NewStore(dbPath)
+	if err != nil {
+		t.Fatalf("NewStore phase 2: %v", err)
+	}
+	defer s2.Close()
+	ns2 := assertNetworkStore(t, s2)
+
+	loaded, err := ns2.LoadNetwork(ctx)
+	if err != nil {
+		t.Fatalf("LoadNetwork: %v", err)
+	}
+	if loaded == nil {
+		t.Fatal("LoadNetwork returned nil after save")
+	}
+
+	// Verify both memberships are in the reconstructed Network's map.
+	if len(loaded.Memberships) != 2 {
+		t.Fatalf("reconstructed Network has %d memberships, want 2", len(loaded.Memberships))
+	}
+
+	gotActive, ok := loaded.Memberships[activePeerID]
+	if !ok {
+		t.Fatal("reconstructed Network missing active membership by PeerID")
+	}
+	if gotActive.BodyID != activeBodyID {
+		t.Fatalf("active BodyID: got %q, want %q", gotActive.BodyID, activeBodyID)
+	}
+	if gotActive.Status != network.MembershipActive {
+		t.Fatalf("active status: got %q, want %q", gotActive.Status, network.MembershipActive)
+	}
+
+	gotRevoked, ok := loaded.Memberships[revokedPeerID]
+	if !ok {
+		t.Fatal("reconstructed Network missing revoked membership by PeerID")
+	}
+	if gotRevoked.BodyID != revokedBodyID {
+		t.Fatalf("revoked BodyID: got %q, want %q", gotRevoked.BodyID, revokedBodyID)
+	}
+	if gotRevoked.Status != network.MembershipRevoked {
+		t.Fatalf("revoked status: got %q, want %q", gotRevoked.Status, network.MembershipRevoked)
+	}
+
+	// Verify existing body_id → already-exists error.
+	_, err = loaded.NewMembership(activeBodyID)
+	if err != network.ErrMembershipAlreadyExists {
+		t.Fatalf("NewMembership with active body_id: got %v, want %v", err, network.ErrMembershipAlreadyExists)
+	}
+
+	// Verify revoked body_id → revoked error.
+	_, err = loaded.NewMembership(revokedBodyID)
+	if err != network.ErrMembershipRevoked {
+		t.Fatalf("NewMembership with revoked body_id: got %v, want %v", err, network.ErrMembershipRevoked)
+	}
+
+	// Verify a genuinely new Body can still be allocated after restart
+	// and receives an address in the persisted NetworkID's prefix.
+	newMem, err := loaded.NewMembership("new-body-after-restart")
+	if err != nil {
+		t.Fatalf("NewMembership new body after restart: %v", err)
+	}
+	if newMem.PeerID == activePeerID || newMem.PeerID == revokedPeerID {
+		t.Fatal("new Body received duplicate PeerID")
+	}
+	prefix := network.NewIPv6Allocator(loaded.NetworkID).Prefix()
+	if !prefix.Contains(newMem.OverlayAddress) {
+		t.Fatalf("new Body address %s not in prefix %s", newMem.OverlayAddress, prefix)
+	}
+}
+
+// TestNetworkStore_UnmarshalMembership_WGKeyValidation regression-tests
+// the malformed persisted Body WireGuard public-key behavior:
+//   - length 0 → nil key, valid
+//   - length 32 → accepted
+//   - any other nonzero length → ErrCannotDecode
+func TestNetworkStore_UnmarshalMembership_WGKeyValidation(t *testing.T) {
+	// Helper: construct a minimal valid membership JSON and override the wg key.
+	baseRow := membershipRow{
+		BodyID:      "test-body",
+		PeerID:      network.PeerID("test-peer"),
+		OverlayAddr: "fd00::1",
+		Status:      network.MembershipPending,
+	}
+
+	t.Run("nil key (len 0)", func(t *testing.T) {
+		baseRow.WireGuardPublicKey = nil
+		data, err := json.Marshal(baseRow)
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		m, err := unmarshalMembership(string(data))
+		if err != nil {
+			t.Fatalf("unmarshalMembership with nil key: %v", err)
+		}
+		if m.WireGuardPublicKey != nil {
+			t.Fatal("expected nil WireGuardPublicKey for empty input")
+		}
+	})
+
+	t.Run("valid 32-byte key", func(t *testing.T) {
+		var key [32]byte
+		for i := range key {
+			key[i] = byte(i)
+		}
+		baseRow.WireGuardPublicKey = key[:]
+		data, err := json.Marshal(baseRow)
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		m, err := unmarshalMembership(string(data))
+		if err != nil {
+			t.Fatalf("unmarshalMembership with 32-byte key: %v", err)
+		}
+		if m.WireGuardPublicKey == nil {
+			t.Fatal("expected non-nil WireGuardPublicKey")
+		}
+		if *m.WireGuardPublicKey != key {
+			t.Fatal("WireGuardPublicKey value mismatch after round-trip")
+		}
+	})
+
+	t.Run("invalid 17-byte key", func(t *testing.T) {
+		key := []byte{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16}
+		baseRow.WireGuardPublicKey = key
+		data, err := json.Marshal(baseRow)
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		_, err = unmarshalMembership(string(data))
+		if err == nil {
+			t.Fatal("expected ErrCannotDecode for 17-byte key, got nil")
+		}
+		if !errors.Is(err, ErrCannotDecode) {
+			t.Fatalf("error: got %v, want wrapping ErrCannotDecode", err)
+		}
+	})
+
+	t.Run("invalid 1-byte key", func(t *testing.T) {
+		key := []byte{0x42}
+		baseRow.WireGuardPublicKey = key
+		data, err := json.Marshal(baseRow)
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		_, err = unmarshalMembership(string(data))
+		if err == nil {
+			t.Fatal("expected ErrCannotDecode for 1-byte key, got nil")
+		}
+		if !errors.Is(err, ErrCannotDecode) {
+			t.Fatalf("error: got %v, want wrapping ErrCannotDecode", err)
+		}
+	})
 }

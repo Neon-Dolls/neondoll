@@ -133,6 +133,16 @@ func (s *store) LoadNetwork(ctx context.Context) (*network.Network, error) {
 		Memberships: make(map[network.PeerID]*network.Membership),
 	}
 
+	// Populate persisted memberships so the reconstructed Network
+	// is immediately usable and knows about existing/revoked Bodies.
+	mems, err := s.ListMemberships(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("%w: load memberships: %v", ErrCannotDecode, err)
+	}
+	for _, m := range mems {
+		n.Memberships[m.PeerID] = m
+	}
+
 	return n, nil
 }
 
