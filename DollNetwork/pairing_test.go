@@ -49,7 +49,7 @@ func TestPairRequestValidationRejectsBadVersion(t *testing.T) {
 	}
 }
 
-// TestPairRequestToJSON: serialization is canonical JSON we can parse, with a
+// TestPairRequestToJSON verifies serialization produces a parseable JSON with a
 // top-level "body" and "network" object.
 func TestPairRequestToJSON(t *testing.T) {
 	r := PairRequest{

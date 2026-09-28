@@ -8,7 +8,7 @@
 // M1 actions:
 //   --init               create a fresh Body identity + WG keypair (once)
 //   --status             print the persisted identity + WG public key
-//   --pairing-request    print the canonical Doll Network pairing request
+//   --pairing-request    print the M1 Doll Network pairing request
 //
 //   --state-dir <dir>    where identity/key state lives (default: .neondoll-body)
 //   --name <name>        optional human-readable name (used at init)
@@ -35,7 +35,7 @@ func main() {
 	arch := flag.String("arch", "unknown", "architecture identifier")
 	doInit := flag.Bool("init", false, "create a fresh Body identity + WG keypair")
 	doStatus := flag.Bool("status", false, "print persisted identity + public key")
-	doPairing := flag.Bool("pairing-request", false, "print canonical pairing request")
+	doPairing := flag.Bool("pairing-request", false, "print the M1 Doll Network pairing request")
 	invid := flag.String("invitation-id", "", "pairing invitation id (for pairing-request)")
 	secret := flag.String("secret", "", "pairing invitation secret (for pairing-request)")
 	flag.Parse()

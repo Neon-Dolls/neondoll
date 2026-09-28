@@ -16,12 +16,6 @@
 
 package body
 
-import (
-	"bytes"
-	"encoding/hex"
-	"errors"
-)
-
 // MembershipStatus is the lifecycle state of this Body's network membership.
 // M1 defines the type and the lifecycle vocabulary; actual membership is
 // established by M2 pairing.
@@ -98,29 +92,4 @@ func (s *EndpointSet) AppendEndpoint(e Endpoint) {
 // Count returns how many endpoints are present.
 func (s *EndpointSet) Count() int {
 	return len(s.Endpoints)
-}
-
-// MembershipConflict is an error surfaced when an operation would change the
-// durable identity/membership of an existing Body.
-type MembershipConflictError struct{}
-
-func (MembershipConflictError) Error() string {
-	return "body: operation would mutate a stable body identity"
-}
-
-// ErrConflict creates a membership-conflict error.
-func ErrConflict() error {
-	return &MembershipConflictError{}
-}
-
-// ParseHex decodes a lowercase hex string to bytes (used by tests/fixtures).
-func ParseHex(s string) ([]byte, error) {
-	if len(s)%2 != 0 {
-		return nil, errors.New("body: odd-length hex string")
-	}
-	out := make([]byte, len(s)/2)
-	if _, err := hex.Decode(out, []byte(s)); err != nil {
-		return nil, err
-	}
-	return bytes.Clone(out), nil
 }

@@ -8,7 +8,9 @@ import (
 // ProtocolVersion is the Doll Network Protocol version.
 const ProtocolVersion = 1
 
-// PairRequestBody mirrors the "body" object of the canonical pairing request.
+// PairRequestBody mirrors the "body" object of the current M1 pairing request.
+// The exact wire shape is finalized during M2; today this is the agreed M1
+// field set submitted toward Core.
 type PairRequestBody struct {
 	BodyID         string `json:"body_id"`
 	Name           string `json:"name,omitempty"`
@@ -23,9 +25,9 @@ type PairingNetwork struct {
 	WireGuardPublicKey string `json:"wireguard_public_key"`
 }
 
-// PairRequest is the canonical pairing request. invitation_id and secret are
-// provided by Core's invitation at pairing time (M2); this package defines the
-// shape so both sides agree on the contract.
+// PairRequest is the pairing request carried to Core. invitation_id and secret
+// are provided by Core's invitation at pairing time (M2); this package defines the
+// M1 serialization shape that submission will build on.
 type PairRequest struct {
 	Version      int             `json:"version"`
 	InvitationID string          `json:"invitation_id"`
@@ -34,7 +36,7 @@ type PairRequest struct {
 	Network      PairingNetwork  `json:"network"`
 }
 
-// ToJSON renders the pairing request as canonical JSON for submission.
+// ToJSON renders the pairing request as JSON for submission.
 func (r *PairRequest) ToJSON() (string, error) {
 	data, err := json.MarshalIndent(r, "", "  ")
 	if err != nil {

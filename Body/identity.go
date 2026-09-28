@@ -12,7 +12,7 @@
 //   - a Body-owned WireGuard (X25519) keypair, generated and retained locally;
 //   - persistent identity/membership state kept separate from transient
 //     connection/endpoint state;
-//   - canonical pairing-request data containing only the public key.
+//   - pairing-request data (conceptual M1 shape) containing only the public key.
 
 package body
 

@@ -3,7 +3,9 @@ package body
 import (
 	"encoding/base64"
 	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -242,5 +244,93 @@ func TestCreateFreshCreateOnceAcrossRestart(t *testing.T) {
 	s2 := NewStore(dir)
 	if _, err := s2.CreateFresh("Other", meta_()); err != ErrIdentityExists {
 		t.Fatalf("expected ErrIdentityExists across restart, got %v", err)
+	}
+}
+
+// TestCreateFreshPartialFailureLeavesNoHalfBody: if initialization fails after
+// the identity file is claimed (the WG key write fails), the store must roll
+// back so no half-created Body (body.json without a wg_private.key) can block a
+// later CreateFresh.
+func TestCreateFreshPartialFailureLeavesNoHalfBody(t *testing.T) {
+	dir := t.TempDir()
+	s := NewStore(dir)
+
+	// Block the WG key path with a non-empty directory so SaveWgKeypair's
+	// atomic rename fails cleanly AFTER the body.json identity claim succeeds.
+	blocker := s.wgPrivatePath()
+	if err := os.Mkdir(blocker, 0700); err != nil {
+		t.Fatalf("Mkdir blocker: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(blocker, "stuck"), []byte("x"), 0600); err != nil {
+		t.Fatalf("write blocker: %v", err)
+	}
+
+	_, err := s.CreateFresh("SparkBody", meta_())
+	if err == nil {
+		t.Fatal("expected CreateFresh to fail when the WG key cannot be persisted")
+	}
+
+	// The claimed identity must have been rolled back — no body.json left over.
+	if s.HasIdentity() {
+		t.Fatal("half-created Body left behind after failed init (HasIdentity true)")
+	}
+	if _, _, lerr := s.LoadOrError(); lerr != ErrStateNotFound {
+		t.Fatalf("LoadOrError after failed init = %v, want ErrStateNotFound", lerr)
+	}
+
+	// Unblock the key path; a retry CreateFresh must now succeed.
+	if err := os.RemoveAll(blocker); err != nil {
+		t.Fatalf("unblock: %v", err)
+	}
+	res, err := s.CreateFresh("SparkBody", meta_())
+	if err != nil {
+		t.Fatalf("CreateFresh after cleanup: %v", err)
+	}
+	if res.State.Identity.BodyID == "" {
+		t.Error("retry create left empty body_id")
+	}
+}
+
+// TestCreateFreshConcurrentIsCreateOnce: many concurrent CreateFresh calls on
+// an empty store yield exactly one success; all others refuse with
+// ErrIdentityExists. The exclusive-created identity file is the atomic gate, so
+// there is no check-then-act race.
+func TestCreateFreshConcurrentIsCreateOnce(t *testing.T) {
+	dir := t.TempDir()
+	s := NewStore(dir)
+
+	const n = 32
+	results := make([]bool, n)
+	var wg sync.WaitGroup
+	wg.Add(n)
+	for i := 0; i < n; i++ {
+		go func(i int) {
+			defer wg.Done()
+			_, err := s.CreateFresh("SparkBody", meta_())
+			results[i] = (err == nil)
+		}(i)
+	}
+	wg.Wait()
+
+	successes := 0
+	for _, ok := range results {
+		if ok {
+			successes++
+		}
+	}
+	if successes != 1 {
+		t.Fatalf("concurrent CreateFresh: got %d successes, want exactly 1", successes)
+	}
+
+	// The single surviving identity+key must load intact.
+	st, kp, err := s.LoadOrError()
+	if err != nil {
+		t.Fatalf("LoadOrError after concurrent create: %v", err)
+	}
+	if st.Identity.BodyID == "" {
+		t.Error("concurrent create left empty body_id")
+	}
+	if kp.PublicKeyBase64() == "" {
+		t.Error("concurrent create left empty WG public key")
 	}
 }

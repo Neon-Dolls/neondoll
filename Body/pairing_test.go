@@ -58,8 +58,9 @@ func TestPairingRequestContainsPublicKeyOnly(t *testing.T) {
 	}
 }
 
-// TestPairingRequestCanonicalShape: the serialized shape matches the protocol.
-func TestPairingRequestCanonicalShape(t *testing.T) {
+// TestPairingRequestShape: the serialized request carries the agreed M1 field
+// set (exact wire details deferred to M2).
+func TestPairingRequestShape(t *testing.T) {
 	st, err := mkIdentity_()
 	if err != nil {
 		t.Fatalf("mkIdentity_: %v", err)

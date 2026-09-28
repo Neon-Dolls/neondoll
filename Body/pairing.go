@@ -2,20 +2,18 @@ package body
 
 import "github.com/Neon-Dolls/neondoll/DollNetwork"
 
-// BuildPairingBody constructs the canonical body object from a persisted
+// BuildPairingBody constructs the current pairing body object from a persisted
 // identity state. It is the M1 deliverable: pairing-request data that Core
-// can consume, produced without any Core-internal import.
+// can consume, produced without any Core-internal import. The exact wire shape
+// is finalized in M2; we carry the M1 field set today.
 func BuildPairingBody(st *IdentityState) dollnetwork.PairRequestBody {
-	body := dollnetwork.PairRequestBody{
-		BodyID: string(st.Identity.BodyID),
-		Name:   st.Identity.Name,
+	return dollnetwork.PairRequestBody{
+		BodyID:         string(st.Identity.BodyID),
+		Name:           st.Identity.Name,
+		Implementation: st.Identity.Meta.Implementation,
+		Platform:       st.Identity.Meta.Platform,
+		Arch:           st.Identity.Meta.Arch,
 	}
-	if m := &st.Identity.Meta; m != nil {
-		body.Implementation = m.Implementation
-		body.Platform = m.Platform
-		body.Arch = m.Arch
-	}
-	return body
 }
 
 // BuildPairingNetwork builds the network object containing only the WG public
@@ -26,8 +24,9 @@ func BuildPairingNetwork(kp *WgKeypair) dollnetwork.PairingNetwork {
 	}
 }
 
-// BuildPairRequest composes a full canonical pairing request from an
-// invitation's id/secret plus the Body's identity and WG public key.
+// BuildPairRequest composes a pairing request from an invitation's id/secret
+// plus the Body's identity and WG public key. The M1 field set is carried here
+// as a Doll Network concept; exact wire details are finalized in M2.
 func BuildPairRequest(invitationID, secret string, st *IdentityState, kp *WgKeypair) dollnetwork.PairRequest {
 	return dollnetwork.PairRequest{
 		Version:      dollnetwork.ProtocolVersion,
