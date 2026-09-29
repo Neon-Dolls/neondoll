@@ -1,3 +1,6 @@
+// Package dollnetwork defines the canonical wire-protocol types for the
+// NeonDoll network. These types are shared between Core and Body
+// implementations — no Core-internal types or secrets appear here.
 package dollnetwork
 
 import (
@@ -101,4 +104,58 @@ func (r *PairRequest) ValidatePairRequest() error {
 		return fmt.Errorf("dollnetwork: invalid wireguard public key: %w", err)
 	}
 	return nil
+}
+
+// ── PairResponse (Core → Body, success) ──────────────────────────────────────
+
+// PairResponse is the canonical successful pairing response from Core.
+// It carries the information a Body needs to establish WireGuard and
+// Doll Link connectivity.
+//
+// CoreEndpoints may be empty; an empty slice is valid (the Body will
+// discover endpoints out of band or through a relay later).
+type PairResponse struct {
+	Version         int      `json:"version"`
+	NetworkID       string   `json:"network_id"`
+	BodyPeerID      string   `json:"body_peer_id"`
+	BodyAddresses   []string `json:"body_addresses"`
+	CorePeerID      string   `json:"core_peer_id"`
+	CoreWGPublicKey string   `json:"core_wg_public_key"`
+	CoreAddresses   []string `json:"core_addresses"`
+	CoreEndpoints   []string `json:"core_endpoints"`
+}
+
+// ── PairErrorResponse (Core → Body, error/denial) ────────────────────────────
+
+// PairErrorResponse is the canonical error or denial response from Core.
+// Consumed indicates whether the invitation was consumed as part of the
+// attempt (true for well-formed but denied/replayed requests, false for
+// malformed or unknown-invitation errors).
+type PairErrorResponse struct {
+	Version  int    `json:"version"`
+	Error    string `json:"error"`
+	Reason   string `json:"reason"`
+	Consumed bool   `json:"consumed"`
+}
+
+// ── Invitation (out-of-band document) ────────────────────────────────────────
+
+// Invitation is the out-of-band invitation document that Core creates and
+// delivers to a Body through some side channel (QR code, file, CLI output).
+// The secret is only revealed once and MUST be kept confidential.
+type Invitation struct {
+	Version            int      `json:"version"`
+	InvitationID       string   `json:"invitation_id"`
+	InvitationSecret   string   `json:"invitation_secret"`
+	ExpiresAt          string   `json:"expires_at"`
+	BootstrapEndpoints []string `json:"bootstrap_endpoints"`
+}
+
+// ── BootstrapEndpoint descriptor ─────────────────────────────────────────────
+
+// BootstrapEndpoint describes a reachable address where the Body can contact
+// Core to begin the pairing flow.
+type BootstrapEndpoint struct {
+	// URL is the full URL (e.g. "https://core.example.com:8443").
+	URL string `json:"url"`
 }
