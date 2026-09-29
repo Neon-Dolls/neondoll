@@ -264,12 +264,21 @@ func PairWithInvitation(ctx context.Context, store *Store, inv *dollnetwork.Invi
 		return nil, errors.New("body: pairing: nil store")
 	}
 
-	// Fail closed if a membership is already established. We must never
-	// replace an existing durable relationship just because --pair ran again.
-	if existing, err := store.LoadMembership(); err == nil && existing != nil {
+	// Fail closed if a membership is already present or the file is corrupt/unreadable.
+	// We must never replace an existing durable relationship just because --pair ran again.
+	mem, err := store.LoadMembership()
+	if err != nil {
+		if errors.Is(err, ErrStateNotFound) {
+			// No membership yet, pairing may continue.
+		} else {
+			// Any other error (corrupt file, IO, etc.) -> fail closed and preserve the file.
+			return nil, &PairingError{Op: "load membership", Cause: err}
+		}
+	} else if mem != nil {
+		// Valid existing membership -> reject implicit re-pairing.
 		return nil, &PairingError{
 			Op:    "existing membership",
-			Cause: fmt.Errorf("member already paired (network_id=%q body_peer_id=%q); replacement is not implicit", existing.NetworkID, existing.BodyPeerID),
+			Cause: fmt.Errorf("member already paired (network_id=%q body_peer_id=%q); replacement is not implicit", mem.NetworkID, mem.BodyPeerID),
 		}
 	}
 

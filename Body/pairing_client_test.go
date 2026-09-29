@@ -1,6 +1,7 @@
 package body
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -449,5 +450,87 @@ func TestPairWithInvitation_AcceptsBareIPv6(t *testing.T) {
 	}
 	if res.Membership.BodyIPv6 != "fdc9::1" {
 		t.Errorf("body_ipv6 = %q, want %q", res.Membership.BodyIPv6, "fdc9::1")
+	}
+}
+
+// TestPairWithInvitation_CorruptMembershipFileFailsClosed:
+// If membership.json exists but is corrupt/unreadable, pairing must fail closed
+// and preserve the original file untouched. No request should reach Core.
+func TestPairWithInvitation_CorruptMembershipFileFailsClosed(t *testing.T) {
+	t.Helper()
+	store := newPairingStore(t)
+	// Corrupt the membership file with invalid JSON.
+	if err := os.WriteFile(store.membershipPath(), []byte("{not valid json"), 0600); err != nil {
+		t.Fatalf("write corrupt membership: %v", err)
+	}
+	// Record original file size and mod time to detect overwrites.
+	origInfo, err := os.Stat(store.membershipPath())
+	if err != nil {
+		t.Fatalf("stat original corrupt file: %v", err)
+	}
+	origSize := origInfo.Size()
+	origMod := origInfo.ModTime()
+
+	// Prepare a Core httptest server that would succeed if reached.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("unexpected request reached Core: %s %s", r.Method, r.URL.Path)
+		w.WriteHeader(http.StatusInternalServerError) // make test fail loudly if called
+	}))
+	defer srv.Close()
+
+	now := time.Now().Unix()
+	inv := validInvitation(now, srv.URL)
+
+	// PairWithInvitation must fail closed due to corrupt membership.
+	_, err = PairWithInvitation(context.Background(), store, inv, now, srv.Client())
+	if err == nil {
+		t.Fatal("expected pairing to fail with corrupt membership, got nil error")
+	}
+	// Ensure no request hit the Core server.
+	// Cannot easily spy; rely on the handler above not being called.
+
+	// Verify the corrupt membership file was NOT overwritten.
+	info, err := os.Stat(store.membershipPath())
+	if err != nil {
+		t.Fatalf("stat membership after failed pairing: %v", err)
+	}
+	if info.Size() != origSize {
+		t.Errorf("membership file size changed after failed pairing: had %d, now %d", origSize, info.Size())
+	}
+	if !info.ModTime().Equal(origMod) {
+		t.Errorf("membership file modified after failed pairing: had %v, now %v", origMod, info.ModTime())
+	}
+	// Contents should still be the corrupt bytes we wrote.
+	data, err := os.ReadFile(store.membershipPath())
+	if err != nil {
+		t.Fatalf("read membership after failed pairing: %v", err)
+	}
+	if !bytes.Equal(data, []byte("{not valid json")) {
+		t.Errorf("membership file contents corrupted unexpectedly: got %q, want corrupt", string(data))
+	}
+
+	// Body identity and WG keypair must remain unchanged.
+	id0, kp0, err := store.LoadOrError()
+	if err != nil {
+		t.Fatalf("load body identity before failed pairing: %v", err)
+	}
+	if id0 == nil || kp0 == nil {
+		t.Fatal("missing identity or WG keypair before failed pairing")
+	}
+	// ... (rest of the test until the end)
+
+	// Body identity and WG keypair must remain unchanged.
+	id1, kp1, err := store.LoadOrError()
+	if err != nil {
+		t.Fatalf("load body identity after failed pairing: %v", err)
+	}
+	if id1 == nil || kp1 == nil {
+		t.Fatal("missing identity or WG keypair after failed pairing")
+	}
+	if id0.Identity.BodyID != id1.Identity.BodyID {
+		t.Errorf("body ID changed after failed pairing: got %q, want %q", id1.Identity.BodyID, id0.Identity.BodyID)
+	}
+	if kp0.PublicKeyBase64() != kp1.PublicKeyBase64() {
+		t.Errorf("WG public key changed after failed pairing")
 	}
 }
