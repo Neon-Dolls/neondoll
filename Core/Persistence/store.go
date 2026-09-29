@@ -177,6 +177,22 @@ func createSchema(db *sql.DB) error {
 		return fmt.Errorf("network_state table: %v", err)
 	}
 
+	// Core 4 M3: Invitation store — durable invitation persistence
+	// with atomic consumption for concurrency safety.
+	_, err = db.Exec(`
+		CREATE TABLE IF NOT EXISTS invitations (
+			id            TEXT PRIMARY KEY,
+			secret_hash   BLOB NOT NULL,
+			expires_at    TEXT NOT NULL,
+			consumed      INTEGER NOT NULL DEFAULT 0,
+			endpoints_json TEXT NOT NULL DEFAULT '[]',
+			created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+		);
+	`)
+	if err != nil {
+		return fmt.Errorf("invitations table: %v", err)
+	}
+
 	return nil
 }
 
