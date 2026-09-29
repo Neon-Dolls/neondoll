@@ -1,0 +1,336 @@
+package body
+
+import (
+	"encoding/base64"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"testing"
+)
+
+func meta_() BodyMetadata {
+	return BodyMetadata{Implementation: "neondoll-body", Platform: "linux", Arch: "amd64"}
+}
+
+// TestFreshCreateMakesIdentityOnce: a fresh install creates identity once.
+func TestFreshCreateMakesIdentityOnce(t *testing.T) {
+	dir := t.TempDir()
+	s := NewStore(dir)
+	res, err := s.CreateFresh("SparkBody", meta_())
+	if err != nil {
+		t.Fatalf("CreateFresh: %v", err)
+	}
+	if res.State.Identity.BodyID == "" {
+		t.Error("body_id should be non-empty")
+	}
+	// Reloading must return the SAME identity — create did not double-generate.
+	st, kp, err2 := s.LoadOrError()
+	if err2 != nil {
+		t.Fatalf("LoadOrError after create: %v", err2)
+	}
+	if st.Identity.BodyID != res.State.Identity.BodyID {
+		t.Errorf("reload body_id = %q, want %q", st.Identity.BodyID, res.State.Identity.BodyID)
+	}
+	if kp.PublicKeyBase64() != res.Key.PublicKeyBase64() {
+		t.Errorf("reload public key differs from created keypair")
+	}
+}
+
+// TestRestartPreservesIdentityAndKey: a restart loads the same identity/key.
+func TestRestartPreservesIdentityAndKey(t *testing.T) {
+	dir := t.TempDir()
+	s := NewStore(dir)
+	res, err := s.CreateFresh("SparkBody", meta_())
+	if err != nil {
+		t.Fatalf("CreateFresh: %v", err)
+	}
+
+	// Simulate a restart: a brand-new Store instance on the same directory.
+	s2 := NewStore(dir)
+	st, kp, err2 := s2.LoadOrError()
+	if err2 != nil {
+		t.Fatalf("LoadOrError after restart: %v", err2)
+	}
+	if st.Identity.BodyID != res.State.Identity.BodyID {
+		t.Errorf("restart changed body_id: %q vs %q", st.Identity.BodyID, res.State.Identity.BodyID)
+	}
+	if st.Identity.Name != "SparkBody" {
+		t.Errorf("restart changed name: %q", st.Identity.Name)
+	}
+	if kp.PublicKeyBase64() != res.Key.PublicKeyBase64() {
+		t.Errorf("restart changed WG public key")
+	}
+}
+
+// TestLoadBeforeCreateIsNotFound: loading with no state is a clean
+// "not found", and does not silently create anything.
+func TestLoadBeforeCreateIsNotFound(t *testing.T) {
+	dir := t.TempDir()
+	s := NewStore(dir)
+	_, _, err := s.LoadOrError()
+	if err != ErrStateNotFound {
+		t.Fatalf("expected ErrStateNotFound, got %v", err)
+	}
+	if s.HasIdentity() {
+		t.Error("HasIdentity() should be false before any create")
+	}
+}
+
+// TestCorruptIdentityFailsSafe: corrupt state is surfaced as an error and is
+// NOT silently replaced.
+func TestCorruptIdentityFailsSafe(t *testing.T) {
+	dir := t.TempDir()
+	s := NewStore(dir)
+	res, err := s.CreateFresh("SparkBody", meta_())
+	if err != nil {
+		t.Fatalf("CreateFresh: %v", err)
+	}
+
+	// Corrupt the identity file.
+	data := []byte(`{ "this is not valid identity json"`)
+	if err := os.WriteFile(s.statePath(), data, 0600); err != nil {
+		t.Fatalf("write corrupt identity: %v", err)
+	}
+
+	_, _, loadErr := s.LoadOrError()
+	if loadErr == nil {
+		t.Fatal("expected error loading corrupt identity")
+	}
+	if loadErr == ErrStateNotFound {
+		t.Fatal("corrupt identity must not be treated as not-found (silent regen)")
+	}
+
+	// Identity must still exist on disk (not deleted/regenerated).
+	if !s.HasIdentity() {
+		t.Error("corrupt identity file should not be removed")
+	}
+
+	// The stored public key must be untouched (key and identity stores are
+	// separate; a corrupt identity does not destroy WG identity).
+	privRaw, rerr := os.ReadFile(s.wgPrivatePath())
+	if rerr != nil {
+		t.Fatalf("read wg key: %v", rerr)
+	}
+	priv, derr := base64.StdEncoding.DecodeString(string(privRaw))
+	if derr != nil {
+		t.Fatalf("decode wg key: %v", derr)
+	}
+	defer Wipe(priv)
+	kp, kerr := NewWgKeypair(priv)
+	if kerr != nil {
+		t.Fatalf("NewWgKeypair: %v", kerr)
+	}
+	if kp.PublicKeyBase64() != res.Key.PublicKeyBase64() {
+		t.Error("WG identity changed after identity-file corruption")
+	}
+}
+
+// TestCorruptWgKeyFailsSafe: a corrupt private-key file is surfaced, not
+// silently replaced.
+func TestCorruptWgKeyFailsSafe(t *testing.T) {
+	dir := t.TempDir()
+	s := NewStore(dir)
+	if _, err := s.CreateFresh("SparkBody", meta_()); err != nil {
+		t.Fatalf("CreateFresh: %v", err)
+	}
+	if err := os.WriteFile(s.wgPrivatePath(), []byte("not-base64!!!"), 0600); err != nil {
+		t.Fatalf("write corrupt wg key: %v", err)
+	}
+	_, _, loadErr := s.LoadOrError()
+	if loadErr == nil {
+		t.Fatal("expected error loading corrupt wg key")
+	}
+}
+
+// TestMissingWgKeyWithIdentityFailsSafe: an identity present without its WG
+// key is an inconsistency surfaced as an error, never silently regenerated.
+func TestMissingWgKeyWithIdentityFailsSafe(t *testing.T) {
+	dir := t.TempDir()
+	s := NewStore(dir)
+	if _, err := s.CreateFresh("SparkBody", meta_()); err != nil {
+		t.Fatalf("CreateFresh: %v", err)
+	}
+	// Remove the private key file.
+	if err := os.Remove(s.wgPrivatePath()); err != nil {
+		t.Fatalf("remove wg key: %v", err)
+	}
+	_, _, loadErr := s.LoadOrError()
+	if loadErr == nil {
+		t.Fatal("expected error when identity exists but WG key is missing")
+	}
+}
+
+// TestPrivateKeyFileIsOwnerOnly: the WG private key is stored with
+// restricted permissions so it stays local.
+func TestPrivateKeyFileIsOwnerOnly(t *testing.T) {
+	dir := t.TempDir()
+	s := NewStore(dir)
+	if _, err := s.CreateFresh("SparkBody", meta_()); err != nil {
+		t.Fatalf("CreateFresh: %v", err)
+	}
+	info, err := os.Stat(s.wgPrivatePath())
+	if err != nil {
+		t.Fatalf("stat wg key: %v", err)
+	}
+	mode := info.Mode() & 0o777
+	// 0600: owner read/write only.
+	if mode != 0o600 {
+		t.Errorf("wg private key mode = 0%o, want 0600", mode)
+	}
+}
+
+// TestNoIdentityFileInEndpoints: endpoint state never becomes part of the
+// durable identity files.
+func TestNoIdentityFileInEndpoints(t *testing.T) {
+	dir := t.TempDir()
+	s := NewStore(dir)
+	if _, err := s.CreateFresh("SparkBody", meta_()); err != nil {
+		t.Fatalf("CreateFresh: %v", err)
+	}
+	// Only identity + key files may exist; no endpoint/connection file.
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("ReadDir: %v", err)
+	}
+	for _, e := range ents {
+		name := e.Name()
+		if strings.Contains(name, "endpoint") || strings.Contains(name, "connection") {
+			t.Errorf("endpoint/connection state leaked into durable identity dir: %q", name)
+		}
+	}
+}
+
+// TestCreateFreshIsCreateOnce: a second CreateFresh on the same store must
+// refuse with ErrIdentityExists and must NOT overwrite the existing identity.
+func TestCreateFreshIsCreateOnce(t *testing.T) {
+	dir := t.TempDir()
+	s := NewStore(dir)
+	res1, err := s.CreateFresh("SparkBody", meta_())
+	if err != nil {
+		t.Fatalf("first CreateFresh: %v", err)
+	}
+	// Attempt to create again — must refuse with ErrIdentityExists.
+	_, err = s.CreateFresh("OverwriteAttempt", meta_())
+	if err != ErrIdentityExists {
+		t.Fatalf("expected ErrIdentityExists, got %v", err)
+	}
+	// The original identity must still be intact.
+	st, kp, err := s.LoadOrError()
+	if err != nil {
+		t.Fatalf("LoadOrError after refused create: %v", err)
+	}
+	if st.Identity.BodyID != res1.State.Identity.BodyID {
+		t.Errorf("second create changed body_id: %q vs %q", st.Identity.BodyID, res1.State.Identity.BodyID)
+	}
+	if st.Identity.Name != "SparkBody" {
+		t.Errorf("second create changed name: %q", st.Identity.Name)
+	}
+	if kp.PublicKeyBase64() != res1.Key.PublicKeyBase64() {
+		t.Error("second create changed WG public key")
+	}
+}
+
+// TestCreateFreshCreateOnceAcrossRestart: a fresh Store instance on the same
+// directory (simulated restart) must still refuse to overwrite an identity
+// created by a previous instance.
+func TestCreateFreshCreateOnceAcrossRestart(t *testing.T) {
+	dir := t.TempDir()
+	s1 := NewStore(dir)
+	if _, err := s1.CreateFresh("SparkBody", meta_()); err != nil {
+		t.Fatalf("CreateFresh: %v", err)
+	}
+	// A fresh Store instance on the same dir = simulated restart.
+	s2 := NewStore(dir)
+	if _, err := s2.CreateFresh("Other", meta_()); err != ErrIdentityExists {
+		t.Fatalf("expected ErrIdentityExists across restart, got %v", err)
+	}
+}
+
+// TestCreateFreshPartialFailureLeavesNoHalfBody: if initialization fails after
+// the identity file is claimed (the WG key write fails), the store must roll
+// back so no half-created Body (body.json without a wg_private.key) can block a
+// later CreateFresh.
+func TestCreateFreshPartialFailureLeavesNoHalfBody(t *testing.T) {
+	dir := t.TempDir()
+	s := NewStore(dir)
+
+	// Block the WG key path with a non-empty directory so SaveWgKeypair's
+	// atomic rename fails cleanly AFTER the body.json identity claim succeeds.
+	blocker := s.wgPrivatePath()
+	if err := os.Mkdir(blocker, 0700); err != nil {
+		t.Fatalf("Mkdir blocker: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(blocker, "stuck"), []byte("x"), 0600); err != nil {
+		t.Fatalf("write blocker: %v", err)
+	}
+
+	_, err := s.CreateFresh("SparkBody", meta_())
+	if err == nil {
+		t.Fatal("expected CreateFresh to fail when the WG key cannot be persisted")
+	}
+
+	// The claimed identity must have been rolled back — no body.json left over.
+	if s.HasIdentity() {
+		t.Fatal("half-created Body left behind after failed init (HasIdentity true)")
+	}
+	if _, _, lerr := s.LoadOrError(); lerr != ErrStateNotFound {
+		t.Fatalf("LoadOrError after failed init = %v, want ErrStateNotFound", lerr)
+	}
+
+	// Unblock the key path; a retry CreateFresh must now succeed.
+	if err := os.RemoveAll(blocker); err != nil {
+		t.Fatalf("unblock: %v", err)
+	}
+	res, err := s.CreateFresh("SparkBody", meta_())
+	if err != nil {
+		t.Fatalf("CreateFresh after cleanup: %v", err)
+	}
+	if res.State.Identity.BodyID == "" {
+		t.Error("retry create left empty body_id")
+	}
+}
+
+// TestCreateFreshConcurrentIsCreateOnce: many concurrent CreateFresh calls on
+// an empty store yield exactly one success; all others refuse with
+// ErrIdentityExists. The exclusive-created identity file is the atomic gate, so
+// there is no check-then-act race.
+func TestCreateFreshConcurrentIsCreateOnce(t *testing.T) {
+	dir := t.TempDir()
+	s := NewStore(dir)
+
+	const n = 32
+	results := make([]bool, n)
+	var wg sync.WaitGroup
+	wg.Add(n)
+	for i := 0; i < n; i++ {
+		go func(i int) {
+			defer wg.Done()
+			_, err := s.CreateFresh("SparkBody", meta_())
+			results[i] = (err == nil)
+		}(i)
+	}
+	wg.Wait()
+
+	successes := 0
+	for _, ok := range results {
+		if ok {
+			successes++
+		}
+	}
+	if successes != 1 {
+		t.Fatalf("concurrent CreateFresh: got %d successes, want exactly 1", successes)
+	}
+
+	// The single surviving identity+key must load intact.
+	st, kp, err := s.LoadOrError()
+	if err != nil {
+		t.Fatalf("LoadOrError after concurrent create: %v", err)
+	}
+	if st.Identity.BodyID == "" {
+		t.Error("concurrent create left empty body_id")
+	}
+	if kp.PublicKeyBase64() == "" {
+		t.Error("concurrent create left empty WG public key")
+	}
+}
