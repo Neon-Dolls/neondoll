@@ -3,6 +3,7 @@ package body
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -296,5 +297,157 @@ func TestPairWithInvitation_ContextTimeout(t *testing.T) {
 	}
 	if elapsed := time.Since(start); elapsed > 2*time.Second {
 		t.Errorf("pairing took %v, expected bounded by context timeout", elapsed)
+	}
+}
+
+// TestPairWithInvitation_DoesNotReplaceExistingMembership: pairing must fail
+// closed when a durable membership is already established. The first pairing
+// establishes membership; a second attempt must NOT replace it — the original
+// network_id / body peer ID / Core relationship and the Body identity + WG
+// keypair remain unchanged.
+func TestPairWithInvitation_DoesNotReplaceExistingMembership(t *testing.T) {
+	store := newPairingStore(t)
+	// Capture the persisted identity + WG keypair before any pairing, so we can
+	// prove pairing never regenerates them.
+	stBefore, kpBefore, err := store.LoadOrError()
+	if err != nil || stBefore == nil || kpBefore == nil {
+		t.Fatalf("LoadOrError before pairing: %v", err)
+	}
+	bodyIDBefore := string(stBefore.Identity.BodyID)
+	wgPubBefore := kpBefore.PublicKeyBase64()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(validPairResponse(t))
+	}))
+	defer srv.Close()
+
+	now := time.Now().Unix()
+	inv := validInvitation(now, srv.URL)
+
+	// ── First pairing: establishes the durable membership ───────────────
+	first, err := PairWithInvitation(context.Background(), store, inv, now, srv.Client())
+	if err != nil {
+		t.Fatalf("first pairing: %v", err)
+	}
+	if first == nil || first.Membership == nil {
+		t.Fatal("first pairing returned no membership")
+	}
+	firstNet := first.Membership.NetworkID
+	firstBodyPeer := first.Membership.BodyPeerID
+	firstCorePeer := first.Membership.CorePeerID
+	firstCoreWg := first.Membership.CoreWGKeyB64
+
+	// ── Second pairing: must FAIL CLOSED and leave everything untouched ─
+	second, err := PairWithInvitation(context.Background(), store, inv, now, srv.Client())
+	if err == nil {
+		t.Fatal("second pairing succeeded; must fail closed on existing membership")
+	}
+	if second != nil {
+		t.Error("second pairing returned a result despite failing closed")
+	}
+	// The error must be the explicit existing-membership sentinel.
+	errOp := fmt.Sprintf("%v", err)
+	if !strings.Contains(errOp, "existing membership") {
+		t.Errorf("second pairing error = %q, want existing-membership error", errOp)
+	}
+
+	// ── Reload durable state: nothing was replaced ───────────────────────
+	m, err := store.LoadMembership()
+	if err != nil {
+		t.Fatalf("LoadMembership after failed second pairing: %v", err)
+	}
+	if m.NetworkID != firstNet {
+		t.Errorf("network_id replaced: %q → %q", firstNet, m.NetworkID)
+	}
+	if m.BodyPeerID != firstBodyPeer {
+		t.Errorf("body_peer_id replaced: %q → %q", firstBodyPeer, m.BodyPeerID)
+	}
+	if m.CorePeerID != firstCorePeer {
+		t.Errorf("core_peer_id replaced: %q → %q", firstCorePeer, m.CorePeerID)
+	}
+	if m.CoreWGKeyB64 != firstCoreWg {
+		t.Error("core_wg_public_key replaced")
+	}
+
+	// ── Body identity + WG keypair are never regenerated ─────────────────
+	stAfter, kpAfter, err := store.LoadOrError()
+	if err != nil {
+		t.Fatalf("LoadOrError after failed second pairing: %v", err)
+	}
+	if stAfter == nil || kpAfter == nil {
+		t.Fatal("body identity lost after failed second pairing")
+	}
+	if string(stAfter.Identity.BodyID) != bodyIDBefore {
+		t.Errorf("body id regenerated: %q → %q", bodyIDBefore, string(stAfter.Identity.BodyID))
+	}
+	if kpAfter.PublicKeyBase64() != wgPubBefore {
+		t.Error("wg keypair regenerated")
+	}
+}
+
+// TestPairWithInvitation_BootstrapURLTrailingSlash: the pairing endpoint is
+// built structurally, so a bootstrap URL ending in "/" must resolve to
+// "<origin>/v1/pair" (never "<origin>//v1/pair").
+func TestPairWithInvitation_BootstrapURLTrailingSlash(t *testing.T) {
+	store := newPairingStore(t)
+
+	gotPath := ""
+	gotCount := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotCount++
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(validPairResponse(t))
+	}))
+	defer srv.Close()
+
+	now := time.Now().Unix()
+	inv := validInvitation(now, strings.TrimRight(srv.URL, "/")+"/")
+
+	_, err := PairWithInvitation(context.Background(), store, inv, now, srv.Client())
+	if err != nil {
+		t.Fatalf("PairWithInvitation with trailing-slash bootstrap URL: %v", err)
+	}
+	if gotCount != 1 {
+		t.Errorf("server received %d requests, want 1", gotCount)
+	}
+	if gotPath != pairingEndpointPath {
+		t.Errorf("request path = %q, want %q (trailing slash must not double)", gotPath, pairingEndpointPath)
+	}
+	if strings.Contains(gotPath, "//") {
+		t.Errorf("request path %q contains a double slash", gotPath)
+	}
+}
+
+// TestPairWithInvitation_AcceptsBareIPv6: Core (the address authority) sends
+// bare IPv6 overlay addresses (netip.Addr.String()) without a /mask. The Body
+// must accept both bare and prefixed forms rather than rejecting the response.
+func TestPairWithInvitation_AcceptsBareIPv6(t *testing.T) {
+	store := newPairingStore(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		base := validPairResponse(t)
+		// Simulate Core's canonical output: bare address, no /128.
+		base.BodyAddresses = []string{"fdc9::1"}
+		base.CoreAddresses = []string{"fdc9::2"}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(base)
+	}))
+	defer srv.Close()
+
+	now := time.Now().Unix()
+	res, err := PairWithInvitation(context.Background(), store, validInvitation(now, srv.URL), now, srv.Client())
+	if err != nil {
+		t.Fatalf("PairWithInvitation with bare IPv6 overlay addresses: %v", err)
+	}
+	if res == nil || res.Membership == nil {
+		t.Fatal("expected non-nil membership")
+	}
+	if res.Membership.BodyIPv6 != "fdc9::1" {
+		t.Errorf("body_ipv6 = %q, want %q", res.Membership.BodyIPv6, "fdc9::1")
 	}
 }

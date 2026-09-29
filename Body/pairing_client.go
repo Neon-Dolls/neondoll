@@ -35,6 +35,7 @@ import (
 	"net/http"
 	"net/netip"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/Neon-Dolls/neondoll/DollNetwork"
@@ -209,6 +210,17 @@ func validOverlayAddress(addrs []string) (string, bool) {
 		if a == "" {
 			continue
 		}
+		// Accept both a bare IPv6 (Core sends netip.Addr.String(), e.g.
+		// "fdc9::...:1") and a prefixed form ("fd00::1/128"). The mere
+		// absence of a mask must not cause the whole response to be
+		// rejected — the address is what Core the address-authority assigns.
+		addr, err := netip.ParseAddr(a)
+		if err == nil {
+			if addr.Is6() {
+				return a, true
+			}
+			continue
+		}
 		prefix, err := netip.ParsePrefix(a)
 		if err != nil {
 			continue
@@ -242,10 +254,25 @@ type PairResult struct {
 // tests). `ctx` carries timeout/cancellation for the request. On success the
 // returned membership is already persisted; callers must not persist on
 // failure, and failure leaves any prior durable membership untouched.
+//
+// IMPORTANT: pairing FAILS CLOSED when a durable membership is already
+// present. --pair must never silently replace an established Doll Network
+// relationship. Replacement/reset/re-enrollment is an explicit (future)
+// lifecycle operation, not implicit pairing behavior.
 func PairWithInvitation(ctx context.Context, store *Store, inv *dollnetwork.Invitation, now int64, hc *http.Client) (*PairResult, error) {
 	if store == nil {
 		return nil, errors.New("body: pairing: nil store")
 	}
+
+	// Fail closed if a membership is already established. We must never
+	// replace an existing durable relationship just because --pair ran again.
+	if existing, err := store.LoadMembership(); err == nil && existing != nil {
+		return nil, &PairingError{
+			Op:    "existing membership",
+			Cause: fmt.Errorf("member already paired (network_id=%q body_peer_id=%q); replacement is not implicit", existing.NetworkID, existing.BodyPeerID),
+		}
+	}
+
 	if inv == nil {
 		return nil, errors.New("body: pairing: nil invitation")
 	}
@@ -287,7 +314,17 @@ func PairWithInvitation(ctx context.Context, store *Store, inv *dollnetwork.Invi
 		return nil, &PairingError{Op: "encode pair request", Cause: err}
 	}
 
-	pairURL := ep.URL + pairingEndpointPath
+	// Build the pairing endpoint URL structurally so trailing slashes or a
+	// bare origin cannot produce a malformed //v1/pair path. A bootstrap URL
+	// of "http://host/" or "http://host" must both resolve to
+	// "http://host/v1/pair".
+	baseURL, err := url.Parse(ep.URL)
+	if err != nil {
+		return nil, &PairingError{Op: "parse bootstrap URL", Cause: err}
+	}
+	baseURL.Path = strings.TrimRight(baseURL.Path, "/") + pairingEndpointPath
+	baseURL.RawPath = ""
+	pairURL := baseURL.String()
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, pairURL, bytes.NewReader([]byte(body)))
 	if err != nil {
 		return nil, &PairingError{Op: "create pair request", Cause: err}
