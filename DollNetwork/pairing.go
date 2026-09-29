@@ -167,6 +167,14 @@ type Invitation struct {
 // Core to begin the pairing flow.
 type BootstrapEndpoint struct {
 	// URL is the full URL (e.g. "https://core.example.com:8443").
+	//
+	// RL: transport is inferred from the URL scheme (http/https = direct,
+	// relay:// = via a relay). This is sufficient for M2, where only direct
+	// bootstrap is supported. It becomes insufficient once Relay bootstrap can
+	// itself speak HTTPS/WSS (a relay reachable at https:// or wss:// is
+	// ambiguous with a direct endpoint). Do NOT widen this shape now — the
+	// transport/relay distinction is a Relay-milestone protocol decision, not
+	// an M2 pairing concern. Recorded for the Relay milestone.
 	URL string `json:"url"`
 }
 

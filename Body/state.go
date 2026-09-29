@@ -16,6 +16,11 @@
 
 package body
 
+import (
+	"encoding/json"
+	"errors"
+)
+
 // MembershipStatus is the lifecycle state of this Body's network membership.
 // M1 defines the type and the lifecycle vocabulary; actual membership is
 // established by M2 pairing.
@@ -38,11 +43,55 @@ type Membership struct {
 	NetworkID string           `json:"network_id,omitempty"`
 	PeerID    string           `json:"peer_id,omitempty"`
 	Status    MembershipStatus `json:"status"`
+
+	// M2 fields: persisted after successful pairing.
+	BodyPeerID   string `json:"body_peer_id,omitempty"`    // Body's peer ID in the network (assigned by Core)
+	BodyIPv6     string `json:"body_ipv6,omitempty"`       // Body's overlay IPv6 address (assigned by Core)
+	CorePeerID   string `json:"core_peer_id,omitempty"`    // Core's peer ID in the network
+	CoreWGKeyB64 string `json:"core_wg_key_b64,omitempty"` // Core's WireGuard public key (base64)
 }
 
 // NewPendingMembership returns an empty, pre-pairing membership record.
 func NewPendingMembership() Membership {
 	return Membership{Status: MembershipPending}
+}
+
+// CurrentMembershipVersion is the format version of the persistable membership
+// envelope. Bump it (and teach UnmarshalMembership) before changing the shape.
+const CurrentMembershipVersion = 1
+
+// MembershipState is the persistable form of the Body's network membership.
+// Keeping it nested under a versioned envelope lets the store evolve its file
+// format without coupling to either the identity envelope or the wire shape.
+type MembershipState struct {
+	Version    int        `json:"version"`
+	Membership Membership `json:"membership"`
+}
+
+// MarshalMembership returns the canonical JSON encoding of a MembershipState
+// envelope containing `m`.
+func MarshalMembership(m *Membership) (string, error) {
+	env := MembershipState{
+		Version:    CurrentMembershipVersion,
+		Membership: *m,
+	}
+	data, err := json.MarshalIndent(env, "", "  ")
+	if err != nil {
+		return "", err
+	}
+	return string(data), nil
+}
+
+// UnmarshalMembership parses and validates a persisted membership envelope.
+func UnmarshalMembership(raw string) (*Membership, error) {
+	var env MembershipState
+	if err := json.Unmarshal([]byte(raw), &env); err != nil {
+		return nil, err
+	}
+	if env.Version != CurrentMembershipVersion {
+		return nil, errors.New("unsupported membership version")
+	}
+	return &env.Membership, nil
 }
 
 // EndpointTransport enumerates the v1 packet transports (Doll Network

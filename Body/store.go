@@ -29,6 +29,10 @@ const stateFileName = "body.json"
 // wgPrivateFileName is the on-disk name of the WG private key.
 const wgPrivateFileName = "wg_private.key"
 
+// membershipFileName is the on-disk name of the durable network membership
+// file, written only after a successful pairing commits the membership.
+const membershipFileName = "membership.json"
+
 // Store persists Body identity on disk under a state directory.
 type Store struct {
 	dir string
@@ -82,6 +86,11 @@ func (s *Store) statePath() string {
 // wgPrivatePath returns the path to the WG private key file.
 func (s *Store) wgPrivatePath() string {
 	return filepath.Join(s.dir, wgPrivateFileName)
+}
+
+// membershipPath returns the path to the durable membership file.
+func (s *Store) membershipPath() string {
+	return filepath.Join(s.dir, membershipFileName)
 }
 
 // HasIdentity reports whether an identity file exists on disk.
@@ -177,6 +186,45 @@ func (s *Store) SaveWgKeypair(kp *WgKeypair) error {
 	enc := base64.StdEncoding.EncodeToString(priv)
 	if err := writeFileAtomic(s.wgPrivatePath(), []byte(enc), 0600); err != nil {
 		return &StateError{Op: "write wg key", Err: err}
+	}
+	return nil
+}
+
+// LoadMembership reads the persisted network membership. Returns
+// ErrStateNotFound if no membership has been committed yet (pre-pairing) or a
+// StateError if the file is corrupt. It never injects a default membership.
+func (s *Store) LoadMembership() (*Membership, error) {
+	raw, err := os.ReadFile(s.membershipPath())
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, ErrStateNotFound
+		}
+		return nil, &StateError{Op: "read membership", Err: err}
+	}
+	m, err := UnmarshalMembership(string(raw))
+	if err != nil {
+		return nil, &StateError{Op: "parse membership", Err: err}
+	}
+	return m, nil
+}
+
+// SaveMembership writes the network membership durably and atomically after a
+// successful pairing. It is only called once the entire response has validated
+// and the membership is ready to be committed coherently. The membership file
+// is written without embedding the invitation secret.
+func (s *Store) SaveMembership(m *Membership) error {
+	if m == nil {
+		return &StateError{Op: "save membership", Err: errors.New("empty membership")}
+	}
+	if err := s.EnsureDir(); err != nil {
+		return err
+	}
+	enc, err := MarshalMembership(m)
+	if err != nil {
+		return &StateError{Op: "marshal membership", Err: err}
+	}
+	if err := writeFileAtomic(s.membershipPath(), []byte(enc), 0600); err != nil {
+		return &StateError{Op: "write membership", Err: err}
 	}
 	return nil
 }

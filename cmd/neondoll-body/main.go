@@ -10,6 +10,11 @@
 //   --status             print the persisted identity + WG public key
 //   --pairing-request    print the M1 Doll Network pairing request
 //
+// M2 action:
+//   --pair <file>        consume a Core invitation and pair through the
+//                        canonical direct HTTP(S) bootstrap; persists the
+//                        resulting Doll Network membership.
+//
 //   --state-dir <dir>    where identity/key state lives (default: .neondoll-body)
 //   --name <name>        optional human-readable name (used at init)
 //   --implementation/--platform/--arch
@@ -18,11 +23,14 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
+	"net/http"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/Neon-Dolls/neondoll/Body"
 )
@@ -36,12 +44,14 @@ func main() {
 	doInit := flag.Bool("init", false, "create a fresh Body identity + WG keypair")
 	doStatus := flag.Bool("status", false, "print persisted identity + public key")
 	doPairing := flag.Bool("pairing-request", false, "print the M1 Doll Network pairing request")
+	doPair := flag.Bool("pair", false, "consume a Core invitation and pair (reads invitation file)")
+	invitationFile := flag.String("invitation", "", "path to invitation JSON document (for --pair)")
 	invid := flag.String("invitation-id", "", "pairing invitation id (for pairing-request)")
 	secret := flag.String("secret", "", "pairing invitation secret (for pairing-request)")
 	flag.Parse()
 
 	actions := 0
-	for _, b := range []*bool{doInit, doStatus, doPairing} {
+	for _, b := range []*bool{doInit, doStatus, doPairing, doPair} {
 		if *b {
 			actions++
 		}
@@ -73,6 +83,11 @@ func main() {
 		}
 		fmt.Printf("created body_id=%s\n", res.State.Identity.BodyID)
 		fmt.Printf("wg_public_key=%s\n", res.Key.PublicKeyBase64())
+		return
+	}
+
+	if *doPair {
+		pairMain(store, *invitationFile)
 		return
 	}
 
@@ -119,11 +134,50 @@ func main() {
 	}
 }
 
+// pairMain consumes an invitation file and runs the M2 pairing pipeline. On
+// success it prints the committed network membership (without the invitation
+// secret) and exits 0; on failure it prints an error and exits non-zero,
+// leaving durable state untouched.
+func pairMain(store *body.Store, invitationFile string) {
+	if invitationFile == "" {
+		fmt.Fprintln(os.Stderr, "error: --pair requires --invitation <file>")
+		os.Exit(1)
+	}
+	raw, err := os.ReadFile(invitationFile)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "failed to read invitation %s: %v\n", invitationFile, err)
+		os.Exit(1)
+	}
+
+	inv, err := body.LoadInvitation(string(raw))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "invalid invitation: %v\n", err)
+		os.Exit(1)
+	}
+
+	hc := &http.Client{
+		Timeout: body.PairingHTTPTimeout,
+	}
+	now := time.Now().Unix()
+	res, err := body.PairWithInvitation(context.Background(), store, inv, now, hc)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "pairing failed: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("paired network_id=%s\n", res.Membership.NetworkID)
+	fmt.Printf("body_peer_id=%s\n", res.Membership.BodyPeerID)
+	fmt.Printf("body_ipv6=%s\n", res.Membership.BodyIPv6)
+	fmt.Printf("core_peer_id=%s\n", res.Membership.CorePeerID)
+	fmt.Printf("core_wg_public_key=%s\n", res.Membership.CoreWGKeyB64)
+}
+
 func usage() {
 	fmt.Fprintln(os.Stderr, strings.Join([]string{
-		"usage: neondoll-body (--init | --status | --pairing-request)",
+		"usage: neondoll-body (--init | --status | --pairing-request | --pair)",
 		"        [--state-dir <dir>] [--name <name>]",
 		"        [--implementation <id>] [--platform <os>] [--arch <cpu>]",
 		"        [--invitation-id <id>] [--secret <sec>]",
+		"        --pair requires [--invitation <file>]",
 	}, "\n"))
 }
