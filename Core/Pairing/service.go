@@ -88,7 +88,7 @@ func (s *PairingService) HandlePairing(ctx context.Context, req *dollnetwork.Pai
 	}
 
 	// ── 2. Validate invitation ────────────────────────────────────────────
-	_, err := s.invSvc.Validate(ctx, req.InvitationID, req.InvitationSecret)
+	_, err := s.invSvc.Validate(ctx, req.InvitationID, req.Secret)
 	if err != nil {
 		// The invitation is invalid for one of: not found, consumed,
 		// expired, wrong secret. All are handled uniformly.
@@ -101,7 +101,7 @@ func (s *PairingService) HandlePairing(ctx context.Context, req *dollnetwork.Pai
 	}
 
 	// ── 3. Validate Body metadata ─────────────────────────────────────────
-	if req.BodyID == "" {
+	if req.Body.BodyID == "" {
 		return nil, &dollnetwork.PairErrorResponse{
 			Version:  dollnetwork.ProtocolVersion,
 			Error:    "body_id is required",
@@ -111,7 +111,7 @@ func (s *PairingService) HandlePairing(ctx context.Context, req *dollnetwork.Pai
 	}
 
 	// ── 4. Decode/validate Body WG public key ─────────────────────────────
-	wgPub, err := decodeWGPublicKey(req.BodyWGPublicKey)
+	wgPub, err := decodeWGPublicKey(req.Network.WireGuardPublicKey)
 	if err != nil {
 		return nil, &dollnetwork.PairErrorResponse{
 			Version:  dollnetwork.ProtocolVersion,
@@ -122,7 +122,7 @@ func (s *PairingService) HandlePairing(ctx context.Context, req *dollnetwork.Pai
 	}
 
 	// ── 5. Authorization ──────────────────────────────────────────────────
-	if err := s.authorizer.AuthorizePairing(ctx, req.BodyID, req); err != nil {
+	if err := s.authorizer.AuthorizePairing(ctx, req.Body.BodyID, req); err != nil {
 		// Denial consumes the invitation per protocol design.
 		_ = s.invSvc.Consume(ctx, req.InvitationID)
 		return nil, &dollnetwork.PairErrorResponse{
@@ -134,7 +134,7 @@ func (s *PairingService) HandlePairing(ctx context.Context, req *dollnetwork.Pai
 	}
 
 	// ── 6. Create membership ──────────────────────────────────────────────
-	m, err := s.network.NewMembership(req.BodyID)
+	m, err := s.network.NewMembership(req.Body.BodyID)
 	if err != nil {
 		// Possible errors: already exists, revoked, address collision.
 		// Consume the invitation since the request was otherwise valid.

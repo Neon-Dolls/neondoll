@@ -124,11 +124,15 @@ func validPairRequest(inv *dollnetwork.Invitation) *dollnetwork.PairRequest {
 		wgKey[i] = byte(i)
 	}
 	return &dollnetwork.PairRequest{
-		Version:          dollnetwork.ProtocolVersion,
-		InvitationID:     inv.InvitationID,
-		InvitationSecret: inv.InvitationSecret,
-		BodyID:           "body-sensor-01",
-		BodyWGPublicKey:  base64.StdEncoding.EncodeToString(wgKey),
+		Version:      dollnetwork.ProtocolVersion,
+		InvitationID: inv.InvitationID,
+		Secret:       inv.InvitationSecret,
+		Body: dollnetwork.PairRequestBody{
+			BodyID: "body-sensor-01",
+		},
+		Network: dollnetwork.PairingNetwork{
+			WireGuardPublicKey: base64.StdEncoding.EncodeToString(wgKey),
+		},
 	}
 }
 
@@ -219,7 +223,7 @@ func TestPairing_RejectsWrongSecret(t *testing.T) {
 	inv := createInvite(t, svc, clock)
 
 	req := validPairRequest(inv)
-	req.InvitationSecret = "wrong-secret"
+	req.Secret = "wrong-secret"
 
 	_, errResp := svc.HandlePairing(context.Background(), req)
 	if errResp == nil {
@@ -238,11 +242,15 @@ func TestPairing_RejectsUnknownInvitation(t *testing.T) {
 	svc, _, _ := setup(t, clock)
 
 	req := &dollnetwork.PairRequest{
-		Version:          dollnetwork.ProtocolVersion,
-		InvitationID:     "nonexistent-id",
-		InvitationSecret: "some-secret",
-		BodyID:           "body-01",
-		BodyWGPublicKey:  base64.StdEncoding.EncodeToString(make([]byte, 32)),
+		Version:      dollnetwork.ProtocolVersion,
+		InvitationID: "nonexistent-id",
+		Secret:       "some-secret",
+		Body: dollnetwork.PairRequestBody{
+			BodyID: "body-01",
+		},
+		Network: dollnetwork.PairingNetwork{
+			WireGuardPublicKey: base64.StdEncoding.EncodeToString(make([]byte, 32)),
+		},
 	}
 
 	_, errResp := svc.HandlePairing(context.Background(), req)
@@ -304,9 +312,9 @@ func TestPairing_ConcurrentDoubleSubmit(t *testing.T) {
 	inv2 := createInvite(t, svc, clock)
 
 	req1 := validPairRequest(inv1)
-	req1.BodyID = "body-concurrent-a"
+	req1.Body.BodyID = "body-concurrent-a"
 	req2 := validPairRequest(inv2)
-	req2.BodyID = "body-concurrent-b"
+	req2.Body.BodyID = "body-concurrent-b"
 
 	var wg sync.WaitGroup
 	var mu sync.Mutex
@@ -341,13 +349,13 @@ func TestPairing_ConcurrentSameInvitation(t *testing.T) {
 	svc, _, _ := setup(t, clock)
 	inv := createInvite(t, svc, clock)
 	req := validPairRequest(inv)
-	req.BodyID = "body-concurrent" // different IDs to isolate just the invitation conflict
+	req.Body.BodyID = "body-concurrent" // different IDs to isolate just the invitation conflict
 
 	// Use different body IDs to test only invitation consumption race.
 	reqA := *req
-	reqA.BodyID = "body-race-a"
+	reqA.Body.BodyID = "body-race-a"
 	reqB := *req
-	reqB.BodyID = "body-race-b"
+	reqB.Body.BodyID = "body-race-b"
 
 	var wg sync.WaitGroup
 	var mu sync.Mutex
@@ -402,7 +410,7 @@ func TestPairing_RejectsMissingBodyID(t *testing.T) {
 	inv := createInvite(t, svc, clock)
 
 	req := validPairRequest(inv)
-	req.BodyID = ""
+	req.Body.BodyID = ""
 
 	_, errResp := svc.HandlePairing(context.Background(), req)
 	if errResp == nil {
@@ -419,7 +427,7 @@ func TestPairing_RejectsNonBase64Key(t *testing.T) {
 	inv := createInvite(t, svc, clock)
 
 	req := validPairRequest(inv)
-	req.BodyWGPublicKey = "!!!not-base64!!!"
+	req.Network.WireGuardPublicKey = "!!!not-base64!!!"
 
 	_, errResp := svc.HandlePairing(context.Background(), req)
 	if errResp == nil {
@@ -437,7 +445,7 @@ func TestPairing_RejectsWrongKeyLength(t *testing.T) {
 
 	req := validPairRequest(inv)
 	// Not 32 bytes after decode.
-	req.BodyWGPublicKey = base64.StdEncoding.EncodeToString([]byte("short"))
+	req.Network.WireGuardPublicKey = base64.StdEncoding.EncodeToString([]byte("short"))
 
 	_, errResp := svc.HandlePairing(context.Background(), req)
 	if errResp == nil {
@@ -495,7 +503,7 @@ func TestPairing_DuplicateBodyID(t *testing.T) {
 
 	// First pairing with body-id-1.
 	req1 := validPairRequest(inv1)
-	req1.BodyID = "body-dup"
+	req1.Body.BodyID = "body-dup"
 	_, errResp := svc.HandlePairing(context.Background(), req1)
 	if errResp != nil {
 		t.Fatalf("first pairing failed: %+v", errResp)
@@ -503,7 +511,7 @@ func TestPairing_DuplicateBodyID(t *testing.T) {
 
 	// Second pairing with same body ID but different invitation.
 	req2 := validPairRequest(inv2)
-	req2.BodyID = "body-dup"
+	req2.Body.BodyID = "body-dup"
 	_, errResp = svc.HandlePairing(context.Background(), req2)
 	if errResp == nil {
 		t.Fatal("expected error for duplicate body_id")
@@ -680,11 +688,15 @@ func TestHTTPHandler_ReturnsCorrectStatusCodes(t *testing.T) {
 			req: func() *dollnetwork.PairRequest {
 				inv := createInvite(t, svc, clock)
 				return &dollnetwork.PairRequest{
-					Version:          dollnetwork.ProtocolVersion,
-					InvitationID:     inv.InvitationID,
-					InvitationSecret: inv.InvitationSecret,
-					BodyID:           "",
-					BodyWGPublicKey:  base64.StdEncoding.EncodeToString(make([]byte, 32)),
+					Version:      dollnetwork.ProtocolVersion,
+					InvitationID: inv.InvitationID,
+					Secret:       inv.InvitationSecret,
+					Body: dollnetwork.PairRequestBody{
+						BodyID: "",
+					},
+					Network: dollnetwork.PairingNetwork{
+						WireGuardPublicKey: base64.StdEncoding.EncodeToString(make([]byte, 32)),
+					},
 				}
 			}(),
 			wantStatus: http.StatusBadRequest,
@@ -692,22 +704,30 @@ func TestHTTPHandler_ReturnsCorrectStatusCodes(t *testing.T) {
 		{
 			name: "unknown invitation",
 			req: &dollnetwork.PairRequest{
-				Version:          dollnetwork.ProtocolVersion,
-				InvitationID:     "no-such-invitation",
-				InvitationSecret: "some-secret",
-				BodyID:           "body-01",
-				BodyWGPublicKey:  base64.StdEncoding.EncodeToString(make([]byte, 32)),
+				Version:      dollnetwork.ProtocolVersion,
+				InvitationID: "no-such-invitation",
+				Secret:       "some-secret",
+				Body: dollnetwork.PairRequestBody{
+					BodyID: "body-01",
+				},
+				Network: dollnetwork.PairingNetwork{
+					WireGuardPublicKey: base64.StdEncoding.EncodeToString(make([]byte, 32)),
+				},
 			},
 			wantStatus: http.StatusUnauthorized,
 		},
 		{
 			name: "unsupported version",
 			req: &dollnetwork.PairRequest{
-				Version:          999,
-				InvitationID:     "some-id",
-				InvitationSecret: "some-secret",
-				BodyID:           "body-01",
-				BodyWGPublicKey:  base64.StdEncoding.EncodeToString(make([]byte, 32)),
+				Version:      999,
+				InvitationID: "some-id",
+				Secret:       "some-secret",
+				Body: dollnetwork.PairRequestBody{
+					BodyID: "body-01",
+				},
+				Network: dollnetwork.PairingNetwork{
+					WireGuardPublicKey: base64.StdEncoding.EncodeToString(make([]byte, 32)),
+				},
 			},
 			wantStatus: http.StatusBadRequest,
 		},
