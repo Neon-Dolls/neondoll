@@ -7,6 +7,8 @@ import (
 	"testing"
 	"time"
 
+	"golang.zx2c4.com/wireguard/tun/netstack"
+
 	network "github.com/Neon-Dolls/neondoll/Core/Network"
 )
 
@@ -54,6 +56,14 @@ func (m *mockTunnel) LocalAddress() netip.Addr {
 		return m.startCfg.OverlayAddress
 	}
 	return netip.Addr{}
+}
+
+func (m *mockTunnel) Netstack() *netstack.Net {
+	return nil
+}
+
+func (m *mockTunnel) Diagnostics() (*DiagnosticsResult, error) {
+	return &DiagnosticsResult{}, nil
 }
 
 // mockStore implements NetworkStore in memory for test fixtures.

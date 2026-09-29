@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -148,6 +150,31 @@ func main() {
 	wsCfg := ws.Config{Listen: listenAddr}
 	wsServer := ws.New(wsCfg, log, interactionSvc)
 	log.Info("ws transport created", map[string]any{"listen": listenAddr})
+
+	// If the tunnel provides a netstack Net, serve WS through the overlay.
+	if tnet := realTunnel.Netstack(); tnet != nil {
+		// Parse port from the configured listen address.
+		_, portStr, err := net.SplitHostPort(listenAddr)
+		port := 8080
+		if err == nil {
+			if p, parseErr := strconv.Atoi(portStr); parseErr == nil {
+				port = p
+			}
+		}
+		// Bind to all addresses on the netstack — incoming WG-decrypted
+		// traffic from overlay peers will arrive here.
+		listener, listenErr := tnet.ListenTCP(&net.TCPAddr{
+			IP:   net.IPv6unspecified,
+			Port: port,
+		})
+		if listenErr != nil {
+			log.Error("netstack ws listen error", map[string]any{"error": listenErr.Error()})
+			os.Exit(1)
+		}
+		wsServer.SetListener(listener)
+		log.Info("ws server listening through wireguard overlay",
+			map[string]any{"port": port, "overlay_addr": nw.Core.OverlayAddress.String()})
+	}
 
 	// Create Pulse runner if enabled in config.
 	// When Pulse is enabled, load (or create) a host doll state and wire
