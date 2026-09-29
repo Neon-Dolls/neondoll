@@ -113,7 +113,8 @@ func main() {
 	log.Info("network state loaded", map[string]any{"network_id": string(nw.NetworkID)})
 
 	// Create and start the WireGuard tunnel manager.
-	wgManager := wireguard.NewManager(nil, ns, nil)
+	realTunnel := wireguard.NewRealTunnel(nil)
+	wgManager := wireguard.NewManager(realTunnel, ns, nil)
 	if err := wgManager.Start(ctx, nw); err != nil {
 		log.Error("wireguard manager start error", map[string]any{"error": err.Error()})
 		os.Exit(1)
