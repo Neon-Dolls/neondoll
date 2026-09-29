@@ -81,6 +81,16 @@ func (r *PairRequest) ToJSON() (string, error) {
 	return string(data), nil
 }
 
+// ValidationError carries the reason string that HandlePairing maps to
+// an error response reason. It wraps the underlying validation error.
+type ValidationError struct {
+	Reason string
+	err    error
+}
+
+func (e *ValidationError) Error() string { return e.err.Error() }
+func (e *ValidationError) Unwrap() error { return e.err }
+
 // ValidatePairRequest performs a defensive check that the request carries the
 // public key in the shared wire encoding (base64 of 32 bytes) and never the
 // private key (i.e., no private-key field exists). Requiring DecodeWgPublicKey
@@ -89,19 +99,19 @@ func (r *PairRequest) ToJSON() (string, error) {
 // the request is malformed.
 func (r *PairRequest) ValidatePairRequest() error {
 	if r.Version != ProtocolVersion {
-		return fmt.Errorf("dollnetwork: unsupported protocol version %d", r.Version)
+		return &ValidationError{Reason: "unsupported_version", err: fmt.Errorf("dollnetwork: unsupported protocol version %d", r.Version)}
 	}
 	if r.Body.BodyID == "" {
-		return fmt.Errorf("dollnetwork: pairing request missing body_id")
+		return &ValidationError{Reason: "missing_body_id", err: fmt.Errorf("dollnetwork: pairing request missing body_id")}
 	}
 	if r.Body.Implementation == "" {
-		return fmt.Errorf("dollnetwork: pairing request missing implementation")
+		return &ValidationError{Reason: "missing_implementation", err: fmt.Errorf("dollnetwork: pairing request missing implementation")}
 	}
 	if r.Network.WireGuardPublicKey == "" {
-		return fmt.Errorf("dollnetwork: pairing request missing wireguard public key")
+		return &ValidationError{Reason: "missing_wireguard_key", err: fmt.Errorf("dollnetwork: pairing request missing wireguard public key")}
 	}
 	if _, err := DecodeWgPublicKey(r.Network.WireGuardPublicKey); err != nil {
-		return fmt.Errorf("dollnetwork: invalid wireguard public key: %w", err)
+		return &ValidationError{Reason: "invalid_wg_public_key", err: fmt.Errorf("dollnetwork: invalid wireguard public key: %w", err)}
 	}
 	return nil
 }
@@ -115,14 +125,14 @@ func (r *PairRequest) ValidatePairRequest() error {
 // CoreEndpoints may be empty; an empty slice is valid (the Body will
 // discover endpoints out of band or through a relay later).
 type PairResponse struct {
-	Version         int      `json:"version"`
-	NetworkID       string   `json:"network_id"`
-	BodyPeerID      string   `json:"body_peer_id"`
-	BodyAddresses   []string `json:"body_addresses"`
-	CorePeerID      string   `json:"core_peer_id"`
-	CoreWGPublicKey string   `json:"core_wg_public_key"`
-	CoreAddresses   []string `json:"core_addresses"`
-	CoreEndpoints   []string `json:"core_endpoints"`
+	Version         int            `json:"version"`
+	NetworkID       string         `json:"network_id"`
+	BodyPeerID      string         `json:"body_peer_id"`
+	BodyAddresses   []string       `json:"body_addresses"`
+	CorePeerID      string         `json:"core_peer_id"`
+	CoreWGPublicKey string         `json:"core_wg_public_key"`
+	CoreAddresses   []string       `json:"core_addresses"`
+	CoreEndpoints   Endpoints      `json:"core_endpoints"`
 }
 
 // ── PairErrorResponse (Core → Body, error/denial) ────────────────────────────
@@ -144,11 +154,11 @@ type PairErrorResponse struct {
 // delivers to a Body through some side channel (QR code, file, CLI output).
 // The secret is only revealed once and MUST be kept confidential.
 type Invitation struct {
-	Version            int      `json:"version"`
-	InvitationID       string   `json:"invitation_id"`
-	InvitationSecret   string   `json:"invitation_secret"`
-	ExpiresAt          string   `json:"expires_at"`
-	BootstrapEndpoints []string `json:"bootstrap_endpoints"`
+	Version            int       `json:"version"`
+	InvitationID       string    `json:"invitation_id"`
+	InvitationSecret   string    `json:"invitation_secret"`
+	ExpiresAt          string    `json:"expires_at"`
+	BootstrapEndpoints Endpoints `json:"bootstrap_endpoints"`
 }
 
 // ── BootstrapEndpoint descriptor ─────────────────────────────────────────────
@@ -159,3 +169,6 @@ type BootstrapEndpoint struct {
 	// URL is the full URL (e.g. "https://core.example.com:8443").
 	URL string `json:"url"`
 }
+
+// Endpoints is a convenience alias for a slice of BootstrapEndpoint.
+type Endpoints []BootstrapEndpoint

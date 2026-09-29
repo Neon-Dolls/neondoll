@@ -24,14 +24,13 @@ type Authorizer interface {
 	AuthorizePairing(ctx context.Context, bodyID string, req *dollnetwork.PairRequest) error
 }
 
-// ── DefaultAuthorizer — always approves ──────────────────────────────────────
+// ── AllowAuthorizer — approves every request (dev/test only) ─────────────────
 
-// DefaultAuthorizer approves every pairing request. M2 uses this as the
-// baseline; more restrictive authorizers can be injected later without
-// changing the pairing handler.
-type DefaultAuthorizer struct{}
+// AllowAuthorizer approves every pairing request. Use for development and
+// tests only; production deployments MUST inject a restrictive authorizer.
+type AllowAuthorizer struct{}
 
-func (DefaultAuthorizer) AuthorizePairing(_ context.Context, _ string, _ *dollnetwork.PairRequest) error {
+func (AllowAuthorizer) AuthorizePairing(_ context.Context, _ string, _ *dollnetwork.PairRequest) error {
 	return nil
 }
 

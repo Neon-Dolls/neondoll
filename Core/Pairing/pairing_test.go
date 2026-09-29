@@ -92,7 +92,7 @@ func setup(t *testing.T, clock *stubClock) (*PairingService, *network.Network, *
 
 	auth := &stubAuthorizer{allow: true}
 	rec := &recordingNetStore{}
-	endpoints := []string{"relay://core.example.com:51820"}
+	endpoints := dollnetwork.Endpoints{{URL: "relay://core.example.com:51820"}}
 
 	svc := NewService(net, rec, invSvc, auth, clock, endpoints)
 	return svc, net, rec
@@ -108,12 +108,16 @@ func createInvite(t *testing.T, svc *PairingService, clock *stubClock) *dollnetw
 	if err != nil {
 		t.Fatal("create invitation:", err)
 	}
+	eps := make(dollnetwork.Endpoints, len(ci.BootstrapEndpoints))
+	for i, e := range ci.BootstrapEndpoints {
+		eps[i] = dollnetwork.BootstrapEndpoint{URL: e}
+	}
 	return &dollnetwork.Invitation{
 		Version:            dollnetwork.ProtocolVersion,
 		InvitationID:       ci.ID,
 		InvitationSecret:   ci.Secret,
 		ExpiresAt:          ci.ExpiresAt.Format(time.RFC3339),
-		BootstrapEndpoints: ci.BootstrapEndpoints,
+		BootstrapEndpoints: eps,
 	}
 }
 
@@ -128,7 +132,10 @@ func validPairRequest(inv *dollnetwork.Invitation) *dollnetwork.PairRequest {
 		InvitationID: inv.InvitationID,
 		Secret:       inv.InvitationSecret,
 		Body: dollnetwork.PairRequestBody{
-			BodyID: "body-sensor-01",
+			BodyID:         "body-sensor-01",
+			Implementation: "neondoll-test/v1",
+			Platform:       "test",
+			Arch:           "test",
 		},
 		Network: dollnetwork.PairingNetwork{
 			WireGuardPublicKey: base64.StdEncoding.EncodeToString(wgKey),
@@ -174,7 +181,7 @@ func TestPairing_HappyPath(t *testing.T) {
 	if len(resp.CoreAddresses) != 1 {
 		t.Fatal("expected 1 core address")
 	}
-	if len(resp.CoreEndpoints) != 1 || resp.CoreEndpoints[0] != "relay://core.example.com:51820" {
+	if len(resp.CoreEndpoints) != 1 || resp.CoreEndpoints[0].URL != "relay://core.example.com:51820" {
 		t.Error("core_endpoints mismatch")
 	}
 
@@ -246,7 +253,10 @@ func TestPairing_RejectsUnknownInvitation(t *testing.T) {
 		InvitationID: "nonexistent-id",
 		Secret:       "some-secret",
 		Body: dollnetwork.PairRequestBody{
-			BodyID: "body-01",
+			BodyID:         "body-01",
+			Implementation: "neondoll-test/v1",
+			Platform:       "test",
+			Arch:           "test",
 		},
 		Network: dollnetwork.PairingNetwork{
 			WireGuardPublicKey: base64.StdEncoding.EncodeToString(make([]byte, 32)),
@@ -360,6 +370,7 @@ func TestPairing_ConcurrentSameInvitation(t *testing.T) {
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	successes := 0
+	var errResponses []*dollnetwork.PairErrorResponse
 
 	wg.Add(2)
 	go func() {
@@ -368,6 +379,8 @@ func TestPairing_ConcurrentSameInvitation(t *testing.T) {
 		mu.Lock()
 		if errResp == nil {
 			successes++
+		} else {
+			errResponses = append(errResponses, errResp)
 		}
 		mu.Unlock()
 	}()
@@ -377,17 +390,29 @@ func TestPairing_ConcurrentSameInvitation(t *testing.T) {
 		mu.Lock()
 		if errResp == nil {
 			successes++
+		} else {
+			errResponses = append(errResponses, errResp)
 		}
 		mu.Unlock()
 	}()
 	wg.Wait()
 
-	if successes > 1 {
-		t.Errorf("at most 1 concurrent submission should succeed with same invitation, got %d", successes)
+	if successes != 1 {
+		t.Errorf("exactly 1 concurrent submission should succeed with the same invitation, got %d (errors: %d errors captured)", successes, len(errResponses))
 	}
-}
 
-func TestPairing_RejectsUnsupportedVersion(t *testing.T) {
+	// The failing response must indicate the invitation was already consumed.
+	for _, er := range errResponses {
+		if er == nil {
+			continue
+		}
+		if !er.Consumed {
+			t.Errorf("the failing response must set Consumed=true, got Consumed=%v", er.Consumed)
+		}
+	}
+	}
+
+	func TestPairing_RejectsUnsupportedVersion(t *testing.T) {
 	clock := &stubClock{t: time.Date(2025, 6, 1, 12, 0, 0, 0, time.UTC)}
 	svc, _, _ := setup(t, clock)
 	inv := createInvite(t, svc, clock)
@@ -708,8 +733,11 @@ func TestHTTPHandler_ReturnsCorrectStatusCodes(t *testing.T) {
 				InvitationID: "no-such-invitation",
 				Secret:       "some-secret",
 				Body: dollnetwork.PairRequestBody{
-					BodyID: "body-01",
-				},
+							BodyID:         "body-01",
+							Implementation: "neondoll-test/v1",
+							Platform:       "test",
+							Arch:           "test",
+						},
 				Network: dollnetwork.PairingNetwork{
 					WireGuardPublicKey: base64.StdEncoding.EncodeToString(make([]byte, 32)),
 				},
@@ -723,8 +751,11 @@ func TestHTTPHandler_ReturnsCorrectStatusCodes(t *testing.T) {
 				InvitationID: "some-id",
 				Secret:       "some-secret",
 				Body: dollnetwork.PairRequestBody{
-					BodyID: "body-01",
-				},
+							BodyID:         "body-01",
+							Implementation: "neondoll-test/v1",
+							Platform:       "test",
+							Arch:           "test",
+						},
 				Network: dollnetwork.PairingNetwork{
 					WireGuardPublicKey: base64.StdEncoding.EncodeToString(make([]byte, 32)),
 				},
@@ -766,47 +797,3 @@ func TestHTTPHandler_RequestBounded(t *testing.T) {
 	}
 }
 
-func TestDecodeWGKey(t *testing.T) {
-	// Valid 32-byte key.
-	raw := make([]byte, 32)
-	for i := range raw {
-		raw[i] = byte(i)
-	}
-	encoded := base64.StdEncoding.EncodeToString(raw)
-
-	key, err := decodeWGPublicKey(encoded)
-	if err != nil {
-		t.Fatal("unexpected error:", err)
-	}
-	if key == nil {
-		t.Fatal("key is nil")
-	}
-	for i := range raw {
-		if raw[i] != key[i] {
-			t.Fatalf("byte %d: expected %d, got %d", i, raw[i], key[i])
-		}
-	}
-
-	// Verify encode/decode round-trips.
-	reEncoded := encodeWGPublicKey(*key)
-	if reEncoded != encoded {
-		t.Errorf("round-trip failed: %q != %q", reEncoded, encoded)
-	}
-
-	// Wrong length.
-	short := base64.StdEncoding.EncodeToString([]byte("short"))
-	_, err = decodeWGPublicKey(short)
-	if err == nil {
-		t.Error("expected error for short key")
-	}
-
-	// Invalid base64.
-	_, err = decodeWGPublicKey("!!!")
-	if err == nil {
-		t.Error("expected error for invalid base64")
-	}
-}
-
-// Ensure we use imported packages.
-var _ = context.Background
-var _ = fmt.Sprintf

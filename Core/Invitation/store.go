@@ -164,14 +164,21 @@ func (s *Service) Create(ctx context.Context, params CreateParams) (*CreatedInvi
 // Validate checks whether an invitation with the given ID and secret is
 // valid (exists, not expired, not consumed, secret matches). It does NOT
 // consume the invitation — call Consume separately.
+//
+// When the invitation exists but is already consumed, Validate returns the
+// invitation with Consumed=true so the caller can set the correct protocol-
+// level 'consumed' flag. For unknown IDs, expired invitations, and wrong
+// secrets, Validate returns nil to avoid leaking information.
 func (s *Service) Validate(ctx context.Context, id, secret string) (*Invitation, error) {
 	inv, err := s.store.Get(ctx, id)
 	if err != nil {
 		return nil, fmt.Errorf("invalid invitation: %w", err)
 	}
 
+	// Return the invitation regardless of consumed state — the caller
+	// uses inv.Consumed to set the correct protocol-level 'consumed' flag.
 	if inv.Consumed {
-		return nil, fmt.Errorf("invitation %q already consumed", id)
+		return inv, fmt.Errorf("invitation %q already consumed", id)
 	}
 
 	if s.clock.Now().After(inv.ExpiresAt) {

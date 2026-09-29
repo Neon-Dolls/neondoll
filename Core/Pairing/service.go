@@ -2,7 +2,7 @@ package pairing
 
 import (
 	"context"
-	"encoding/base64"
+	"errors"
 	"fmt"
 	"sync"
 
@@ -10,29 +10,6 @@ import (
 	"github.com/Neon-Dolls/neondoll/Core/Network"
 	"github.com/Neon-Dolls/neondoll/DollNetwork"
 )
-
-// ── WG key helpers ───────────────────────────────────────────────────────────
-
-var errKeyDecode = fmt.Errorf("body_wg_public_key: must be 32 bytes encoded as standard base64")
-
-// decodeWGPublicKey decodes a base64-encoded WireGuard public key (32 bytes).
-func decodeWGPublicKey(encoded string) (*network.WireGuardPublicKey, error) {
-	decoded, err := base64.StdEncoding.DecodeString(encoded)
-	if err != nil {
-		return nil, fmt.Errorf("%w: %v", errKeyDecode, err)
-	}
-	if len(decoded) != 32 {
-		return nil, errKeyDecode
-	}
-	var key network.WireGuardPublicKey
-	copy(key[:], decoded)
-	return &key, nil
-}
-
-// encodeWGPublicKey encodes a WireGuard public key as standard base64.
-func encodeWGPublicKey(key network.WireGuardPublicKey) string {
-	return base64.StdEncoding.EncodeToString(key[:])
-}
 
 // ── PairingService ───────────────────────────────────────────────────────────
 
@@ -46,7 +23,7 @@ type PairingService struct {
 	invSvc     *invitation.Service
 	authorizer Authorizer
 	clock      invitation.Clock
-	endpoints  []string
+	endpoints  dollnetwork.Endpoints
 }
 
 // NewService creates a PairingService.
@@ -56,10 +33,13 @@ func NewService(
 	invSvc *invitation.Service,
 	authorizer Authorizer,
 	clock invitation.Clock,
-	coreEndpoints []string,
+	coreEndpoints dollnetwork.Endpoints,
 ) *PairingService {
 	if coreEndpoints == nil {
-		coreEndpoints = []string{}
+		coreEndpoints = dollnetwork.Endpoints{}
+	}
+	if authorizer == nil {
+		authorizer = denyAuthorizer{}
 	}
 	return &PairingService{
 		network:    net,
@@ -71,57 +51,59 @@ func NewService(
 	}
 }
 
+// denyAuthorizer denies every pairing — the safe default when no
+// explicit Authorizer is provided.
+type denyAuthorizer struct{}
+
+func (denyAuthorizer) AuthorizePairing(_ context.Context, _ string, _ *dollnetwork.PairRequest) error {
+	return fmt.Errorf("pairing: no authorizer configured")
+}
+
 // HandlePairing processes a PairRequest and returns either a success
 // response or an error response.
+//
+//nolint:cyclop
 func (s *PairingService) HandlePairing(ctx context.Context, req *dollnetwork.PairRequest) (*dollnetwork.PairResponse, *dollnetwork.PairErrorResponse) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// ── 1. Validate protocol version ──────────────────────────────────────
-	if req.Version != dollnetwork.ProtocolVersion {
+	// ── 1. Canonical request validation ───────────────────────────────────
+	// The shared DollNetwork protocol is the validation boundary.
+	if err := req.ValidatePairRequest(); err != nil {
+		reason := "invalid_request"
+		var verr *dollnetwork.ValidationError
+		if errors.As(err, &verr) {
+			reason = verr.Reason
+		}
 		return nil, &dollnetwork.PairErrorResponse{
 			Version:  dollnetwork.ProtocolVersion,
-			Error:    "unsupported protocol version",
-			Reason:   "unsupported_version",
+			Error:    err.Error(),
+			Reason:   reason,
 			Consumed: false,
 		}
 	}
 
 	// ── 2. Validate invitation ────────────────────────────────────────────
-	_, err := s.invSvc.Validate(ctx, req.InvitationID, req.Secret)
+	inv, err := s.invSvc.Validate(ctx, req.InvitationID, req.Secret)
 	if err != nil {
 		// The invitation is invalid for one of: not found, consumed,
-		// expired, wrong secret. All are handled uniformly.
+		// expired, wrong secret. Differentiate consumed vs. unknown.
+		reason := "invalid_invitation"
+		consumed := false
+		if inv != nil && inv.Consumed {
+			// The invitation exists and has already been consumed.
+			reason = "invitation_already_consumed"
+			consumed = true
+		}
 		return nil, &dollnetwork.PairErrorResponse{
 			Version:  dollnetwork.ProtocolVersion,
 			Error:    fmt.Sprintf("invitation rejected: %v", err),
-			Reason:   "invalid_invitation",
-			Consumed: false, // optimistic; we don't check consumed state here
+			Reason:   reason,
+			Consumed: consumed,
 		}
 	}
 
-	// ── 3. Validate Body metadata ─────────────────────────────────────────
-	if req.Body.BodyID == "" {
-		return nil, &dollnetwork.PairErrorResponse{
-			Version:  dollnetwork.ProtocolVersion,
-			Error:    "body_id is required",
-			Reason:   "missing_body_id",
-			Consumed: false,
-		}
-	}
-
-	// ── 4. Decode/validate Body WG public key ─────────────────────────────
-	wgPub, err := decodeWGPublicKey(req.Network.WireGuardPublicKey)
-	if err != nil {
-		return nil, &dollnetwork.PairErrorResponse{
-			Version:  dollnetwork.ProtocolVersion,
-			Error:    err.Error(),
-			Reason:   "invalid_wg_public_key",
-			Consumed: false,
-		}
-	}
-
-	// ── 5. Authorization ──────────────────────────────────────────────────
+	// ── 3. Authorization ──────────────────────────────────────────────────
 	if err := s.authorizer.AuthorizePairing(ctx, req.Body.BodyID, req); err != nil {
 		// Denial consumes the invitation per protocol design.
 		_ = s.invSvc.Consume(ctx, req.InvitationID)
@@ -133,7 +115,20 @@ func (s *PairingService) HandlePairing(ctx context.Context, req *dollnetwork.Pai
 		}
 	}
 
-	// ── 6. Create membership ──────────────────────────────────────────────
+	// ── 4. Decode Body WG public key at the domain boundary ─────────────
+	rawWgKey, err := dollnetwork.DecodeWgPublicKey(req.Network.WireGuardPublicKey)
+	if err != nil {
+		return nil, &dollnetwork.PairErrorResponse{
+			Version:  dollnetwork.ProtocolVersion,
+			Error:    err.Error(),
+			Reason:   "invalid_wg_public_key",
+			Consumed: false,
+		}
+	}
+	var wgPub network.WireGuardPublicKey
+	copy(wgPub[:], rawWgKey)
+
+	// ── 5. Create membership ──────────────────────────────────────────────
 	m, err := s.network.NewMembership(req.Body.BodyID)
 	if err != nil {
 		// Possible errors: already exists, revoked, address collision.
@@ -147,8 +142,8 @@ func (s *PairingService) HandlePairing(ctx context.Context, req *dollnetwork.Pai
 		}
 	}
 
-	// ── 7. Set Body WG public key ─────────────────────────────────────────
-	if err := s.network.SetBodyWireGuardPublicKey(m.PeerID, *wgPub); err != nil {
+	// ── 6. Set Body WG public key ─────────────────────────────────────────
+	if err := s.network.SetBodyWireGuardPublicKey(m.PeerID, wgPub); err != nil {
 		_ = s.network.RemoveMembership(m.PeerID)
 		return nil, &dollnetwork.PairErrorResponse{
 			Version:  dollnetwork.ProtocolVersion,
@@ -158,7 +153,7 @@ func (s *PairingService) HandlePairing(ctx context.Context, req *dollnetwork.Pai
 		}
 	}
 
-	// ── 8. Activate membership ────────────────────────────────────────────
+	// ── 7. Activate membership ────────────────────────────────────────────
 	if err := s.network.ActivateMembership(m.PeerID); err != nil {
 		_ = s.network.RemoveMembership(m.PeerID)
 		return nil, &dollnetwork.PairErrorResponse{
@@ -181,7 +176,7 @@ func (s *PairingService) HandlePairing(ctx context.Context, req *dollnetwork.Pai
 		}
 	}
 
-	// ── 9. Persist membership ─────────────────────────────────────────────
+	// ── 8. Persist membership ─────────────────────────────────────────────
 	if err := s.netStore.SaveMembership(ctx, active); err != nil {
 		_ = s.network.RemoveMembership(m.PeerID)
 		return nil, &dollnetwork.PairErrorResponse{
@@ -192,8 +187,30 @@ func (s *PairingService) HandlePairing(ctx context.Context, req *dollnetwork.Pai
 		}
 	}
 
-	// ── 10. Consume invitation ────────────────────────────────────────────
-	_ = s.invSvc.Consume(ctx, req.InvitationID)
+	// ── 9. Consume invitation (transactional: membership already durable) ──
+	if err := s.invSvc.Consume(ctx, req.InvitationID); err != nil {
+		// Consumption failed — roll back membership.
+		_ = s.network.RemoveMembership(m.PeerID)
+		_ = s.netStore.DeleteMembership(ctx, m.PeerID)
+		return nil, &dollnetwork.PairErrorResponse{
+			Version:  dollnetwork.ProtocolVersion,
+			Error:    fmt.Sprintf("failed to consume invitation: %v", err),
+			Reason:   "consumption_failed",
+			Consumed: false,
+		}
+	}
+
+	// ── 10. Encode Core WG public key at the domain boundary ──────────────
+	coreWGKey, err := dollnetwork.EncodeWgPublicKey(s.network.Core.PublicKey[:])
+	if err != nil {
+		// Should never happen — Core's own key is valid.
+		return nil, &dollnetwork.PairErrorResponse{
+			Version:  dollnetwork.ProtocolVersion,
+			Error:    fmt.Sprintf("encode core wg key: %v", err),
+			Reason:   "internal_error",
+			Consumed: true,
+		}
+	}
 
 	// ── 11. Return canonical membership response ──────────────────────────
 	return &dollnetwork.PairResponse{
@@ -202,7 +219,7 @@ func (s *PairingService) HandlePairing(ctx context.Context, req *dollnetwork.Pai
 		BodyPeerID:      string(active.PeerID),
 		BodyAddresses:   []string{active.OverlayAddress.String()},
 		CorePeerID:      string(s.network.Core.PeerID),
-		CoreWGPublicKey: encodeWGPublicKey(s.network.Core.PublicKey),
+		CoreWGPublicKey: coreWGKey,
 		CoreAddresses:   []string{s.network.Core.OverlayAddress.String()},
 		CoreEndpoints:   s.endpoints,
 	}, nil
