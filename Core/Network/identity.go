@@ -6,6 +6,8 @@ import (
 
 	"github.com/google/uuid"
 	"golang.org/x/crypto/curve25519"
+
+	"github.com/Neon-Dolls/neondoll/DollNetwork"
 )
 
 // GenerateNetworkID creates a new opaque, stable Doll Network identifier.
@@ -102,10 +104,13 @@ func (n *Network) allocator() *IPv6Allocator {
 }
 
 // Strings returns a non-secret diagnostic summary of the Core identity.
-// The private key is NEVER included.
+// The private key is NEVER included. Public key is shown via the shared
+// Doll Network wire representation (base64).
 func (id *CoreIdentity) Strings() string {
+	// PublicKey is always 32 bytes, so EncodeWgPublicKey cannot error here.
+	pub, _ := dollnetwork.EncodeWgPublicKey(id.PublicKey[:])
 	return fmt.Sprintf("peer_id=%s public_key=%s overlay=%s",
-		id.PeerID, id.PublicKey, id.OverlayAddress)
+		id.PeerID, pub, id.OverlayAddress)
 }
 
 // WireGuardPublicKeyFromPrivate derives the public key from a clamped

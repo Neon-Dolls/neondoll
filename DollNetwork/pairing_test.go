@@ -38,11 +38,11 @@ func TestPairRequestValidationRejectsMissingPublicKey(t *testing.T) {
 	}
 }
 
-// TestPairRequestValidationRejectsHexPublicKey: Core's diagnostic
-// WireGuardPublicKey.String() is hex (64 chars); the shared wire encoding is
-// base64-of-32-bytes, so a hex-form key must be rejected at the boundary and
-// never reach the wire.
-func TestPairRequestValidationRejectsHexPublicKey(t *testing.T) {
+// TestPairRequestValidationRejectsNonWirePublicKey: a malformed / non-wire
+// representation (here a hex-encoded key) must be rejected at the boundary
+// and never reach the wire, since the shared wire encoding is base64 of a
+// 32-byte key.
+func TestPairRequestValidationRejectsNonWirePublicKey(t *testing.T) {
 	hexForm := "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
 	if len(hexForm) != 64 {
 		t.Fatal("test hex fixture must be 64 chars")
@@ -67,7 +67,7 @@ func TestPairRequestValidationRejectsBadVersion(t *testing.T) {
 		InvitationID: "inv",
 		Secret:       "sec",
 		Body:         PairRequestBody{BodyID: "body_x", Implementation: "i", Platform: "p", Arch: "a"},
-		Network:      PairingNetwork{WireGuardPublicKey: "c2FsXGU="},
+		Network:      PairingNetwork{WireGuardPublicKey: ValidWgPubKeyBase64},
 	}
 	if err := r.ValidatePairRequest(); err == nil {
 		t.Fatal("expected validation error for unknown protocol version")
@@ -82,7 +82,7 @@ func TestPairRequestToJSON(t *testing.T) {
 		InvitationID: "inv_7",
 		Secret:       "s",
 		Body:         PairRequestBody{BodyID: "body_x", Implementation: "i", Platform: "p", Arch: "a"},
-		Network:      PairingNetwork{WireGuardPublicKey: "c2FsXGU="},
+		Network:      PairingNetwork{WireGuardPublicKey: ValidWgPubKeyBase64},
 	}
 	wire, err := r.ToJSON()
 	if err != nil {

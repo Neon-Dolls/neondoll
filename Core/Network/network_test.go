@@ -3,6 +3,7 @@ package network
 import (
 	"bytes"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
 	"fmt"
 	"math/big"
@@ -207,10 +208,11 @@ func TestCoreIdentity_StringsExcludesPrivateKey(t *testing.T) {
 		t.Fatal("private key hex found in Strings() output — must NEVER be exposed")
 	}
 
-	// Public key SHOULD appear in Strings().
-	pubHex := id.PublicKey.String()
-	if !contains(s, pubHex) {
-		t.Fatal("public key not found in Strings() output — it may appear")
+	// Public key SHOULD appear in Strings() — shown via the shared Doll
+	// Network wire representation (base64 of the 32-byte key).
+	pubEncoding := base64.StdEncoding.EncodeToString(id.PublicKey[:])
+	if !contains(s, pubEncoding) {
+		t.Fatal("public key (base64) not found in Strings() output — it may appear")
 	}
 }
 

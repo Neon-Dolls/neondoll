@@ -15,10 +15,9 @@ const WgPublicKeySize = 32
 // EncodeWgPublicKey returns the Doll Network wire representation of a WG
 // public key: standard (RFC 4648) base64 of the 32-byte X25519 key.
 //
-// The shared protocol owns this encoding. Neither Body's nor Core's internal
-// or diagnostic formats are valid on the wire — in particular Core's
-// WireGuardPublicKey.String() (hex, for diagnostics) MUST NOT be written to
-// the wire: encode via this function instead.
+// The shared protocol owns this encoding. Anything that is not standard
+// base64 of exactly 32 bytes is not valid wire material; encode via this
+// function instead of relying on package-local representations.
 func EncodeWgPublicKey(pk []byte) (string, error) {
 	if len(pk) != WgPublicKeySize {
 		return "", fmt.Errorf("dollnetwork: wg public key must be %d bytes, got %d", WgPublicKeySize, len(pk))
@@ -54,7 +53,7 @@ type PairRequestBody struct {
 // PairingNetwork mirrors the "network" object: currently just the WG public key.
 // This is the only WireGuard material the runtime ever serializes. The public
 // key uses the shared wire encoding, standard base64-of-32-bytes
-// (see EncodeWgPublicKey). Do not write Core's hex String() form here.
+// (see EncodeWgPublicKey); other representations are invalid on the wire.
 type PairingNetwork struct {
 	WireGuardPublicKey string `json:"wireguard_public_key"`
 }
@@ -82,9 +81,9 @@ func (r *PairRequest) ToJSON() (string, error) {
 // ValidatePairRequest performs a defensive check that the request carries the
 // public key in the shared wire encoding (base64 of 32 bytes) and never the
 // private key (i.e., no private-key field exists). Requiring DecodeWgPublicKey
-// here means a hex-encoded key — e.g. Core's WireGuardPublicKey.String()
-// diagnostic form — is rejected at the protocol boundary instead of leaking
-// onto the wire. It returns an error if the request is malformed.
+// here means a malformed or non-wire representation is rejected at the
+// protocol boundary instead of leaking onto the wire. It returns an error if
+// the request is malformed.
 func (r *PairRequest) ValidatePairRequest() error {
 	if r.Version != ProtocolVersion {
 		return fmt.Errorf("dollnetwork: unsupported protocol version %d", r.Version)

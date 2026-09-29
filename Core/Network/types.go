@@ -9,7 +9,6 @@
 package network
 
 import (
-	"encoding/hex"
 	"fmt"
 	"net/netip"
 )
@@ -54,12 +53,11 @@ type WireGuardPrivateKey [32]byte
 // WireGuardPublicKey is a 32-byte Curve25519 public key, derivable from
 // the private key via ScalarBaseMult. It MAY cross network boundaries
 // during pairing and membership announcements.
+//
+// No String() method is provided to prevent accidental use of hex
+// representation in protocol contexts. The Doll Network wire
+// representation is standard base64 (see dollnetwork.EncodeWgPublicKey).
 type WireGuardPublicKey [32]byte
-
-// String returns a hex representation of the public key.
-func (k WireGuardPublicKey) String() string {
-	return hex.EncodeToString(k[:])
-}
 
 // CoreIdentity encapsulates Core's own network peer identity and its
 // WireGuard keypair. The private key is secret local material; only
