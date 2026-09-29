@@ -45,9 +45,9 @@ type Membership struct {
 	Status    MembershipStatus `json:"status"`
 
 	// M2 fields: persisted after successful pairing.
-	BodyPeerID   string `json:"body_peer_id,omitempty"`   // Body's peer ID in the network (assigned by Core)
-	BodyIPv6     string `json:"body_ipv6,omitempty"`      // Body's overlay IPv6 address (assigned by Core)
-	CorePeerID   string `json:"core_peer_id,omitempty"`   // Core's peer ID in the network
+	BodyPeerID   string `json:"body_peer_id,omitempty"`    // Body's peer ID in the network (assigned by Core)
+	BodyIPv6     string `json:"body_ipv6,omitempty"`       // Body's overlay IPv6 address (assigned by Core)
+	CorePeerID   string `json:"core_peer_id,omitempty"`    // Core's peer ID in the network
 	CoreWGKeyB64 string `json:"core_wg_key_b64,omitempty"` // Core's WireGuard public key (base64)
 }
 

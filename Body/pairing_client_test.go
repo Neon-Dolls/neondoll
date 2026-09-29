@@ -27,7 +27,7 @@ func newPairingStore(t *testing.T) *Store {
 	return store
 }
 
-// validPairResponse builds a well-formed PairResponse that passes FromJSON.
+// validPairResponse builds a well-formed canonical PairResponse.
 func validPairResponse(t *testing.T) dollnetwork.PairResponse {
 	t.Helper()
 	coreKP, err := GenerateWgKeypair()
@@ -35,13 +35,13 @@ func validPairResponse(t *testing.T) dollnetwork.PairResponse {
 		t.Fatalf("GenerateWgKeypair: %v", err)
 	}
 	return dollnetwork.PairResponse{
-		Version:      dollnetwork.ProtocolVersion,
-		NetworkID:    "net_test_1",
-		BodyPeerID:   "peer_body_1",
-		BodyIPv6:     "fd00::1/128",
-		CorePeerID:   "peer_core_1",
-		CoreWGKeyB64: coreKP.PublicKeyBase64(),
-		CoreIPv6:     "fd00::2/128",
+		Version:         dollnetwork.ProtocolVersion,
+		NetworkID:       "net_test_1",
+		BodyPeerID:      "peer_body_1",
+		BodyAddresses:   []string{"fd00::1/128"},
+		CorePeerID:      "peer_core_1",
+		CoreWGPublicKey: coreKP.PublicKeyBase64(),
+		CoreAddresses:   []string{"fd00::2/128"},
 	}
 }
 
@@ -49,12 +49,12 @@ func validPairResponse(t *testing.T) dollnetwork.PairResponse {
 // URL, valid as of `now`.
 func validInvitation(now int64, bootstrapURL string) *dollnetwork.Invitation {
 	return &dollnetwork.Invitation{
-		Version:   dollnetwork.ProtocolVersion,
-		ID:        "inv_test_1",
-		Secret:    "invitation-secret-value",
-		ExpiresAt: now + 3600,
+		Version:          dollnetwork.ProtocolVersion,
+		InvitationID:     "inv_test_1",
+		InvitationSecret: "invitation-secret-value",
+		ExpiresAt:        time.Unix(now+3600, 0).UTC().Format(time.RFC3339),
 		BootstrapEndpoints: []dollnetwork.BootstrapEndpoint{
-			{Type: dollnetwork.EndpointDirect, BootstrapURL: bootstrapURL},
+			{URL: bootstrapURL},
 		},
 	}
 }
@@ -81,15 +81,15 @@ func TestPairWithInvitation_Success(t *testing.T) {
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
 		}
-		if !strings.HasSuffix(r.URL.Path, dollnetwork.PairingPath) {
+		if !strings.HasSuffix(r.URL.Path, pairingEndpointPath) {
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
-		body, err := io.ReadAll(r.Body)
+		raw, err := io.ReadAll(r.Body)
 		if err != nil {
 			t.Errorf("server read body: %v", err)
 		}
-		if err := json.Unmarshal(body, &gotReq); err != nil {
+		if err := json.Unmarshal(raw, &gotReq); err != nil {
 			t.Errorf("server failed to parse PairRequest: %v", err)
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -121,10 +121,19 @@ func TestPairWithInvitation_Success(t *testing.T) {
 	if m.CorePeerID != "peer_core_1" {
 		t.Errorf("core_peer_id = %q, want peer_core_1", m.CorePeerID)
 	}
+	if m.BodyIPv6 != "fd00::1/128" {
+		t.Errorf("body_ipv6 = %q, want fd00::1/128", m.BodyIPv6)
+	}
+	if m.CoreWGKeyB64 == "" {
+		t.Error("membership missing core wg public key")
+	}
 
 	// The request sent to Core must have carried the Body's public WG key.
 	if gotReq.Network.WireGuardPublicKey == "" {
 		t.Error("PairRequest missing wireguard_public_key")
+	}
+	if gotReq.Body.BodyID == "" {
+		t.Error("PairRequest missing body_id")
 	}
 
 	// Membership must be durably persisted (reload from disk).
@@ -149,7 +158,7 @@ func TestPairWithInvitation_PersistsNoSecret(t *testing.T) {
 
 	now := time.Now().Unix()
 	inv := validInvitation(now, srv.URL)
-	inv.Secret = "super-secret-invitation-token"
+	inv.InvitationSecret = "super-secret-invitation-token"
 
 	if _, err := PairWithInvitation(context.Background(), store, inv, now, srv.Client()); err != nil {
 		t.Fatalf("PairWithInvitation: %v", err)
@@ -176,7 +185,7 @@ func TestPairWithInvitation_ExpiredInvitation(t *testing.T) {
 
 	now := time.Now().Unix()
 	inv := validInvitation(now, srv.URL)
-	inv.ExpiresAt = now - 1 // expired
+	inv.ExpiresAt = time.Unix(now-1, 0).UTC().Format(time.RFC3339) // expired
 
 	_, err := PairWithInvitation(context.Background(), store, inv, now, srv.Client())
 	if err == nil {
@@ -195,12 +204,12 @@ func TestPairWithInvitation_NoDirectEndpoint(t *testing.T) {
 	store := newPairingStore(t)
 	now := time.Now().Unix()
 	inv := &dollnetwork.Invitation{
-		Version:   dollnetwork.ProtocolVersion,
-		ID:        "inv_relay",
-		Secret:    "sec",
-		ExpiresAt: now + 3600,
+		Version:          dollnetwork.ProtocolVersion,
+		InvitationID:     "inv_relay",
+		InvitationSecret: "sec",
+		ExpiresAt:        time.Unix(now+3600, 0).UTC().Format(time.RFC3339),
 		BootstrapEndpoints: []dollnetwork.BootstrapEndpoint{
-			{Type: dollnetwork.EndpointRelay, BootstrapURL: "http://relay.example"},
+			{URL: "relay://relay.example:51820"},
 		},
 	}
 	_, err := PairWithInvitation(context.Background(), store, inv, now, http.DefaultClient)
@@ -213,7 +222,11 @@ func TestPairWithInvitation_ServerError(t *testing.T) {
 	store := newPairingStore(t)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
-		json.NewEncoder(w).Encode(dollnetwork.PairingError{Code: "unauthorized", Message: "bad invitation"})
+		json.NewEncoder(w).Encode(dollnetwork.PairErrorResponse{
+			Version: dollnetwork.ProtocolVersion,
+			Error:   "bad invitation",
+			Reason:  "invalid_invitation",
+		})
 	}))
 	defer srv.Close()
 
@@ -268,7 +281,7 @@ func TestPairWithInvitation_NoIdentity(t *testing.T) {
 func TestPairWithInvitation_ContextTimeout(t *testing.T) {
 	store := newPairingStore(t)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		time.Sleep(5 * time.Second) // Core never responds
+		time.Sleep(5 * time.Second) // Core never responds within the ctx budget
 	}))
 	defer srv.Close()
 

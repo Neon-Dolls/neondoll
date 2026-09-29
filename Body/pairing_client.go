@@ -7,35 +7,35 @@
 // validate Core's membership response, and persist the resulting Doll Network
 // membership:
 //
-//   1. Consume & validate the invitation (version, id, secret, expiry,
-//      advertised bootstrap endpoints).
-//   2. Choose a supported bootstrap endpoint. As of M2 only direct HTTP(S)
-//      bootstrap is implemented; a relay endpoint is representable but fails
-//      explicitly as unsupported rather than silently behaving like direct.
-//   3. Build the canonical DollNetwork.PairRequest from the persisted Body
-//      identity + WG keypair, and submit it to Core over HTTP(S).
-//   4. Treat Core's response as untrusted network input: validate the
-//      protocol version, required membership fields, IPv6 address/prefixes,
-//      the Core WG public key (canonical DecodeWgPublicKey), and the
-//      structural form of any endpoint entries.
-//   5. Commit the membership durably ONLY after the entire response validates
-//      (atomic: no partial durable state). The invitation secret is never
-//      persisted and never logged.
+//  1. Consume & validate the invitation (version, id, secret, expiry,
+//     advertised bootstrap endpoints).
+//  2. Choose a supported bootstrap endpoint. As of M2 only direct HTTP(S)
+//     bootstrap is implemented; a relay endpoint is representable but fails
+//     explicitly as unsupported rather than silently behaving like direct.
+//  3. Build the canonical DollNetwork.PairRequest from the persisted Body
+//     identity + WG keypair, and submit it to Core over HTTP(S).
+//  4. Treat Core's response as untrusted network input: validate the
+//     protocol version, required membership fields, IPv6 address/prefixes,
+//     and the Core WG public key (canonical DecodeWgPublicKey).
+//  5. Commit the membership durably ONLY after the entire response validates
+//     (atomic: no partial durable state). The invitation secret is never
+//     persisted and never logged.
 //
 // The reusable pairing logic lives here, outside cmd/neondoll-body (which
 // only parses inputs and invokes it).
-
 package body
 
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"time"
-
 	"net/http"
+	"net/netip"
+	"net/url"
+	"time"
 
 	"github.com/Neon-Dolls/neondoll/DollNetwork"
 )
@@ -49,6 +49,11 @@ const PairingHTTPTimeout = 30 * time.Second
 // are willing to read (1 MiB). Larger responses are rejected rather than read
 // into memory, so a hostile/broken Core cannot exhaust the Body.
 const MaxPairingResponseBytes = 1 * 1024 * 1024
+
+// pairingEndpointPath is the canonical HTTP endpoint path Core serves the
+// pairing flow at. The DollNetwork package owns the wire-protocol types but
+// not the serving path; Core exposes it as `/v1/pair`.
+const pairingEndpointPath = "/v1/pair"
 
 // PairingError describes why a pairing attempt failed. It is the canonical
 // structured error type for the Body pairing client (distinct from a raw
@@ -70,28 +75,72 @@ func (e *PairingError) Error() string {
 // supported transport (e.g. only relay, which is not yet implemented).
 var ErrPairingUnsupportedBootstrap error = &PairingError{Op: "no supported bootstrap endpoint"}
 
-// LoadInvitation parses an invitation document and validates version and
-// required fields. It does NOT verify expiry — callers pass a current time to
-// ValidInvitationAt. Returns ErrStateNotFound-style errors wrapped as
-// PairingError on malformed input.
+// LoadInvitation parses an invitation document and validates its version and
+// required fields (id, secret, expiry parseable, at least one bootstrap
+// endpoint). It does NOT verify expiry against the current time — callers pass
+// a current-second value to PairWithInvitation, which checks it. Malformed
+// input is returned as a PairingError.
 func LoadInvitation(raw string) (*dollnetwork.Invitation, error) {
 	var inv dollnetwork.Invitation
-	if err := inv.FromJSON([]byte(raw)); err != nil {
+	if err := json.Unmarshal([]byte(raw), &inv); err != nil {
 		return nil, &PairingError{Op: "parse invitation", Cause: err}
+	}
+	if err := validateInvitationShape(&inv); err != nil {
+		return nil, &PairingError{Op: "validate invitation", Cause: err}
 	}
 	return &inv, nil
 }
 
+// validateInvitationShape checks the structural validity of an invitation
+// without reference to the current time: version, id, secret, expiry syntax,
+// and at least one advertised bootstrap endpoint.
+func validateInvitationShape(inv *dollnetwork.Invitation) error {
+	if inv == nil {
+		return errors.New("nil invitation")
+	}
+	if inv.Version != dollnetwork.ProtocolVersion {
+		return fmt.Errorf("unsupported invitation version %d", inv.Version)
+	}
+	if inv.InvitationID == "" {
+		return errors.New("missing invitation id")
+	}
+	if inv.InvitationSecret == "" {
+		return errors.New("missing invitation secret")
+	}
+	if _, err := time.Parse(time.RFC3339, inv.ExpiresAt); err != nil {
+		return fmt.Errorf("invitation expires_at %q is not RFC3339: %v", inv.ExpiresAt, err)
+	}
+	if len(inv.BootstrapEndpoints) == 0 {
+		return errors.New("invitation has no bootstrap endpoints")
+	}
+	return nil
+}
+
+// invitationExpired reports whether the invitation has expired as of `now`
+// (a Unix timestamp, matching the convention used across the Body runtime).
+func invitationExpired(inv *dollnetwork.Invitation, now int64) bool {
+	exp, err := time.Parse(time.RFC3339, inv.ExpiresAt)
+	if err != nil {
+		// validateInvitationShape already guaranteed parseability; treat any
+		// surprise as expired so we never accept a malformed date.
+		return true
+	}
+	return exp.Before(time.Unix(now, 0)) || exp.Equal(time.Unix(now, 0))
+}
+
 // ChooseBootstrapEndpoint selects a supported bootstrap endpoint from the
-// invitation. As of M2 the Body implements direct HTTP(S) bootstrap; a relay
-// endpoint is representable but unsupported, so if no direct endpoint exists
-// we fail explicitly rather than treating relay like direct.
+// invitation. As of M2 the Body implements direct HTTP(S) bootstrap; the
+// canonical BootstrapEndpoint carries only a URL, and we distinguish transport
+// by scheme — an http(s) URL is a direct bootstrap, anything else (e.g.
+// relay://) is unsupported. If no direct endpoint exists we fail explicitly
+// rather than treating relay like direct.
 func ChooseBootstrapEndpoint(inv *dollnetwork.Invitation) (*dollnetwork.BootstrapEndpoint, error) {
 	if inv == nil {
 		return nil, errors.New("body: pairing: nil invitation")
 	}
 	for _, e := range inv.BootstrapEndpoints {
-		if e.Type == dollnetwork.EndpointDirect {
+		u, err := url.Parse(e.URL)
+		if err == nil && (u.Scheme == "http" || u.Scheme == "https") {
 			return &e, nil
 		}
 	}
@@ -109,10 +158,67 @@ func membershipFromResponse(resp *dollnetwork.PairResponse) Membership {
 		Status:       MembershipActive,
 		PeerID:       resp.BodyPeerID,
 		BodyPeerID:   resp.BodyPeerID,
-		BodyIPv6:     resp.BodyIPv6,
+		BodyIPv6:     firstAddress(resp.BodyAddresses),
 		CorePeerID:   resp.CorePeerID,
-		CoreWGKeyB64: resp.CoreWGKeyB64,
+		CoreWGKeyB64: resp.CoreWGPublicKey,
 	}
+}
+
+func firstAddress(addrs []string) string {
+	if len(addrs) == 0 {
+		return ""
+	}
+	return addrs[0]
+}
+
+// validatePairResponse treats Core's response as untrusted input and checks it
+// structurally before anything is persisted: protocol version, required
+// membership fields, at least one Body/Core overlay address, a parseable IPv6
+// prefix, and a Core WG public key that decodes to the canonical 32 bytes.
+func validatePairResponse(resp *dollnetwork.PairResponse) error {
+	if resp == nil {
+		return errors.New("nil pair response")
+	}
+	if resp.Version != dollnetwork.ProtocolVersion {
+		return fmt.Errorf("unsupported response version %d", resp.Version)
+	}
+	if resp.NetworkID == "" {
+		return errors.New("response missing network_id")
+	}
+	if resp.BodyPeerID == "" {
+		return errors.New("response missing body_peer_id")
+	}
+	if resp.CorePeerID == "" {
+		return errors.New("response missing core_peer_id")
+	}
+	if addr, ok := validOverlayAddress(resp.BodyAddresses); !ok {
+		return fmt.Errorf("response has no valid body overlay address (got %q)", addr)
+	}
+	if _, ok := validOverlayAddress(resp.CoreAddresses); !ok {
+		return errors.New("response has no valid core overlay address")
+	}
+	if _, err := dollnetwork.DecodeWgPublicKey(resp.CoreWGPublicKey); err != nil {
+		return fmt.Errorf("response core wg public key invalid: %v", err)
+	}
+	return nil
+}
+
+// validOverlayAddress returns the first parseable IPv6 CIDR from the slice.
+func validOverlayAddress(addrs []string) (string, bool) {
+	for _, a := range addrs {
+		if a == "" {
+			continue
+		}
+		prefix, err := netip.ParsePrefix(a)
+		if err != nil {
+			continue
+		}
+		if !prefix.Addr().Is6() {
+			continue
+		}
+		return a, true
+	}
+	return "", false
 }
 
 // PairResult is the outcome of a successful pairing: the validated Core
@@ -156,9 +262,12 @@ func PairWithInvitation(ctx context.Context, store *Store, inv *dollnetwork.Invi
 		return nil, &PairingError{Op: "load body identity", Cause: errors.New("missing identity or wg keypair")}
 	}
 
-	// Validate the invitation against the current time.
-	if err := inv.ValidInvitationAt(now); err != nil {
+	// Validate the invitation structurally and against the current time.
+	if err := validateInvitationShape(inv); err != nil {
 		return nil, &PairingError{Op: "invitation validity", Cause: err}
+	}
+	if invitationExpired(inv, now) {
+		return nil, &PairingError{Op: "invitation validity", Cause: fmt.Errorf("invitation %q expired at %s", inv.InvitationID, inv.ExpiresAt)}
 	}
 
 	ep, err := ChooseBootstrapEndpoint(inv)
@@ -168,7 +277,7 @@ func PairWithInvitation(ctx context.Context, store *Store, inv *dollnetwork.Invi
 
 	// Build the canonical PairRequest (includes the persisted Body ID and only
 	// the public WG key — never the private key).
-	req := BuildPairRequest(string(inv.ID), string(inv.Secret), st, kp)
+	req := BuildPairRequest(inv.InvitationID, inv.InvitationSecret, st, kp)
 	if err := req.ValidatePairRequest(); err != nil {
 		return nil, &PairingError{Op: "build pair request", Cause: err}
 	}
@@ -178,8 +287,8 @@ func PairWithInvitation(ctx context.Context, store *Store, inv *dollnetwork.Invi
 		return nil, &PairingError{Op: "encode pair request", Cause: err}
 	}
 
-	url := string(ep.BootstrapURL) + dollnetwork.PairingPath
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader([]byte(body)))
+	pairURL := ep.URL + pairingEndpointPath
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, pairURL, bytes.NewReader([]byte(body)))
 	if err != nil {
 		return nil, &PairingError{Op: "create pair request", Cause: err}
 	}
@@ -200,22 +309,31 @@ func PairWithInvitation(ctx context.Context, store *Store, inv *dollnetwork.Invi
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		// Non-2xx: try to surface the canonical structured pairing error.
-		var perr dollnetwork.PairingError
-		if e2 := perr.FromJSON(raw); e2 == nil {
-			return nil, &PairingError{
-				Op:    "pairing denied",
-				Cause: errors.New(fmt.Sprintf("core error %s: %s", string(perr.Code), string(perr.Message))),
+		var perr dollnetwork.PairErrorResponse
+		if len(raw) > 0 {
+			if e2 := json.Unmarshal(raw, &perr); e2 == nil && perr.Reason != "" {
+				msg := perr.Reason
+				if perr.Error != "" {
+					msg = perr.Error + " (" + perr.Reason + ")"
+				}
+				return nil, &PairingError{
+					Op:    "pairing denied",
+					Cause: errors.New("core error: " + msg),
+				}
 			}
 		}
 		return nil, &PairingError{
 			Op:    "pairing denied",
-			Cause: errors.New(fmt.Sprintf("http status %d", resp.StatusCode)),
+			Cause: fmt.Errorf("http status %d", resp.StatusCode),
 		}
 	}
 
 	// 2xx: parse + validate the membership response atomically.
 	var pairResp dollnetwork.PairResponse
-	if err := pairResp.FromJSON(raw); err != nil {
+	if err := json.Unmarshal(raw, &pairResp); err != nil {
+		return nil, &PairingError{Op: "validate pairing response", Cause: err}
+	}
+	if err := validatePairResponse(&pairResp); err != nil {
 		return nil, &PairingError{Op: "validate pairing response", Cause: err}
 	}
 
