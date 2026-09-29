@@ -176,7 +176,21 @@ func (s *PairingService) HandlePairing(ctx context.Context, req *dollnetwork.Pai
 		}
 	}
 
-	// ── 8. Persist membership ─────────────────────────────────────────────
+	// ── 8. Encode Core WG public key before durable commits ──────────
+	coreWGKey, err := dollnetwork.EncodeWgPublicKey(s.network.Core.PublicKey[:])
+	if err != nil {
+		// Should never happen — Core's own key is valid, but if it
+		// somehow fails we roll back membership before any durable commit.
+		_ = s.network.RemoveMembership(m.PeerID)
+		return nil, &dollnetwork.PairErrorResponse{
+			Version:  dollnetwork.ProtocolVersion,
+			Error:    fmt.Sprintf("encode core wg key: %v", err),
+			Reason:   "internal_error",
+			Consumed: false,
+		}
+	}
+
+	// ── 9. Persist membership (first durable commit) ──────────────────
 	if err := s.netStore.SaveMembership(ctx, active); err != nil {
 		_ = s.network.RemoveMembership(m.PeerID)
 		return nil, &dollnetwork.PairErrorResponse{
@@ -187,7 +201,7 @@ func (s *PairingService) HandlePairing(ctx context.Context, req *dollnetwork.Pai
 		}
 	}
 
-	// ── 9. Consume invitation (transactional: membership already durable) ──
+	// ── 10. Consume invitation (second durable commit) ────────────────
 	if err := s.invSvc.Consume(ctx, req.InvitationID); err != nil {
 		// Consumption failed — roll back membership.
 		_ = s.network.RemoveMembership(m.PeerID)
@@ -200,19 +214,7 @@ func (s *PairingService) HandlePairing(ctx context.Context, req *dollnetwork.Pai
 		}
 	}
 
-	// ── 10. Encode Core WG public key at the domain boundary ──────────────
-	coreWGKey, err := dollnetwork.EncodeWgPublicKey(s.network.Core.PublicKey[:])
-	if err != nil {
-		// Should never happen — Core's own key is valid.
-		return nil, &dollnetwork.PairErrorResponse{
-			Version:  dollnetwork.ProtocolVersion,
-			Error:    fmt.Sprintf("encode core wg key: %v", err),
-			Reason:   "internal_error",
-			Consumed: true,
-		}
-	}
-
-	// ── 11. Return canonical membership response ──────────────────────────
+	// ── 11. Return canonical membership response ──────────────────────
 	return &dollnetwork.PairResponse{
 		Version:         dollnetwork.ProtocolVersion,
 		NetworkID:       string(s.network.NetworkID),

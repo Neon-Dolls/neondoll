@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"sync"
 	"time"
+
+	"github.com/Neon-Dolls/neondoll/DollNetwork"
 )
 
 // ── In-memory store ──────────────────────────────────────────────────────────
@@ -106,7 +108,7 @@ func NewService(store Store, clock Clock) *Service {
 // CreateParams are the parameters for creating an invitation.
 type CreateParams struct {
 	Lifetime           time.Duration
-	BootstrapEndpoints []string
+	BootstrapEndpoints dollnetwork.Endpoints
 }
 
 // CreatedInvitation is the result of a successful Create call. It carries
@@ -117,7 +119,7 @@ type CreatedInvitation struct {
 	ID                 string
 	Secret             string
 	ExpiresAt          time.Time
-	BootstrapEndpoints []string
+	BootstrapEndpoints dollnetwork.Endpoints
 }
 
 // Create generates a new invitation with a cryptographically strong secret

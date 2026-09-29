@@ -125,14 +125,14 @@ func (r *PairRequest) ValidatePairRequest() error {
 // CoreEndpoints may be empty; an empty slice is valid (the Body will
 // discover endpoints out of band or through a relay later).
 type PairResponse struct {
-	Version         int            `json:"version"`
-	NetworkID       string         `json:"network_id"`
-	BodyPeerID      string         `json:"body_peer_id"`
-	BodyAddresses   []string       `json:"body_addresses"`
-	CorePeerID      string         `json:"core_peer_id"`
-	CoreWGPublicKey string         `json:"core_wg_public_key"`
-	CoreAddresses   []string       `json:"core_addresses"`
-	CoreEndpoints   Endpoints      `json:"core_endpoints"`
+	Version         int       `json:"version"`
+	NetworkID       string    `json:"network_id"`
+	BodyPeerID      string    `json:"body_peer_id"`
+	BodyAddresses   []string  `json:"body_addresses"`
+	CorePeerID      string    `json:"core_peer_id"`
+	CoreWGPublicKey string    `json:"core_wg_public_key"`
+	CoreAddresses   []string  `json:"core_addresses"`
+	CoreEndpoints   Endpoints `json:"core_endpoints"`
 }
 
 // ── PairErrorResponse (Core → Body, error/denial) ────────────────────────────

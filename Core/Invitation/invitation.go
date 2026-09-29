@@ -5,6 +5,8 @@ package invitation
 import (
 	"context"
 	"time"
+
+	dollnetwork "github.com/Neon-Dolls/neondoll/DollNetwork"
 )
 
 // ── Clock: injectable time boundary ──────────────────────────────────────────
@@ -28,11 +30,11 @@ type SecretHash [32]byte
 
 // Invitation represents a single-use pairing invitation that expires.
 type Invitation struct {
-	ID                 string     `json:"id"`
-	SecretHash         SecretHash `json:"-"`
-	ExpiresAt          time.Time  `json:"expires_at"`
-	Consumed           bool       `json:"consumed"`
-	BootstrapEndpoints []string   `json:"bootstrap_endpoints,omitempty"`
+	ID                 string                `json:"id"`
+	SecretHash         SecretHash            `json:"-"`
+	ExpiresAt          time.Time             `json:"expires_at"`
+	Consumed           bool                  `json:"consumed"`
+	BootstrapEndpoints dollnetwork.Endpoints `json:"bootstrap_endpoints,omitempty"`
 }
 
 // ── Store: persistence abstraction ───────────────────────────────────────────

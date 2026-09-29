@@ -103,21 +103,17 @@ func createInvite(t *testing.T, svc *PairingService, clock *stubClock) *dollnetw
 	t.Helper()
 	ci, err := svc.invSvc.Create(context.Background(), invitation.CreateParams{
 		Lifetime:           invitation.DefaultLifetime,
-		BootstrapEndpoints: []string{"relay://core.example.com:51820"},
+		BootstrapEndpoints: dollnetwork.Endpoints{{URL: "relay://core.example.com:51820"}},
 	})
 	if err != nil {
 		t.Fatal("create invitation:", err)
-	}
-	eps := make(dollnetwork.Endpoints, len(ci.BootstrapEndpoints))
-	for i, e := range ci.BootstrapEndpoints {
-		eps[i] = dollnetwork.BootstrapEndpoint{URL: e}
 	}
 	return &dollnetwork.Invitation{
 		Version:            dollnetwork.ProtocolVersion,
 		InvitationID:       ci.ID,
 		InvitationSecret:   ci.Secret,
 		ExpiresAt:          ci.ExpiresAt.Format(time.RFC3339),
-		BootstrapEndpoints: eps,
+		BootstrapEndpoints: ci.BootstrapEndpoints,
 	}
 }
 
@@ -410,9 +406,9 @@ func TestPairing_ConcurrentSameInvitation(t *testing.T) {
 			t.Errorf("the failing response must set Consumed=true, got Consumed=%v", er.Consumed)
 		}
 	}
-	}
+}
 
-	func TestPairing_RejectsUnsupportedVersion(t *testing.T) {
+func TestPairing_RejectsUnsupportedVersion(t *testing.T) {
 	clock := &stubClock{t: time.Date(2025, 6, 1, 12, 0, 0, 0, time.UTC)}
 	svc, _, _ := setup(t, clock)
 	inv := createInvite(t, svc, clock)
@@ -733,11 +729,11 @@ func TestHTTPHandler_ReturnsCorrectStatusCodes(t *testing.T) {
 				InvitationID: "no-such-invitation",
 				Secret:       "some-secret",
 				Body: dollnetwork.PairRequestBody{
-							BodyID:         "body-01",
-							Implementation: "neondoll-test/v1",
-							Platform:       "test",
-							Arch:           "test",
-						},
+					BodyID:         "body-01",
+					Implementation: "neondoll-test/v1",
+					Platform:       "test",
+					Arch:           "test",
+				},
 				Network: dollnetwork.PairingNetwork{
 					WireGuardPublicKey: base64.StdEncoding.EncodeToString(make([]byte, 32)),
 				},
@@ -751,11 +747,11 @@ func TestHTTPHandler_ReturnsCorrectStatusCodes(t *testing.T) {
 				InvitationID: "some-id",
 				Secret:       "some-secret",
 				Body: dollnetwork.PairRequestBody{
-							BodyID:         "body-01",
-							Implementation: "neondoll-test/v1",
-							Platform:       "test",
-							Arch:           "test",
-						},
+					BodyID:         "body-01",
+					Implementation: "neondoll-test/v1",
+					Platform:       "test",
+					Arch:           "test",
+				},
 				Network: dollnetwork.PairingNetwork{
 					WireGuardPublicKey: base64.StdEncoding.EncodeToString(make([]byte, 32)),
 				},
@@ -796,4 +792,3 @@ func TestHTTPHandler_RequestBounded(t *testing.T) {
 		t.Logf("status on oversized body: %d", w.Code)
 	}
 }
-
