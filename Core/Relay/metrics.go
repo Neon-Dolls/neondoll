@@ -25,6 +25,7 @@ type Metrics struct {
 	udpDatagramsDroppedQueueFull    atomic.Int64
 	udpDatagramsDroppedZeroLength   atomic.Int64
 	udpDatagramsDroppedNoSink       atomic.Int64
+	udpTearDownErrors               atomic.Int64
 	udpBytesIn                      atomic.Int64
 	udpBytesOut                     atomic.Int64
 }
@@ -57,6 +58,7 @@ func (m *Metrics) UDPDatagramsDroppedZeroLength() int64 {
 	return m.udpDatagramsDroppedZeroLength.Load()
 }
 func (m *Metrics) UDPDatagramsDroppedNoSink() int64 { return m.udpDatagramsDroppedNoSink.Load() }
+func (m *Metrics) UDPTearDownErrors() int64         { return m.udpTearDownErrors.Load() }
 func (m *Metrics) UDPBytesIn() int64                { return m.udpBytesIn.Load() }
 func (m *Metrics) UDPBytesOut() int64               { return m.udpBytesOut.Load() }
 
@@ -80,6 +82,7 @@ func (m *Metrics) incUDPDatagramsDroppedUnknownRoute() { m.udpDatagramsDroppedUn
 func (m *Metrics) incUDPDatagramsDroppedQueueFull()    { m.udpDatagramsDroppedQueueFull.Add(1) }
 func (m *Metrics) incUDPDatagramsDroppedZeroLength()   { m.udpDatagramsDroppedZeroLength.Add(1) }
 func (m *Metrics) incUDPDatagramsDroppedNoSink()       { m.udpDatagramsDroppedNoSink.Add(1) }
+func (m *Metrics) incUDPTearDownErrors()               { m.udpTearDownErrors.Add(1) }
 func (m *Metrics) addUDPBytesIn(n int64)               { m.udpBytesIn.Add(n) }
 func (m *Metrics) addUDPBytesOut(n int64)              { m.udpBytesOut.Add(n) }
 
@@ -103,6 +106,7 @@ func (m *Metrics) Snapshot() map[string]int64 {
 		"udp_datagrams_dropped_queue_full":    m.UDPDatagramsDroppedQueueFull(),
 		"udp_datagrams_dropped_zero_length":   m.UDPDatagramsDroppedZeroLength(),
 		"udp_datagrams_dropped_no_sink":       m.UDPDatagramsDroppedNoSink(),
+		"udp_teardown_errors":                 m.UDPTearDownErrors(),
 		"udp_bytes_in":                        m.UDPBytesIn(),
 		"udp_bytes_out":                       m.UDPBytesOut(),
 	}

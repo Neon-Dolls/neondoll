@@ -388,6 +388,19 @@ type ExpireStaleResult struct {
 	RoutesExpiredViaReg []RouteID
 }
 
+// AllExpiredRoutes returns the union of independently stale routes and
+// routes removed because their registration expired.
+func (r ExpireStaleResult) AllExpiredRoutes() []RouteID {
+	n := len(r.StaleRoutes) + len(r.RoutesExpiredViaReg)
+	if n == 0 {
+		return nil
+	}
+	out := make([]RouteID, 0, n)
+	out = append(out, r.StaleRoutes...)
+	out = append(out, r.RoutesExpiredViaReg...)
+	return out
+}
+
 // ExpireStale removes stale routes and registrations whose last keepalive
 // exceeds the given timeout. It returns a structured result distinguishing
 // independently expired routes from routes removed due to registration expiry.

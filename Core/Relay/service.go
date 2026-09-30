@@ -302,6 +302,15 @@ func (s *Service) livenessLoop(ctx context.Context) {
 			for range result.RoutesExpiredViaReg {
 				s.metrics.incRoutesExpiredViaRegistration()
 			}
+
+			// Close UDP endpoints for all expired routes. A route that never
+			// reached endpoint allocation returns ErrUDPRouteNotFound which is
+			// harmless — skip it.
+			for _, rid := range result.AllExpiredRoutes() {
+				if err := s.udp.Close(rid); err != nil && !errors.Is(err, ErrUDPRouteNotFound) {
+					s.metrics.incUDPTearDownErrors()
+				}
+			}
 		}
 	}
 }
