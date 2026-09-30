@@ -2,74 +2,44 @@ package relay
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
-func TestMarshalControl_RoundTrip(t *testing.T) {
+func TestMarshalAndUnmarshalControl_RoundTrip(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name string
 		msg  any
-		want ControlMessageType
 	}{
 		{
-			name: "register",
-			msg: &Register{
-				Type:  CmdRegister,
-				Token: "secret-token",
-			},
-			want: CmdRegister,
+			name: "Register",
+			msg:  &Register{Type: CmdRegister, Token: "relay-token"},
 		},
 		{
-			name: "registered",
-			msg: &Registered{
-				Type:    CmdRegistered,
-				RelayID: "relay-01",
-			},
-			want: CmdRegistered,
+			name: "Registered",
+			msg:  &Registered{Type: CmdRegistered, RelayID: "relay-01"},
 		},
 		{
-			name: "route_open",
-			msg: &RouteOpen{
-				Type:       CmdRouteOpen,
-				RouteID:    42,
-				SourceAddr: "10.0.0.1",
-				TargetAddr: "10.0.0.2",
-			},
-			want: CmdRouteOpen,
+			name: "RouteOpen",
+			msg:  &RouteOpen{Type: CmdRouteOpen, RouteID: 1, Credentials: RouteCredentials{Token: "route-token"}},
 		},
 		{
-			name: "route_opened",
-			msg: &RouteOpened{
-				Type:       CmdRouteOpened,
-				RouteID:    42,
-				SourceAddr: "10.0.0.1",
-			},
-			want: CmdRouteOpened,
+			name: "RouteOpened",
+			msg:  &RouteOpened{Type: CmdRouteOpened, RouteID: 1, AllocatedEndpoint: "relay.example.net:42023"},
 		},
 		{
-			name: "route_close",
-			msg: &RouteClose{
-				Type:    CmdRouteClose,
-				RouteID: 42,
-			},
-			want: CmdRouteClose,
+			name: "RouteClose",
+			msg:  &RouteClose{Type: CmdRouteClose, RouteID: 1},
 		},
 		{
-			name: "route_closed",
-			msg: &RouteClosed{
-				Type:    CmdRouteClosed,
-				RouteID: 42,
-			},
-			want: CmdRouteClosed,
+			name: "RouteClosed",
+			msg:  &RouteClosed{Type: CmdRouteClosed, RouteID: 1},
 		},
 		{
-			name: "error",
-			msg: &RelayError{
-				Type:    CmdError,
-				Code:    "rate_limited",
-				Message: "too many requests",
-			},
-			want: CmdError,
+			name: "RelayError",
+			msg:  &RelayError{Type: CmdError, Code: ErrNotFound, Message: "route not found"},
 		},
 	}
 
@@ -85,157 +55,242 @@ func TestMarshalControl_RoundTrip(t *testing.T) {
 				t.Fatalf("UnmarshalControl: %v", err)
 			}
 
-			// Verify the type field matches
-			var header struct {
-				Type ControlMessageType `json:"type"`
-			}
-			if err := json.Unmarshal(data, &header); err != nil {
-				t.Fatalf("json.Unmarshal header: %v", err)
-			}
-			if header.Type != tt.want {
-				t.Errorf("type: got %q, want %q", header.Type, tt.want)
-			}
-
-			// Verify round-trip preserves fields by re-marshaling
-			reData, err := MarshalControl(got)
-			if err != nil {
-				t.Fatalf("re-MarshalControl: %v", err)
-			}
-
-			var orig, round any
-			if err := json.Unmarshal(data, &orig); err != nil {
-				t.Fatalf("json.Unmarshal orig: %v", err)
-			}
-			if err := json.Unmarshal(reData, &round); err != nil {
-				t.Fatalf("json.Unmarshal round: %v", err)
-			}
-
-			origJSON, _ := json.Marshal(orig)
-			roundJSON, _ := json.Marshal(round)
-			if string(origJSON) != string(roundJSON) {
-				t.Errorf("round-trip mismatch:\n  orig:  %s\n  round: %s", origJSON, roundJSON)
+			// Re-marshal the result to compare JSON equality
+			wantJSON, _ := json.Marshal(tt.msg)
+			gotJSON, _ := json.Marshal(got)
+			if string(gotJSON) != string(wantJSON) {
+				t.Errorf("JSON mismatch:\n  want: %s\n  got:  %s", string(wantJSON), string(gotJSON))
 			}
 		})
 	}
 }
 
-func TestUnmarshalControl_UnknownType(t *testing.T) {
-	data := `{"type": "nonexistent"}`
-	_, err := UnmarshalControl([]byte(data))
-	if err == nil {
-		t.Fatal("expected error for unknown type, got nil")
-	}
-}
+func TestUnmarshalControl_Errors(t *testing.T) {
+	t.Parallel()
 
-func TestUnmarshalControl_InvalidJSON(t *testing.T) {
-	_, err := UnmarshalControl([]byte(`not json`))
-	if err == nil {
-		t.Fatal("expected error for invalid JSON, got nil")
-	}
+	t.Run("truncated", func(t *testing.T) {
+		_, err := UnmarshalControl([]byte(`{"type": "register"`))
+		if err == nil {
+			t.Fatal("expected error for truncated JSON")
+		}
+	})
+
+	t.Run("unknown type", func(t *testing.T) {
+		_, err := UnmarshalControl([]byte(`{"type": "unknown_stuff"}`))
+		if err == nil {
+			t.Fatal("expected error for unknown type")
+		}
+	})
+
+	t.Run("empty data", func(t *testing.T) {
+		_, err := UnmarshalControl([]byte{})
+		if err == nil {
+			t.Fatal("expected error for empty data")
+		}
+	})
+
+	t.Run("oversized message", func(t *testing.T) {
+		// Create a JSON payload larger than MaxControlMessageSize
+		data := make([]byte, MaxControlMessageSize+1)
+		data[0] = '{'
+		data[len(data)-1] = '}'
+		_, err := UnmarshalControl(data)
+		if err == nil {
+			t.Fatal("expected error for oversized control message")
+		}
+		if !strings.Contains(err.Error(), "exceeds max") {
+			t.Errorf("unexpected error message: %v", err)
+		}
+	})
 }
 
 func TestValidateControl(t *testing.T) {
-	tests := []struct {
-		name string
-		msg  any
-		ok   bool
-	}{
-		{
-			name: "valid register",
-			msg:  &Register{Type: CmdRegister, Token: "abc"},
-			ok:   true,
-		},
-		{
-			name: "register missing token",
-			msg:  &Register{Type: CmdRegister},
-			ok:   false,
-		},
-		{
-			name: "valid registered",
-			msg:  &Registered{Type: CmdRegistered, RelayID: "r1"},
-			ok:   true,
-		},
-		{
-			name: "registered missing relay_id",
-			msg:  &Registered{Type: CmdRegistered},
-			ok:   false,
-		},
-		{
-			name: "valid route_open",
-			msg:  &RouteOpen{Type: CmdRouteOpen, RouteID: 1, SourceAddr: "a", TargetAddr: "b"},
-			ok:   true,
-		},
-		{
-			name: "route_open missing route_id",
-			msg:  &RouteOpen{Type: CmdRouteOpen, SourceAddr: "a", TargetAddr: "b"},
-			ok:   false,
-		},
-		{
-			name: "route_open missing source_addr",
-			msg:  &RouteOpen{Type: CmdRouteOpen, RouteID: 1, TargetAddr: "b"},
-			ok:   false,
-		},
-		{
-			name: "route_open missing target_addr",
-			msg:  &RouteOpen{Type: CmdRouteOpen, RouteID: 1, SourceAddr: "a"},
-			ok:   false,
-		},
-		{
-			name: "valid route_opened",
-			msg:  &RouteOpened{Type: CmdRouteOpened, RouteID: 1, SourceAddr: "a"},
-			ok:   true,
-		},
-		{
-			name: "route_opened missing source_addr",
-			msg:  &RouteOpened{Type: CmdRouteOpened, RouteID: 1},
-			ok:   false,
-		},
-		{
-			name: "valid route_close",
-			msg:  &RouteClose{Type: CmdRouteClose, RouteID: 1},
-			ok:   true,
-		},
-		{
-			name: "route_close missing route_id",
-			msg:  &RouteClose{Type: CmdRouteClose},
-			ok:   false,
-		},
-		{
-			name: "valid route_closed",
-			msg:  &RouteClosed{Type: CmdRouteClosed, RouteID: 1},
-			ok:   true,
-		},
-		{
-			name: "route_closed missing route_id",
-			msg:  &RouteClosed{Type: CmdRouteClosed},
-			ok:   false,
-		},
-		{
-			name: "valid error",
-			msg:  &RelayError{Type: CmdError, Code: "err"},
-			ok:   true,
-		},
-		{
-			name: "error missing code",
-			msg:  &RelayError{Type: CmdError},
-			ok:   false,
-		},
-		{
-			name: "unknown type",
-			msg:  "not a control message",
-			ok:   false,
-		},
-	}
+	t.Parallel()
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			err := ValidateControl(tt.msg)
-			if tt.ok && err != nil {
-				t.Fatalf("ValidateControl: unexpected error: %v", err)
-			}
-			if !tt.ok && err == nil {
-				t.Fatal("ValidateControl: expected error, got nil")
-			}
+	t.Run("Register — valid", func(t *testing.T) {
+		err := ValidateControl(&Register{Type: CmdRegister, Token: "tok"})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("Register — missing token", func(t *testing.T) {
+		err := ValidateControl(&Register{Type: CmdRegister})
+		if err == nil {
+			t.Fatal("expected error for missing token")
+		}
+	})
+
+	t.Run("Registered — valid", func(t *testing.T) {
+		err := ValidateControl(&Registered{Type: CmdRegistered, RelayID: "rid"})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("Registered — missing relay_id", func(t *testing.T) {
+		err := ValidateControl(&Registered{Type: CmdRegistered})
+		if err == nil {
+			t.Fatal("expected error for missing relay_id")
+		}
+	})
+
+	t.Run("RouteOpen — valid", func(t *testing.T) {
+		err := ValidateControl(&RouteOpen{
+			Type:        CmdRouteOpen,
+			RouteID:     1,
+			Credentials: RouteCredentials{Token: "route-token"},
 		})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("RouteOpen — missing route_id", func(t *testing.T) {
+		err := ValidateControl(&RouteOpen{
+			Type:        CmdRouteOpen,
+			Credentials: RouteCredentials{Token: "route-token"},
+		})
+		if err == nil {
+			t.Fatal("expected error for missing route_id")
+		}
+	})
+
+	t.Run("RouteOpen — missing credentials token", func(t *testing.T) {
+		err := ValidateControl(&RouteOpen{
+			Type:    CmdRouteOpen,
+			RouteID: 1,
+		})
+		if err == nil {
+			t.Fatal("expected error for missing credentials token")
+		}
+	})
+
+	t.Run("RouteOpened — valid", func(t *testing.T) {
+		err := ValidateControl(&RouteOpened{
+			Type:              CmdRouteOpened,
+			RouteID:           1,
+			AllocatedEndpoint: "relay.example.net:42023",
+		})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("RouteOpened — missing route_id", func(t *testing.T) {
+		err := ValidateControl(&RouteOpened{
+			Type:              CmdRouteOpened,
+			AllocatedEndpoint: "relay.example.net:42023",
+		})
+		if err == nil {
+			t.Fatal("expected error for missing route_id")
+		}
+	})
+
+	t.Run("RouteOpened — missing endpoint", func(t *testing.T) {
+		err := ValidateControl(&RouteOpened{
+			Type:    CmdRouteOpened,
+			RouteID: 1,
+		})
+		if err == nil {
+			t.Fatal("expected error for missing endpoint")
+		}
+	})
+
+	t.Run("RouteClose — valid", func(t *testing.T) {
+		err := ValidateControl(&RouteClose{Type: CmdRouteClose, RouteID: 1})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("RouteClose — missing route_id", func(t *testing.T) {
+		err := ValidateControl(&RouteClose{Type: CmdRouteClose})
+		if err == nil {
+			t.Fatal("expected error for missing route_id")
+		}
+	})
+
+	t.Run("RouteClosed — valid", func(t *testing.T) {
+		err := ValidateControl(&RouteClosed{Type: CmdRouteClosed, RouteID: 1})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("RouteClosed — missing route_id", func(t *testing.T) {
+		err := ValidateControl(&RouteClosed{Type: CmdRouteClosed})
+		if err == nil {
+			t.Fatal("expected error for missing route_id")
+		}
+	})
+
+	t.Run("RelayError — valid", func(t *testing.T) {
+		err := ValidateControl(&RelayError{Type: CmdError, Code: ErrNotFound})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("RelayError — missing code", func(t *testing.T) {
+		err := ValidateControl(&RelayError{Type: CmdError})
+		if err == nil {
+			t.Fatal("expected error for missing code")
+		}
+	})
+
+	t.Run("unknown type", func(t *testing.T) {
+		err := ValidateControl("not a pointer")
+		if err == nil {
+			t.Fatal("expected error for unknown type")
+		}
+	})
+}
+
+func TestControlFieldLabels(t *testing.T) {
+	t.Parallel()
+	// Verify JSON serialization produces the correct field names.
+
+	t.Run("RouteOpen — no proxy semantics", func(t *testing.T) {
+		m := RouteOpen{
+			Type:        CmdRouteOpen,
+			RouteID:     7,
+			Credentials: RouteCredentials{Token: "rtok"},
+		}
+		data, _ := json.Marshal(m)
+		// Must NOT include source_addr or target_addr
+		if containsJSONKey(string(data), "source_addr") {
+			t.Error("RouteOpen should not serialize source_addr")
+		}
+		if containsJSONKey(string(data), "target_addr") {
+			t.Error("RouteOpen should not serialize target_addr")
+		}
+		// Must include credentials
+		if !containsJSONKey(string(data), "credentials") {
+			t.Error("RouteOpen should serialize credentials")
+		}
+	})
+
+	t.Run("RouteOpened — endpoint field", func(t *testing.T) {
+		m := RouteOpened{
+			Type:              CmdRouteOpened,
+			RouteID:           7,
+			AllocatedEndpoint: "relay.example.net:42023",
+		}
+		data, _ := json.Marshal(m)
+		if !containsJSONKey(string(data), "endpoint") {
+			t.Error("RouteOpened should serialize endpoint, got:", string(data))
+		}
+	})
+}
+
+func containsJSONKey(jsonStr, key string) bool {
+	// Quick check: key followed by ':' in JSON context
+	idx := strings.Index(jsonStr, "\""+key+"\"")
+	if idx == -1 {
+		return false
 	}
+	// Ensure there's a ':' after the key name
+	remaining := jsonStr[idx+len(key)+2:]
+	return len(remaining) > 0 && remaining[0] == ':'
 }

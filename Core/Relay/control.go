@@ -16,8 +16,13 @@ func MarshalControl(v any) ([]byte, error) {
 }
 
 // UnmarshalControl unmarshals JSON into the correct control message struct
-// based on the "type" discriminator field.
+// based on the "type" discriminator field. Rejects messages exceeding
+// MaxControlMessageSize.
 func UnmarshalControl(data []byte) (any, error) {
+	if len(data) > MaxControlMessageSize {
+		return nil, ErrControlTooLarge
+	}
+
 	var h controlHeader
 	if err := json.Unmarshal(data, &h); err != nil {
 		return nil, fmt.Errorf("relay: unmarshal control header: %w", err)
@@ -64,18 +69,15 @@ func ValidateControl(v any) error {
 		if m.RouteID == 0 {
 			return fmt.Errorf("relay: RouteOpen.route_id is required")
 		}
-		if m.SourceAddr == "" {
-			return fmt.Errorf("relay: RouteOpen.source_addr is required")
-		}
-		if m.TargetAddr == "" {
-			return fmt.Errorf("relay: RouteOpen.target_addr is required")
+		if m.Credentials.Token == "" {
+			return fmt.Errorf("relay: RouteOpen.credentials.token is required")
 		}
 	case *RouteOpened:
 		if m.RouteID == 0 {
 			return fmt.Errorf("relay: RouteOpened.route_id is required")
 		}
-		if m.SourceAddr == "" {
-			return fmt.Errorf("relay: RouteOpened.source_addr is required")
+		if m.AllocatedEndpoint == "" {
+			return fmt.Errorf("relay: RouteOpened.endpoint is required")
 		}
 	case *RouteClose:
 		if m.RouteID == 0 {

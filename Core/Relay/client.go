@@ -2,7 +2,6 @@ package relay
 
 import (
 	"context"
-	"net/netip"
 )
 
 // RelayClient defines the Core-side contract for communicating with a
@@ -17,9 +16,10 @@ type RelayClient interface {
 	// connection. Usually called by Connect but exposed for testing.
 	Register(ctx context.Context, token string) error
 
-	// OpenRoute requests a relay route so the Relay forwards WG packets
-	// between Core and the Body at targetAddr.
-	OpenRoute(ctx context.Context, routeID RouteID, sourceAddr, targetAddr netip.Addr) error
+	// OpenRoute requests a relay route with the given route-scoped
+	// credentials. On success the Relay allocates a public UDP endpoint
+	// for opaque WireGuard datagrams on this route.
+	OpenRoute(ctx context.Context, routeID RouteID, creds RouteCredentials) error
 
 	// CloseRoute terminates a relay route.
 	CloseRoute(ctx context.Context, routeID RouteID) error

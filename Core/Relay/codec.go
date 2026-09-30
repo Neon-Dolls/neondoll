@@ -8,26 +8,25 @@ import (
 
 // Protocol constants.
 const (
-	ProtocolVersion     uint8  = 1
-	FrameHeaderSize            = 11 // version(1) + route_id(8) + length(2)
-	MaxFramePayloadSize        = 65535 // uint16 max
-	MaxRouteID          RouteID = 1<<63 - 1 // avoid sign-bit use
+	ProtocolVersion       uint8   = 1
+	FrameHeaderSize               = 11        // version(1) + route_id(8) + length(2)
+	MaxFramePayloadSize           = 65535     // uint16 max
+	MaxRouteID            RouteID = 1<<63 - 1 // avoid sign-bit use
+	MaxControlMessageSize         = 65536     // 64 KB — maximum control message body size
 )
 
 var (
 	ErrFrameTooSmall   = errors.New("relay: frame too small")
 	ErrFrameTooLarge   = fmt.Errorf("relay: frame payload exceeds max (%d)", MaxFramePayloadSize)
 	ErrFrameBadVersion = errors.New("relay: bad frame version")
-	ErrFrameBadType    = errors.New("relay: unknown frame type")
+	ErrControlTooLarge = fmt.Errorf("relay: control message exceeds max (%d bytes)", MaxControlMessageSize)
 )
 
 // MarshalFrame encodes a Frame into its wire representation.
 //
 // Wire format (big-endian):
 //
-//	version (1 byte) + route_id (8 bytes) + length (2 bytes) + payload (N bytes)
-//
-// FrameType is metadata only and is NOT serialized into the wire format.
+//	version (1 byte) + route_id (8 bytes) + length (2 bytes) + opaque_wg_datagram (N bytes)
 func MarshalFrame(f *Frame) ([]byte, error) {
 	if f == nil {
 		return nil, errors.New("relay: nil frame")
@@ -37,9 +36,6 @@ func MarshalFrame(f *Frame) ([]byte, error) {
 	}
 	if f.RouteID == 0 || f.RouteID > MaxRouteID {
 		return nil, errors.New("relay: invalid route ID")
-	}
-	if f.Type != FrameTypeUnspecified && f.Type != FrameTypeWireGuard {
-		return nil, ErrFrameBadType
 	}
 	if len(f.Payload) > MaxFramePayloadSize {
 		return nil, ErrFrameTooLarge
@@ -55,8 +51,11 @@ func MarshalFrame(f *Frame) ([]byte, error) {
 
 // UnmarshalFrame decodes wire bytes into a Frame.
 //
-// The returned Frame always has Type set to FrameTypeWireGuard since the
-// wire format does not carry a type discriminator.
+// Wire format (big-endian):
+//
+//	version (1 byte) + route_id (8 bytes) + length (2 bytes) + opaque_wg_datagram (N bytes)
+//
+// The returned Frame is always an opaque WireGuard datagram for the identified route.
 func UnmarshalFrame(data []byte) (*Frame, error) {
 	if len(data) < FrameHeaderSize {
 		return nil, ErrFrameTooSmall
@@ -68,6 +67,10 @@ func UnmarshalFrame(data []byte) (*Frame, error) {
 	}
 
 	routeID := RouteID(binary.BigEndian.Uint64(data[1:9]))
+	if routeID == 0 || routeID > MaxRouteID {
+		return nil, errors.New("relay: invalid route ID")
+	}
+
 	length := binary.BigEndian.Uint16(data[9:11])
 
 	if int(length) > MaxFramePayloadSize {
@@ -84,7 +87,6 @@ func UnmarshalFrame(data []byte) (*Frame, error) {
 	return &Frame{
 		Version: version,
 		RouteID: routeID,
-		Type:    FrameTypeWireGuard,
 		Payload: payload,
 	}, nil
 }

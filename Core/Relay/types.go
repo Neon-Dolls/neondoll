@@ -6,24 +6,15 @@ type RelayID string
 // RouteID identifies a single relay route between Core and a remote peer.
 type RouteID uint64
 
-// FrameType indicates whether a binary frame carries a WireGuard packet or other payload.
-type FrameType uint8
-
-const (
-	FrameTypeUnspecified FrameType = 0
-	FrameTypeWireGuard   FrameType = 1
-)
-
 // Frame is the binary protocol frame exchanged over the WSS data channel.
 // Wire format (big-endian):
 //
-//	version (1 byte) + route_id (8 bytes) + length (2 bytes BE) + payload (length bytes)
+//	version (1 byte) + route_id (8 bytes) + length (2 bytes BE) + opaque_wg_datagram (length bytes)
 //
 // Version is always 1.
 type Frame struct {
 	Version uint8
 	RouteID RouteID
-	Type    FrameType
 	Payload []byte
 }
 
@@ -31,13 +22,13 @@ type Frame struct {
 type ControlMessageType string
 
 const (
-	CmdRegister     ControlMessageType = "register"
-	CmdRegistered   ControlMessageType = "registered"
-	CmdRouteOpen    ControlMessageType = "route_open"
-	CmdRouteOpened  ControlMessageType = "route_opened"
-	CmdRouteClose   ControlMessageType = "route_close"
-	CmdRouteClosed  ControlMessageType = "route_closed"
-	CmdError        ControlMessageType = "error"
+	CmdRegister    ControlMessageType = "register"
+	CmdRegistered  ControlMessageType = "registered"
+	CmdRouteOpen   ControlMessageType = "route_open"
+	CmdRouteOpened ControlMessageType = "route_opened"
+	CmdRouteClose  ControlMessageType = "route_close"
+	CmdRouteClosed ControlMessageType = "route_closed"
+	CmdError       ControlMessageType = "error"
 )
 
 // Register is sent by Core to authenticate with the Relay.
@@ -52,19 +43,28 @@ type Registered struct {
 	RelayID RelayID            `json:"relay_id"`
 }
 
-// RouteOpen requests a new relay route.
-type RouteOpen struct {
-	Type       ControlMessageType `json:"type"`
-	RouteID    RouteID            `json:"route_id"`
-	SourceAddr string             `json:"source_addr"`
-	TargetAddr string             `json:"target_addr"`
+// RouteCredentials carries per-route authentication material.
+// This is separate from the Core registration token and from
+// any WireGuard or Doll identity.
+type RouteCredentials struct {
+	Token string `json:"token"`
 }
 
-// RouteOpened confirms a route was created.
+// RouteOpen requests a new relay route for an authenticated Core registration.
+// The Core presents route-scoped credentials; the Relay allocates a public UDP
+// endpoint for opaque WireGuard datagrams on this route.
+type RouteOpen struct {
+	Type        ControlMessageType `json:"type"`
+	RouteID     RouteID            `json:"route_id"`
+	Credentials RouteCredentials   `json:"credentials"`
+}
+
+// RouteOpened confirms a route was created. AllocatedEndpoint is the public
+// UDP endpoint the Relay has assigned for this route's WireGuard traffic.
 type RouteOpened struct {
-	Type       ControlMessageType `json:"type"`
-	RouteID    RouteID            `json:"route_id"`
-	SourceAddr string             `json:"source_addr"`
+	Type              ControlMessageType `json:"type"`
+	RouteID           RouteID            `json:"route_id"`
+	AllocatedEndpoint string             `json:"endpoint"`
 }
 
 // RouteClose requests closing a relay route.
