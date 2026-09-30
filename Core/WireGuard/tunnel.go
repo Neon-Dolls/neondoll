@@ -252,6 +252,7 @@ func (t *RealTunnel) Diagnostics() (*DiagnosticsResult, error) {
 	// IpcGet output: interface block followed by peer blocks separated by
 	// empty lines. Each peer block begins with public_key=... and carries:
 	//   endpoint=<host:port>
+	//   last_handshake_time_sec=<sec>
 	//   last_handshake_time_nsec=<nsec>
 	//   tx_bytes=<n>
 	//   rx_bytes=<n>
@@ -263,6 +264,7 @@ func (t *RealTunnel) Diagnostics() (*DiagnosticsResult, error) {
 		}
 
 		var pd PeerDiagnostics
+		var hsSec int64
 		for _, line := range strings.Split(block, "\n") {
 			line = strings.TrimSpace(line)
 			if line == "" {
@@ -277,12 +279,18 @@ func (t *RealTunnel) Diagnostics() (*DiagnosticsResult, error) {
 				pd.PublicKey = after
 			case "endpoint":
 				pd.Endpoint = after
+			case "last_handshake_time_sec":
+				if s, parseErr := strconv.ParseInt(after, 10, 64); parseErr == nil {
+					hsSec = s
+				}
 			case "last_handshake_time_nsec":
 				if after == "" || after == "0" {
 					pd.HandshakePending = true
 				} else {
 					pd.HandshakePending = false
-					// Store the handshake time for reference.
+					if nsec, parseErr := strconv.ParseInt(after, 10, 64); parseErr == nil {
+						pd.HandshakeTime = time.Unix(hsSec, nsec).UTC().Format(time.RFC3339Nano)
+					}
 				}
 			case "tx_bytes":
 				if n, parseErr := strconv.ParseUint(after, 10, 64); parseErr == nil {

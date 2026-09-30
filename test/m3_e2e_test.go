@@ -6,13 +6,12 @@ package integration
 
 import (
 	"context"
-	"crypto/ecdh"
-	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net"
 	"net/netip"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -21,6 +20,7 @@ import (
 	"github.com/Neon-Dolls/neondoll/Core/Invitation"
 	"github.com/Neon-Dolls/neondoll/Core/Network"
 	"github.com/Neon-Dolls/neondoll/Core/Pairing"
+	"github.com/Neon-Dolls/neondoll/Core/Persistence"
 	wireguard "github.com/Neon-Dolls/neondoll/Core/WireGuard"
 	"github.com/Neon-Dolls/neondoll/DollLink/Events"
 	ws "github.com/Neon-Dolls/neondoll/DollLink/WebSocket"
@@ -174,16 +174,6 @@ func TestM3RealPath(t *testing.T) {
 
 	m1Net.Core.OverlayAddress = coreAddr
 	m1Net.Core.OverlayPrefix = overlayPrefix
-
-	// Generate Core WG keypair using crypto/ecdh (matching what network.NewNetwork does)
-	coreKey, err := ecdh.X25519().GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatalf("generate core key: %v", err)
-	}
-	corePriv := coreKey.Bytes()
-	copy(m1Net.Core.PrivateKey[:], corePriv)
-	corePubRaw := coreKey.PublicKey().Bytes()
-	copy(m1Net.Core.PublicKey[:], corePubRaw)
 
 	t.Logf("Core network: net_id=%s peer_id=%s overlay=%s prefix=%s",
 		m1Net.NetworkID, m1Net.Core.PeerID, m1Net.Core.OverlayAddress, m1Net.Core.OverlayPrefix)
@@ -356,6 +346,11 @@ func TestM3RealPath(t *testing.T) {
 		}
 		t.Logf("Diagnostics: peer endpoint=%s tx=%d rx=%d handshake_pending=%v",
 			diag.Peers[0].Endpoint, diag.Peers[0].TxBytes, diag.Peers[0].RxBytes, diag.Peers[0].HandshakePending)
+		if !diag.Peers[0].HandshakePending && diag.Peers[0].HandshakeTime == "" {
+			t.Errorf("handshake completed but HandshakeTime is empty")
+		} else {
+			t.Logf("HandshakeTime: %s", diag.Peers[0].HandshakeTime)
+		}
 	}
 	t.Log("Diagnostics: PASS")
 
@@ -540,15 +535,27 @@ func TestM3RealPath(t *testing.T) {
 	coreMgr.Stop()
 	coreTun.Stop()
 
-	// Fresh store from persisted data
-	reconStore := newMemNetStore()
-	if err := reconStore.SaveNetwork(ctx, savedNet); err != nil {
+	// Real SQLite persistence — close and reopen to prove durability
+	dbPath := filepath.Join(t.TempDir(), "recon_network_state.db")
+	s1, err := persistence.NewStore(dbPath)
+	if err != nil {
+		t.Fatalf("failed to create reconstruction store: %v", err)
+	}
+	store1 := s1.(network.NetworkStore)
+	if err := store1.SaveNetwork(ctx, savedNet); err != nil {
 		t.Fatalf("recon SaveNetwork: %v", err)
 	}
 	for _, m := range savedMems {
-		if err := reconStore.SaveMembership(ctx, m); err != nil {
+		if err := store1.SaveMembership(ctx, m); err != nil {
 			t.Fatalf("recon SaveMembership: %v", err)
 		}
+	}
+	s1.Close()
+
+	// Reopen the same SQLite DB — data must survive
+	reconStore, err := persistence.NewNetworkStore(dbPath)
+	if err != nil {
+		t.Fatalf("failed to reopen reconstruction store: %v", err)
 	}
 
 	reconNet, err := reconStore.LoadNetwork(ctx)

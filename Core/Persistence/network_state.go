@@ -241,6 +241,23 @@ func (s *store) DeleteMembership(ctx context.Context, peerID network.PeerID) err
 	return nil
 }
 
+// NewNetworkStore opens (or creates) a SQLite database at dbPath and returns it
+// as a network.NetworkStore. This is the entry point for code that needs to
+// persist network state through the standard SQLite backend.
+func NewNetworkStore(dbPath string) (network.NetworkStore, error) {
+	s, err := NewStore(dbPath)
+	if err != nil {
+		return nil, err
+	}
+	// The underlying *store satisfies both Store and network.NetworkStore.
+	ns, ok := s.(network.NetworkStore)
+	if !ok {
+		s.Close()
+		return nil, fmt.Errorf("persistence: store does not implement NetworkStore")
+	}
+	return ns, nil
+}
+
 // membershipKey returns the storage key for a given PeerID.
 func membershipKey(peerID network.PeerID) string {
 	return "network:membership:" + string(peerID)
