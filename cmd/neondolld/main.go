@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -16,8 +18,10 @@ import (
 	"github.com/Neon-Dolls/neondoll/Core/DollMind"
 	"github.com/Neon-Dolls/neondoll/Core/Inference"
 	"github.com/Neon-Dolls/neondoll/Core/Interaction"
+	"github.com/Neon-Dolls/neondoll/Core/Network"
 	"github.com/Neon-Dolls/neondoll/Core/Persistence"
 	"github.com/Neon-Dolls/neondoll/Core/Pulse"
+	"github.com/Neon-Dolls/neondoll/Core/WireGuard"
 	"github.com/Neon-Dolls/neondoll/DollLink/WebSocket"
 	"github.com/Neon-Dolls/neondoll/DollState"
 	"github.com/Neon-Dolls/neondoll/pkg/logger"
@@ -81,6 +85,48 @@ func main() {
 	defer store.Close()
 	log.Info("persistence opened", map[string]any{"path": dbPath})
 
+	// Create the base context for all services.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Load or create the Doll Network state for WireGuard overlay.
+	ns, ok := store.(network.NetworkStore)
+	if !ok {
+		log.Error("store does not implement NetworkStore")
+		os.Exit(1)
+	}
+	nw, err := ns.LoadNetwork(ctx)
+	if err != nil {
+		log.Error("load network error", map[string]any{"error": err.Error()})
+		os.Exit(1)
+	}
+	if nw == nil {
+		nw, err = network.NewNetwork(network.GenerateNetworkID())
+		if err != nil {
+			log.Error("create network error", map[string]any{"error": err.Error()})
+			os.Exit(1)
+		}
+		if err := ns.SaveNetwork(ctx, nw); err != nil {
+			log.Error("save new network error", map[string]any{"error": err.Error()})
+			os.Exit(1)
+		}
+		log.Info("new network created", map[string]any{"network_id": string(nw.NetworkID)})
+	}
+	log.Info("network state loaded", map[string]any{"network_id": string(nw.NetworkID)})
+
+	// Create and start the WireGuard tunnel manager.
+	realTunnel := wireguard.NewRealTunnel(nil)
+	wgManager := wireguard.NewManager(realTunnel, ns, nil)
+	if err := wgManager.Start(ctx, nw); err != nil {
+		log.Error("wireguard manager start error", map[string]any{"error": err.Error()})
+		os.Exit(1)
+	}
+	log.Info("wireguard tunnel started", map[string]any{
+		"overlay_addr": nw.Core.OverlayAddress.String(),
+		"listen_port":  51820,
+	})
+	defer wgManager.Stop()
+
 	// Create the inference provider.
 	inferenceProvider := inference.NewOpenAIProvider(
 		inference.WithBaseURL(cfg.Inference.BaseURL),
@@ -105,9 +151,30 @@ func main() {
 	wsServer := ws.New(wsCfg, log, interactionSvc)
 	log.Info("ws transport created", map[string]any{"listen": listenAddr})
 
-	// Create the base context for all services.
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	// If the tunnel provides a netstack Net, serve WS through the overlay.
+	if tnet := realTunnel.Netstack(); tnet != nil {
+		// Parse port from the configured listen address.
+		_, portStr, err := net.SplitHostPort(listenAddr)
+		port := 8080
+		if err == nil {
+			if p, parseErr := strconv.Atoi(portStr); parseErr == nil {
+				port = p
+			}
+		}
+		// Bind to all addresses on the netstack — incoming WG-decrypted
+		// traffic from overlay peers will arrive here.
+		listener, listenErr := tnet.ListenTCP(&net.TCPAddr{
+			IP:   net.IPv6unspecified,
+			Port: port,
+		})
+		if listenErr != nil {
+			log.Error("netstack ws listen error", map[string]any{"error": listenErr.Error()})
+			os.Exit(1)
+		}
+		wsServer.SetListener(listener)
+		log.Info("ws server listening through wireguard overlay",
+			map[string]any{"port": port, "overlay_addr": nw.Core.OverlayAddress.String()})
+	}
 
 	// Create Pulse runner if enabled in config.
 	// When Pulse is enabled, load (or create) a host doll state and wire

@@ -34,3 +34,7 @@ Thumbs.db
 
 # Body binary
 cmd/neondoll-body/neondoll-body
+
+# Daemon binary
+neondolld
+cmd/neondolld/neondolld

@@ -71,6 +71,7 @@ func NewCoreIdentity(alloc *IPv6Allocator) (*CoreIdentity, error) {
 		PrivateKey:     priv,
 		PublicKey:      pub,
 		OverlayAddress: addr,
+		OverlayPrefix:  alloc.Prefix(),
 	}, nil
 }
 

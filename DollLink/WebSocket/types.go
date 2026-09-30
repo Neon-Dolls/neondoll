@@ -49,6 +49,13 @@ type Server struct {
 	handler      Handler
 	listenerAddr string
 
+	// listener is an optional pre-created net.Listener.
+	// When set (typically via SetListener before Start), the server
+	// uses this listener instead of creating its own via net.Listen.
+	// This enables serving through an overlay netstack (e.g., a WG
+	// userspace tunnel) where host net.Listen is not reachable.
+	listener net.Listener
+
 	// writeJSONFn is a test hook. When set, writeJSON delegates to it
 	// instead of writing to the real WebSocket connection.
 	writeJSONFn func(cc *clientConn, event events.Event) error
@@ -90,12 +97,29 @@ func New(cfg Config, log Logger, handler Handler) *Server {
 	return s
 }
 
+// SetListener sets an optional pre-created net.Listener for the server.
+// When set before Start, the server uses this listener instead of calling
+// net.Listen. This enables serving through an overlay netstack tunnel.
+func (s *Server) SetListener(l net.Listener) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.listener = l
+}
+
 // Start begins the HTTP/WebSocket server.
 func (s *Server) Start(ctx context.Context) error {
-	listener, err := net.Listen("tcp", s.listen)
-	if err != nil {
-		return err
+	s.mu.Lock()
+	listener := s.listener
+	s.mu.Unlock()
+
+	var err error
+	if listener == nil {
+		listener, err = net.Listen("tcp", s.listen)
+		if err != nil {
+			return err
+		}
 	}
+
 	s.mu.Lock()
 	s.listenerAddr = listener.Addr().String()
 	s.httpSrv.Addr = s.listenerAddr

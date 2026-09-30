@@ -67,6 +67,9 @@ type CoreIdentity struct {
 	PrivateKey     WireGuardPrivateKey
 	PublicKey      WireGuardPublicKey
 	OverlayAddress netip.Addr
+	// OverlayPrefix is the IPv6 ULA prefix for this network (e.g., fd00::/64).
+	// Set during construction from the IPv6Allocator.
+	OverlayPrefix netip.Prefix
 }
 
 // Membership represents a remote Body's membership in the Doll Network.
@@ -88,6 +91,11 @@ type Membership struct {
 	// OverlayAddress is the assigned IPv6 ULA address for this Body.
 	// Core is the address authority.
 	OverlayAddress netip.Addr
+
+	// Endpoint is the canonical direct UDP endpoint for the Body
+	// ("ip:port"), if known. Set during pairing or explicitly configured.
+	// This is the endpoint used by Core to reach Body's WG tunnel.
+	Endpoint string
 
 	// Status is the current membership lifecycle state.
 	Status MembershipStatus
