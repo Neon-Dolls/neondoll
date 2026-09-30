@@ -35,14 +35,16 @@ func (s ServiceState) String() string {
 	}
 }
 
-// Service is the relay service skeleton. It manages configuration, the route
-// registry, liveness checks, and diagnostic metrics. Transport-level concerns
-// (UDP forwarding, WSS tunnels, WireGuard packet injection) are deferred to
-// M4.3+ — this skeleton provides the control-plane foundation.
+// Service is the relay service. It manages configuration, the route
+// registry, liveness checks, diagnostic metrics, and an optional
+// outbound control tunnel to a Relay.
 type Service struct {
 	config   ServiceConfig
 	registry *Registry
 	metrics  *Metrics
+
+	clientCfg ClientConfig
+	client    *ControlClient
 
 	mu         sync.Mutex
 	state      ServiceState
@@ -50,23 +52,25 @@ type Service struct {
 	livenessWg sync.WaitGroup
 }
 
-// NewService creates a relay Service with the given config.
-func NewService(cfg ServiceConfig) (*Service, error) {
+// NewService creates a relay Service with the given config and optional
+// client configuration. When clientCfg has a RelayURL, Start will
+// establish an outbound control tunnel to that Relay.
+func NewService(cfg ServiceConfig, clientCfg ClientConfig) (*Service, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("relay: invalid config: %w", err)
 	}
 	return &Service{
-		config:   cfg,
-		registry: NewRegistry(cfg.MaxRegistrations, cfg.MaxRoutes),
-		metrics:  NewMetrics(),
-		state:    ServiceStateStopped,
+		config:    cfg,
+		clientCfg: clientCfg,
+		registry:  NewRegistry(cfg.MaxRegistrations, cfg.MaxRoutes),
+		metrics:   NewMetrics(),
+		state:     ServiceStateStopped,
 	}, nil
 }
 
-// Start launches the relay service. It begins the liveness-check loop and
-// transitions the service to Running. Start returns when the service is
-// ready to accept registrations/routes. The provided context is used for
-// cancellation — call Shutdown to stop gracefully.
+// Start launches the relay service. It begins the liveness-check loop,
+// and if a RelayURL is configured, establishes the outbound control tunnel.
+// The provided context is used for cancellation — call Shutdown to stop.
 func (s *Service) Start(ctx context.Context) error {
 	s.mu.Lock()
 	if s.state != ServiceStateStopped && s.state != ServiceStateStoppedClean {
@@ -83,16 +87,30 @@ func (s *Service) Start(ctx context.Context) error {
 	s.livenessWg.Add(1)
 	go s.livenessLoop(ctx)
 
+	// Start control tunnel if configured
+	if s.clientCfg.RelayURL != "" {
+		client := NewControlClient(s.clientCfg)
+		if err := client.Start(ctx); err != nil {
+			// Cancel liveness loop if tunnel fails
+			cancel()
+			s.livenessWg.Wait()
+			s.mu.Lock()
+			s.state = ServiceStateStopped
+			s.mu.Unlock()
+			return fmt.Errorf("relay: start control tunnel: %w", err)
+		}
+		s.client = client
+	}
+
 	s.mu.Lock()
 	s.state = ServiceStateRunning
 	s.mu.Unlock()
 	return nil
 }
 
-// Shutdown stops the service gracefully. It stops the liveness loop, expires
-// all registrations and routes, and blocks until everything is cleaned up.
-// If the context is cancelled before cleanup completes, Shutdown returns the
-// context error after attempting to cancel remaining work.
+// Shutdown stops the service gracefully. It stops the control tunnel
+// (if established), stops the liveness loop, expires all registrations
+// and routes, and blocks until everything is cleaned up.
 func (s *Service) Shutdown(ctx context.Context) error {
 	s.mu.Lock()
 	if s.state != ServiceStateRunning {
@@ -101,6 +119,14 @@ func (s *Service) Shutdown(ctx context.Context) error {
 	}
 	s.state = ServiceStateStopping
 	s.mu.Unlock()
+
+	// Shutdown control tunnel first if present
+	if s.client != nil {
+		if err := s.client.Shutdown(); err != nil {
+			// Non-fatal — continue with liveness/registry shutdown
+			_ = err
+		}
+	}
 
 	// Cancel the liveness loop
 	if s.cancel != nil {
@@ -116,13 +142,12 @@ func (s *Service) Shutdown(ctx context.Context) error {
 
 	select {
 	case <-done:
-		// liveness loop stopped
 	case <-ctx.Done():
 		return ctx.Err()
 	}
 
 	// Expire all registrations and routes
-	s.registry.ExpireStale(0, 0) // pass 0 timeouts = expire everything
+	s.registry.ExpireStale(0, 0)
 
 	s.mu.Lock()
 	s.state = ServiceStateStoppedClean
@@ -147,6 +172,12 @@ func (s *Service) Config() ServiceConfig {
 	return s.config
 }
 
+// Client returns the service's control client, or nil if no tunnel
+// was configured.
+func (s *Service) Client() *ControlClient {
+	return s.client
+}
+
 // Metrics returns the service's diagnostic counters.
 func (s *Service) Metrics() *Metrics {
 	return s.metrics
@@ -159,13 +190,25 @@ func (s *Service) Diagnostics() map[string]any {
 	s.mu.Unlock()
 
 	m := s.metrics.Snapshot()
-	d := make(map[string]any, len(m)+3)
+	d := make(map[string]any, len(m)+5)
 	d["service_state"] = state
 	for k, v := range m {
 		d[k] = v
 	}
 	d["active_registrations"] = s.registry.RegistrationCount()
 	d["active_routes"] = s.registry.RouteCount()
+
+	// Control tunnel diagnostics
+	if s.client != nil {
+		d["tunnel_connected"] = s.client.IsConnected()
+		d["relay_id"] = string(s.client.RelayID())
+		clientMetrics := s.client.Metrics()
+		d["tunnel_reconnects"] = clientMetrics.Reconnects
+		d["tunnel_routes_restored"] = clientMetrics.RoutesRestored
+	} else {
+		d["tunnel_connected"] = false
+	}
+
 	return d
 }
 

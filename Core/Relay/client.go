@@ -5,41 +5,36 @@ import (
 )
 
 // RelayClient defines the Core-side contract for communicating with a
-// Doll Relay over an authenticated WebSocket tunnel.
+// Doll Relay over an authenticated WebSocket control tunnel.
+//
+// M4.3 scope: outbound WSS/TLS control tunnel with registration, route
+// management, and automatic reconnect. No datagram forwarding yet.
 type RelayClient interface {
-	// Connect establishes the WebSocket connection to the Relay server
-	// and completes the register/registered handshake. Blocks until
-	// registered or error.
-	Connect(ctx context.Context, url string, token string) error
+	// Start dials the Relay and completes the register/registered handshake.
+	// Returns once the control tunnel is established and authenticated.
+	// Subsequent calls are idempotent.
+	Start(ctx context.Context) error
 
-	// Register performs the authentication handshake over an existing
-	// connection. Usually called by Connect but exposed for testing.
-	Register(ctx context.Context, token string) error
+	// RelayID returns the Relay's identity after successful registration.
+	RelayID() RelayID
 
-	// OpenRoute requests a relay route with the given route-scoped
-	// credentials. On success the Relay allocates a public UDP endpoint
-	// for opaque WireGuard datagrams on this route.
-	OpenRoute(ctx context.Context, routeID RouteID, creds RouteCredentials) error
+	// IsConnected reports whether the control tunnel is currently established.
+	IsConnected() bool
+
+	// OpenRoute requests a relay route with route-scoped credentials.
+	// The allocated endpoint is returned on success.
+	OpenRoute(ctx context.Context, routeID RouteID, creds RouteCredentials) (*RouteOpened, error)
 
 	// CloseRoute terminates a relay route.
 	CloseRoute(ctx context.Context, routeID RouteID) error
 
-	// SendPacket sends a WireGuard packet over an open route.
-	SendPacket(ctx context.Context, routeID RouteID, data []byte) error
+	// Metrics returns accumulated counters for reconnect and restoration.
+	Metrics() ControlClientMetrics
 
-	// RecvPacket returns a channel of received packets. Each packet
-	// includes the route ID it arrived on.
-	RecvPacket(ctx context.Context) <-chan Packet
-
-	// ErrChan returns a channel of asynchronous protocol errors.
-	ErrChan() <-chan error
-
-	// Close terminates the relay connection.
-	Close() error
+	// Shutdown tears down the control tunnel and cancels all pending
+	// operations. Blocks until the reconnect loop exits.
+	Shutdown() error
 }
 
-// Packet represents a received relayed packet.
-type Packet struct {
-	RouteID RouteID
-	Data    []byte
-}
+// ControlClient implements RelayClient.
+var _ RelayClient = (*ControlClient)(nil)

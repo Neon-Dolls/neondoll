@@ -684,7 +684,7 @@ func TestMetrics_ConcurrentSafety(t *testing.T) {
 
 func TestService_NewServiceValidConfig(t *testing.T) {
 	t.Parallel()
-	svc, err := NewService(DefaultServiceConfig())
+	svc, err := NewService(DefaultServiceConfig(), ClientConfig{})
 	if err != nil {
 		t.Fatalf("NewService() = %v; want nil", err)
 	}
@@ -697,7 +697,7 @@ func TestService_NewServiceInvalidConfig(t *testing.T) {
 	t.Parallel()
 	cfg := DefaultServiceConfig()
 	cfg.MaxRegistrations = 0
-	_, err := NewService(cfg)
+	_, err := NewService(cfg, ClientConfig{})
 	if err == nil {
 		t.Fatal("NewService with MaxRegistrations=0 should fail")
 	}
@@ -705,7 +705,7 @@ func TestService_NewServiceInvalidConfig(t *testing.T) {
 
 func TestService_StartAndShutdown(t *testing.T) {
 	t.Parallel()
-	svc, err := NewService(DefaultServiceConfig())
+	svc, err := NewService(DefaultServiceConfig(), ClientConfig{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -730,7 +730,7 @@ func TestService_StartAndShutdown(t *testing.T) {
 
 func TestService_ShutdownWithoutStart(t *testing.T) {
 	t.Parallel()
-	svc, _ := NewService(DefaultServiceConfig())
+	svc, _ := NewService(DefaultServiceConfig(), ClientConfig{})
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -745,7 +745,7 @@ func TestService_ShutdownWithoutStart(t *testing.T) {
 
 func TestService_DoubleStart(t *testing.T) {
 	t.Parallel()
-	svc, _ := NewService(DefaultServiceConfig())
+	svc, _ := NewService(DefaultServiceConfig(), ClientConfig{})
 	ctx := context.Background()
 	svc.Start(ctx)
 
@@ -765,7 +765,7 @@ func TestService_DoubleStart(t *testing.T) {
 
 func TestService_ShutdownExpiresAllRoutes(t *testing.T) {
 	t.Parallel()
-	svc, _ := NewService(DefaultServiceConfig())
+	svc, _ := NewService(DefaultServiceConfig(), ClientConfig{})
 	ctx := context.Background()
 	svc.Start(ctx)
 
@@ -794,7 +794,7 @@ func TestService_ShutdownExpiresAllRoutes(t *testing.T) {
 
 func TestService_Diagnostics(t *testing.T) {
 	t.Parallel()
-	svc, _ := NewService(DefaultServiceConfig())
+	svc, _ := NewService(DefaultServiceConfig(), ClientConfig{})
 	svc.Start(context.Background())
 
 	// Add a registration and route to make diagnostics interesting
@@ -834,7 +834,7 @@ func TestService_Diagnostics(t *testing.T) {
 
 func TestService_RegistrationAndRouteLifecycle(t *testing.T) {
 	t.Parallel()
-	svc, _ := NewService(DefaultServiceConfig())
+	svc, _ := NewService(DefaultServiceConfig(), ClientConfig{})
 	ctx := context.Background()
 	svc.Start(ctx)
 
@@ -1079,7 +1079,7 @@ func TestRegistry_RouteCredentialsFromEntry_NotFound(t *testing.T) {
 
 func TestService_RestartLifecycle(t *testing.T) {
 	t.Parallel()
-	svc, err := NewService(DefaultServiceConfig())
+	svc, err := NewService(DefaultServiceConfig(), ClientConfig{})
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
@@ -1141,7 +1141,7 @@ func TestService_ConcurrentStartShutdown(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			svc, err := NewService(DefaultServiceConfig())
+			svc, err := NewService(DefaultServiceConfig(), ClientConfig{})
 			if err != nil {
 				return
 			}

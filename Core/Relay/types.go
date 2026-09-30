@@ -80,10 +80,13 @@ type RouteClosed struct {
 }
 
 // RelayError is sent by Relay on protocol errors.
+// RouteID identifies which route operation failed; zero means not scoped
+// (e.g. a registration failure).
 type RelayError struct {
 	Type    ControlMessageType `json:"type"`
 	Code    string             `json:"code"`
 	Message string             `json:"message"`
+	RouteID RouteID            `json:"route_id,omitempty"`
 }
 
 // ErrorCode constants for RelayError.Code.
