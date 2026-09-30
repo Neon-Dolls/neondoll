@@ -5,6 +5,7 @@ package body
 
 import (
 	"context"
+	"encoding/hex"
 	"fmt"
 	"log/slog"
 	"net/netip"
@@ -93,10 +94,10 @@ func (bt *BodyTunnel) Start(ctx context.Context) error {
 	dev := device.NewDevice(tunDev, bind, l)
 
 	// Set the private key via UAPI config.
-	privHex := fmt.Sprintf("%x", bt.cfg.PrivateKey)
-	uapiCfg := fmt.Sprintf("private_key=%s", privHex)
+	privHex := hex.EncodeToString(bt.cfg.PrivateKey[:])
+	uapiCfg := fmt.Sprintf("private_key=%s\n", privHex)
 	if bt.cfg.ListenPort > 0 {
-		uapiCfg += fmt.Sprintf(" listen_port=%d", bt.cfg.ListenPort)
+		uapiCfg += fmt.Sprintf("listen_port=%d\n", bt.cfg.ListenPort)
 	}
 	if err := dev.IpcSet(uapiCfg); err != nil {
 		dev.Close()
@@ -104,9 +105,9 @@ func (bt *BodyTunnel) Start(ctx context.Context) error {
 	}
 
 	// Configure the single peer: Core.
-	pubHex := fmt.Sprintf("%x", bt.cfg.CorePublicKey)
+	pubHex := hex.EncodeToString(bt.cfg.CorePublicKey[:])
 	peerCfg := fmt.Sprintf(
-		"public_key=%s endpoint=%s persistent_keepalive_interval=25 allowed_ip=%s",
+		"public_key=%s\nendpoint=%s\npersistent_keepalive_interval=25\nallowed_ip=%s\n",
 		pubHex,
 		bt.cfg.CoreEndpoint,
 		bt.cfg.OverlayPrefix.String(),

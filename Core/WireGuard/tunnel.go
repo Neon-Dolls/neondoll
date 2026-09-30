@@ -12,6 +12,8 @@ import (
 	"fmt"
 	"log/slog"
 	"net/netip"
+	"strconv"
+	"strings"
 	"time"
 
 	"golang.zx2c4.com/wireguard/conn"
@@ -230,32 +232,69 @@ func (t *RealTunnel) Netstack() *netstack.Net {
 	return t.net
 }
 
-// Diagnostics returns current WireGuard device diagnostics.
+// Diagnostics returns current WireGuard device diagnostics parsed from UAPI
+// output. Returns per-peer endpoint, handshake state, tx bytes, and rx bytes.
+// Private keys are never exposed.
 func (t *RealTunnel) Diagnostics() (*DiagnosticsResult, error) {
 	if !t.started || t.dev == nil {
 		return nil, fmt.Errorf("wireguard: tunnel not started")
 	}
 
-	// The wireguard device does not expose a direct stats API in the
-	// golang.zx2c4.com/wireguard package. We report what we can from the
-	// device state and peer information. For detailed stats, the device
-	// maintains internal counters accessible via IpcGet.
 	raw, err := t.dev.IpcGet()
 	if err != nil {
 		return nil, fmt.Errorf("wireguard: ipc get: %w", err)
 	}
 
-	result := &DiagnosticsResult{}
-	_ = raw // UAPI output — for now report basic info available.
-	// Full UAPI parsing requires the wireguard device module which isn't
-	// exposed; this is a scaffolding that will be enhanced with real
-	// device stats parsing when the library provides the API.
+	result := &DiagnosticsResult{
+		Peers: make([]PeerDiagnostics, 0),
+	}
 
-	// For now, report peer info from what we've configured.
-	for _, peer := range t.cfg.PeerConfigs {
-		_ = peer
-		// TODO: Parse IpcGet output for per-peer handshake and byte
-		// counters once the library exposes these via public API.
+	// IpcGet output: interface block followed by peer blocks separated by
+	// empty lines. Each peer block begins with public_key=... and carries:
+	//   endpoint=<host:port>
+	//   last_handshake_time_nsec=<nsec>
+	//   tx_bytes=<n>
+	//   rx_bytes=<n>
+	blocks := strings.Split(raw, "\n\n")
+	for _, block := range blocks {
+		block = strings.TrimSpace(block)
+		if block == "" || !strings.Contains(block, "public_key=") {
+			continue
+		}
+
+		var pd PeerDiagnostics
+		for _, line := range strings.Split(block, "\n") {
+			line = strings.TrimSpace(line)
+			if line == "" {
+				continue
+			}
+			before, after, ok := strings.Cut(line, "=")
+			if !ok {
+				continue
+			}
+			switch before {
+			case "public_key":
+				pd.PublicKey = after
+			case "endpoint":
+				pd.Endpoint = after
+			case "last_handshake_time_nsec":
+				if after == "" || after == "0" {
+					pd.HandshakePending = true
+				} else {
+					pd.HandshakePending = false
+					// Store the handshake time for reference.
+				}
+			case "tx_bytes":
+				if n, parseErr := strconv.ParseUint(after, 10, 64); parseErr == nil {
+					pd.TxBytes = int64(n)
+				}
+			case "rx_bytes":
+				if n, parseErr := strconv.ParseUint(after, 10, 64); parseErr == nil {
+					pd.RxBytes = int64(n)
+				}
+			}
+		}
+		result.Peers = append(result.Peers, pd)
 	}
 
 	return result, nil
@@ -266,15 +305,12 @@ func (t *RealTunnel) Diagnostics() (*DiagnosticsResult, error) {
 // buildUAPIConfig assembles the full UAPI config string including interface
 // settings and optional peer blocks. Keys are hex-encoded (lowercase hex),
 // matching the WireGuard UAPI protocol.
+// Note: MTU is not set via UAPI — it's configured during TUN creation.
 func (t *RealTunnel) buildUAPIConfig(cfg Config, peers []PeerConfig) string {
 	uapi := fmt.Sprintf("private_key=%s\n", hex.EncodeToString(cfg.PrivateKey[:]))
 
 	if cfg.ListenPort > 0 {
 		uapi += fmt.Sprintf("listen_port=%d\n", cfg.ListenPort)
-	}
-
-	if cfg.MTU > 0 {
-		uapi += fmt.Sprintf("mtu=%d\n", cfg.MTU)
 	}
 
 	if peers != nil {

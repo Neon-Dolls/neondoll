@@ -49,6 +49,12 @@ func NewManager(tunnel Tunnel, store managerStore, log *slog.Logger) *Manager {
 	}
 }
 
+// SetListenPort sets the WireGuard listen port for the tunnel.
+// Must be called before Start.
+func (m *Manager) SetListenPort(port int) {
+	m.listenPort = port
+}
+
 // Start initialises the tunnel and configures initial peers from the given
 // network state. Returns an error if the tunnel fails to start or if the
 // initial peer reconfiguration fails.
