@@ -47,7 +47,6 @@ type Service struct {
 	mu         sync.Mutex
 	state      ServiceState
 	cancel     context.CancelFunc
-	wg         sync.WaitGroup
 	livenessWg sync.WaitGroup
 }
 
@@ -70,7 +69,7 @@ func NewService(cfg ServiceConfig) (*Service, error) {
 // cancellation — call Shutdown to stop gracefully.
 func (s *Service) Start(ctx context.Context) error {
 	s.mu.Lock()
-	if s.state != ServiceStateStopped {
+	if s.state != ServiceStateStopped && s.state != ServiceStateStoppedClean {
 		s.mu.Unlock()
 		return fmt.Errorf("relay: service already started (state=%s)", s.state)
 	}
@@ -184,15 +183,18 @@ func (s *Service) livenessLoop(ctx context.Context) {
 			return
 		case <-ticker.C:
 			s.metrics.incLivenessChecks()
-			expired := s.registry.ExpireStale(
+			result := s.registry.ExpireStale(
 				s.config.RegistrationTimeout,
 				s.config.RouteTimeout,
 			)
-			for _, routeIDs := range expired {
-				for range routeIDs {
-					s.metrics.incStaleRoutesExpired()
-				}
+			for range result.StaleRoutes {
+				s.metrics.incStaleRoutesExpired()
+			}
+			for range result.ExpiredRegistrations {
 				s.metrics.incRegistrationsDropped()
+			}
+			for range result.RoutesExpiredViaReg {
+				s.metrics.incRoutesExpiredViaRegistration()
 			}
 		}
 	}

@@ -342,18 +342,31 @@ func (r *Registry) RegistrationCount() int {
 
 // --- Liveness ---
 
-// ExpireStale removes registrations whose last keepalive exceeds the given
-// timeout and returns the set of expired registration IDs and their route IDs.
-// Routes owned by expired registrations are also removed.
-func (r *Registry) ExpireStale(regTimeout, routeTimeout time.Duration) map[RegistrationID][]RouteID {
+// ExpireStaleResult captures the outcome of a stale-expiration sweep.
+type ExpireStaleResult struct {
+	// StaleRoutes lists routes that exceeded RouteTimeout while their
+	// owning registration remained alive.
+	StaleRoutes []RouteID
+	// ExpiredRegistrations lists registrations that exceeded
+	// RegistrationTimeout.
+	ExpiredRegistrations []RegistrationID
+	// RoutesExpiredViaReg lists routes removed because their owning
+	// registration expired.
+	RoutesExpiredViaReg []RouteID
+}
+
+// ExpireStale removes stale routes and registrations whose last keepalive
+// exceeds the given timeout. It returns a structured result distinguishing
+// independently expired routes from routes removed due to registration expiry.
+func (r *Registry) ExpireStale(regTimeout, routeTimeout time.Duration) ExpireStaleResult {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	now := time.Now()
-	expired := make(map[RegistrationID][]RouteID)
+	var result ExpireStaleResult
 
 	for id, reg := range r.registrations {
-		// Check route-level staleness first
+		// Phase 1: independently stale routes (route-level timeout)
 		var staleRoutes []RouteID
 		for rid := range reg.routes {
 			entry, ok := r.routes[rid]
@@ -368,20 +381,22 @@ func (r *Registry) ExpireStale(regTimeout, routeTimeout time.Duration) map[Regis
 			delete(r.routes, rid)
 			delete(reg.routes, rid)
 		}
+		result.StaleRoutes = append(result.StaleRoutes, staleRoutes...)
 
-		// Check registration-level staleness
+		// Phase 2: registration-level staleness
 		if now.Sub(reg.LastKeepalive) > regTimeout {
-			// Remove all remaining routes for this registration
-			routes := reg.RouteIDs()
-			for _, rid := range routes {
+			// Collect remaining routes (those not already removed as stale)
+			remaining := reg.RouteIDs()
+			for _, rid := range remaining {
 				delete(r.routes, rid)
 			}
-			expired[id] = routes
+			result.ExpiredRegistrations = append(result.ExpiredRegistrations, id)
+			result.RoutesExpiredViaReg = append(result.RoutesExpiredViaReg, remaining...)
 			delete(r.registrations, id)
 		}
 	}
 
-	return expired
+	return result
 }
 
 // --- internal helpers ---

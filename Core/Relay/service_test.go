@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -432,16 +433,33 @@ func TestRegistry_ExpireStale_Registration(t *testing.T) {
 	r.AllocateRoute("reg-1", rid)
 
 	// Expire with a very short timeout — reg-2 should stay (recently added)
-	expired := r.ExpireStale(0, time.Hour) // 0 reg timeout = expire all
-	if len(expired) != 2 {
-		t.Fatalf("ExpireStale(0,1h) expired %d registrations; want 2", len(expired))
+	result := r.ExpireStale(0, time.Hour) // 0 reg timeout = expire all
+	if len(result.ExpiredRegistrations) != 2 {
+		t.Fatalf("ExpireStale(0,1h) expired %d registrations; want 2", len(result.ExpiredRegistrations))
 	}
 
-	if _, ok := expired["reg-1"]; !ok {
-		t.Error("reg-1 should be expired")
+	found1, found2 := false, false
+	for _, id := range result.ExpiredRegistrations {
+		if id == "reg-1" {
+			found1 = true
+		}
+		if id == "reg-2" {
+			found2 = true
+		}
 	}
-	if _, ok := expired["reg-2"]; !ok {
-		t.Error("reg-2 should be expired")
+	if !found1 {
+		t.Error("reg-1 should be in ExpiredRegistrations")
+	}
+	if !found2 {
+		t.Error("reg-2 should be in ExpiredRegistrations")
+	}
+
+	// Route in reg-1 should be in RoutesExpiredViaReg (not StaleRoutes, since routeTimeout is high)
+	if len(result.StaleRoutes) != 0 {
+		t.Errorf("StaleRoutes = %d; want 0 (routeTimeout=1h)", len(result.StaleRoutes))
+	}
+	if len(result.RoutesExpiredViaReg) != 1 {
+		t.Errorf("RoutesExpiredViaReg = %d; want 1", len(result.RoutesExpiredViaReg))
 	}
 }
 
@@ -456,12 +474,20 @@ func TestRegistry_ExpireStale_RouteTimeout(t *testing.T) {
 	r.AllocateRoute("reg-2", rid2)
 
 	// Expire with 0 reg timeout (expire all regs + their routes)
-	expired := r.ExpireStale(0, time.Hour)
-	if len(expired) != 2 {
-		t.Fatalf("ExpireStale expired %d registrations; want 2", len(expired))
+	result := r.ExpireStale(0, time.Hour)
+	if len(result.ExpiredRegistrations) != 2 {
+		t.Fatalf("ExpireStale expired %d registrations; want 2", len(result.ExpiredRegistrations))
 	}
 
-	// Routes should be gone
+	// Routes should be in RoutesExpiredViaReg (not StaleRoutes)
+	if len(result.StaleRoutes) != 0 {
+		t.Errorf("StaleRoutes = %d; want 0 (routeTimeout=1h)", len(result.StaleRoutes))
+	}
+	if len(result.RoutesExpiredViaReg) != 2 {
+		t.Errorf("RoutesExpiredViaReg = %d; want 2", len(result.RoutesExpiredViaReg))
+	}
+
+	// All routes should be gone
 	if r.RouteCount() != 0 {
 		t.Errorf("RouteCount after expire = %d; want 0", r.RouteCount())
 	}
@@ -472,9 +498,15 @@ func TestRegistry_ExpireStale_Nothing(t *testing.T) {
 	r := NewRegistry(defaultTestMaxReg, defaultTestMaxRoutes)
 	r.AddRegistration("reg-1", "hash-1")
 
-	expired := r.ExpireStale(time.Hour, time.Hour)
-	if len(expired) != 0 {
-		t.Errorf("ExpireStale(1h,1h) expired %d registrations; want 0", len(expired))
+	result := r.ExpireStale(time.Hour, time.Hour)
+	if len(result.ExpiredRegistrations) != 0 {
+		t.Errorf("ExpireStale(1h,1h) expired %d registrations; want 0", len(result.ExpiredRegistrations))
+	}
+	if len(result.StaleRoutes) != 0 {
+		t.Errorf("StaleRoutes = %d; want 0", len(result.StaleRoutes))
+	}
+	if len(result.RoutesExpiredViaReg) != 0 {
+		t.Errorf("RoutesExpiredViaReg = %d; want 0", len(result.RoutesExpiredViaReg))
 	}
 }
 
@@ -486,14 +518,25 @@ func TestRegistry_ExpireStale_RouteOwnershipAfterExpiry(t *testing.T) {
 	r.AllocateRoute("reg-1", rid)
 
 	// Force-expire registration
-	expired := r.ExpireStale(0, time.Hour)
-	if len(expired) != 1 {
-		t.Fatalf("expired %d registrations; want 1", len(expired))
+	result := r.ExpireStale(0, time.Hour)
+	if len(result.ExpiredRegistrations) != 1 {
+		t.Fatalf("expired %d registrations; want 1", len(result.ExpiredRegistrations))
+	}
+
+	// Route should be in RoutesExpiredViaReg
+	if len(result.RoutesExpiredViaReg) != 1 {
+		t.Errorf("RoutesExpiredViaReg = %d; want 1", len(result.RoutesExpiredViaReg))
 	}
 
 	// Route count should be 0
 	if r.RouteCount() != 0 {
 		t.Errorf("RouteCount = %d; want 0 after registration expiry", r.RouteCount())
+	}
+
+	// Route should not be accessible
+	_, err := r.OpenRoute("reg-1", rid)
+	if err != ErrRouteNotFound {
+		t.Errorf("OpenRoute after expiry: got %v; want ErrRouteNotFound", err)
 	}
 }
 
@@ -1029,6 +1072,61 @@ func TestRegistry_RouteCredentialsFromEntry_NotFound(t *testing.T) {
 	_, err := r.RouteCredentialsFromEntry(rid)
 	if err != ErrRouteNotFound {
 		t.Fatalf("RouteCredentialsFromEntry(non-existent) = %v; want ErrRouteNotFound", err)
+	}
+}
+
+// --- Service restart lifecycle ---
+
+func TestService_RestartLifecycle(t *testing.T) {
+	t.Parallel()
+	svc, err := NewService(DefaultServiceConfig())
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+	goroutinesBefore := runtime.NumGoroutine()
+
+	// First start
+	ctx1 := context.Background()
+	if err := svc.Start(ctx1); err != nil {
+		t.Fatalf("first Start: %v", err)
+	}
+	if s := svc.State(); s != ServiceStateRunning {
+		t.Errorf("state after first Start = %s; want running", s)
+	}
+
+	// First shutdown
+	shutdownCtx1, cancel1 := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel1()
+	if err := svc.Shutdown(shutdownCtx1); err != nil {
+		t.Fatalf("first Shutdown: %v", err)
+	}
+	if s := svc.State(); s != ServiceStateStoppedClean {
+		t.Errorf("state after first Shutdown = %s; want stopped_clean", s)
+	}
+
+	// Second start — must work after clean shutdown
+	ctx2 := context.Background()
+	if err := svc.Start(ctx2); err != nil {
+		t.Fatalf("second Start: %v (restart failed)", err)
+	}
+	if s := svc.State(); s != ServiceStateRunning {
+		t.Errorf("state after second Start = %s; want running", s)
+	}
+
+	// Second shutdown
+	shutdownCtx2, cancel2 := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel2()
+	if err := svc.Shutdown(shutdownCtx2); err != nil {
+		t.Fatalf("second Shutdown: %v", err)
+	}
+	if s := svc.State(); s != ServiceStateStoppedClean {
+		t.Errorf("state after second Shutdown = %s; want stopped_clean", s)
+	}
+
+	// Check for goroutine leak (allow small baseline fluctuation)
+	time.Sleep(50 * time.Millisecond)
+	if delta := runtime.NumGoroutine() - goroutinesBefore; delta > 2 {
+		t.Errorf("possible goroutine leak: %d goroutines above baseline after restart cycle", delta)
 	}
 }
 
