@@ -97,3 +97,21 @@ const (
 	ErrNotFound    = "not_found"
 	ErrInternal    = "internal_error"
 )
+
+// UDPEndpoint is the public UDP address (host:port) allocated to a single
+// relay route. Every route gets its own endpoint; endpoints are never shared
+// between routes.
+type UDPEndpoint string
+
+// String returns the endpoint in host:port form.
+func (e UDPEndpoint) String() string { return string(e) }
+
+// SourceEndpoint is the observed source address of an incoming UDP datagram.
+// It is runtime topology information only: the relay tracks the last-seen
+// source so it can return traffic on the same route. It is NEVER treated as
+// a Doll or network identity — identity comes exclusively from the route and
+// its owning registration.
+type SourceEndpoint struct {
+	IP   string
+	Port int
+}

@@ -2,6 +2,7 @@ package relay
 
 import (
 	"errors"
+	"fmt"
 	"time"
 )
 
@@ -20,6 +21,9 @@ const (
 	defaultReconnectMax        = 30 * time.Second
 	defaultReconnectMultiplier = 2.0
 	defaultReconnectJitter     = 500 * time.Millisecond
+
+	defaultUDPListenAddress = "0.0.0.0"
+	defaultUDPMaxQueueDepth = 256
 )
 
 // ServiceConfig configures the Relay service behaviour.
@@ -45,17 +49,80 @@ type ServiceConfig struct {
 	// a registration is considered stale and removed. Zero means the default
 	// (300s).
 	RegistrationTimeout time.Duration `json:"registration_timeout,omitempty"`
+
+	// UDP configures the Relay UDP ingress path (per-route public endpoints).
+	// Zero-valued fields are filled with defaults.
+	UDP UDPConfig `json:"udp,omitempty"`
+}
+
+// UDPConfig configures the Relay UDP ingress path. Each open relay route
+// gets its own public UDP endpoint; datagrams arriving on it are delivered
+// opaque to the owning Core registration's packet sink.
+type UDPConfig struct {
+	// ListenAddress is the interface per-route UDP listeners bind to.
+	// Empty means all interfaces (default "0.0.0.0").
+	ListenAddress string `json:"listen_address,omitempty"`
+
+	// PortMin and PortMax bound the range of public UDP ports allocatable to
+	// routes. Both zero means ephemeral (OS-assigned) ports. PortMax must be
+	// >= PortMin when either is set.
+	PortMin int `json:"port_min,omitempty"`
+	PortMax int `json:"port_max,omitempty"`
+
+	// MaxPacketSize is the largest accepted UDP payload, in bytes. Datagrams
+	// larger than this are rejected with a drop counter. Zero means the
+	// default (MaxFramePayloadSize = 65535). Values above MaxFramePayloadSize
+	// are invalid.
+	MaxPacketSize int `json:"max_packet_size,omitempty"`
+
+	// MaxQueueDepth is the per-route bounded receive queue depth, in
+	// datagrams. When a route's queue is full, incoming datagrams are dropped
+	// and counted (dropped_queue_full). Zero means the default (256).
+	MaxQueueDepth int `json:"max_queue_depth,omitempty"`
 }
 
 // DefaultServiceConfig returns a ServiceConfig with sensible defaults.
 func DefaultServiceConfig() ServiceConfig {
-	return ServiceConfig{
+	cfg := ServiceConfig{
 		MaxRegistrations:    defaultMaxRegistrations,
 		MaxRoutes:           defaultMaxRoutes,
 		KeepaliveInterval:   defaultKeepaliveInterval,
 		RouteTimeout:        defaultRouteTimeout,
 		RegistrationTimeout: defaultRegistrationTimeout,
 	}
+	cfg.UDP.ApplyDefaults()
+	return cfg
+}
+
+// ApplyDefaults fills any zero-valued UDP fields with sensible defaults.
+func (c *UDPConfig) ApplyDefaults() {
+	if c.ListenAddress == "" {
+		c.ListenAddress = defaultUDPListenAddress
+	}
+	if c.MaxPacketSize == 0 {
+		c.MaxPacketSize = MaxFramePayloadSize
+	}
+	if c.MaxQueueDepth == 0 {
+		c.MaxQueueDepth = defaultUDPMaxQueueDepth
+	}
+}
+
+// Validate checks the UDP config. A zero MaxPacketSize / MaxQueueDepth is
+// valid (it means "default").
+func (c *UDPConfig) Validate() error {
+	if c.MaxPacketSize < 0 || c.MaxPacketSize > MaxFramePayloadSize {
+		return fmt.Errorf("relay: UDP.MaxPacketSize must be between 0 and %d", MaxFramePayloadSize)
+	}
+	if c.MaxQueueDepth < 0 {
+		return errors.New("relay: UDP.MaxQueueDepth must not be negative")
+	}
+	if c.PortMin < 0 || c.PortMax < 0 {
+		return errors.New("relay: UDP port range must not be negative")
+	}
+	if c.PortMin != 0 && c.PortMax != 0 && c.PortMax < c.PortMin {
+		return errors.New("relay: UDP.PortMax must be >= UDP.PortMin")
+	}
+	return nil
 }
 
 // Validate checks the config. All numeric/interval fields must be positive.
@@ -74,6 +141,9 @@ func (c *ServiceConfig) Validate() error {
 	}
 	if c.RegistrationTimeout < c.KeepaliveInterval {
 		return errors.New("relay: RegistrationTimeout must be >= KeepaliveInterval")
+	}
+	if err := c.UDP.Validate(); err != nil {
+		return err
 	}
 	return nil
 }

@@ -326,6 +326,39 @@ func (r *Registry) Route(routeID RouteID) (*RouteEntry, bool) {
 
 // --- Queries ---
 
+// RouteRegistration returns the registration that owns the given route.
+// A route belongs to exactly one registration; this is the mapping used by
+// the UDP ingress path to route datagrams to the owning Core boundary.
+func (r *Registry) RouteRegistration(routeID RouteID) (RegistrationID, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	entry, ok := r.routes[routeID]
+	if !ok {
+		return "", false
+	}
+	return entry.RegistrationID, true
+}
+
+// SetRouteEndpoint records the public UDP endpoint allocated to a route.
+// Ownership is verified: only the owning registration may set the endpoint.
+func (r *Registry) SetRouteEndpoint(regID RegistrationID, routeID RouteID, endpoint string) error {
+	if _, err := r.getOwnedRoute(regID, routeID); err != nil {
+		return err
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	entry, ok := r.routes[routeID]
+	if !ok || entry.RegistrationID != regID {
+		return ErrRouteNotFound
+	}
+	entry.Endpoint = endpoint
+	entry.UpdatedAt = time.Now()
+	return nil
+}
+
 // RouteCount returns the number of active (non-closed) routes.
 func (r *Registry) RouteCount() int {
 	r.mu.RLock()

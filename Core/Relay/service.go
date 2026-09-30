@@ -2,6 +2,7 @@ package relay
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -42,6 +43,7 @@ type Service struct {
 	config   ServiceConfig
 	registry *Registry
 	metrics  *Metrics
+	udp      *UDPListener
 
 	clientCfg ClientConfig
 	client    *ControlClient
@@ -59,11 +61,15 @@ func NewService(cfg ServiceConfig, clientCfg ClientConfig) (*Service, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("relay: invalid config: %w", err)
 	}
+	cfg.UDP.ApplyDefaults()
+	registry := NewRegistry(cfg.MaxRegistrations, cfg.MaxRoutes)
+	metrics := NewMetrics()
 	return &Service{
 		config:    cfg,
 		clientCfg: clientCfg,
-		registry:  NewRegistry(cfg.MaxRegistrations, cfg.MaxRoutes),
-		metrics:   NewMetrics(),
+		registry:  registry,
+		metrics:   metrics,
+		udp:       NewUDPListener(cfg.UDP, registry, metrics),
 		state:     ServiceStateStopped,
 	}, nil
 }
@@ -128,6 +134,13 @@ func (s *Service) Shutdown(ctx context.Context) error {
 		}
 	}
 
+	// Shutdown the UDP ingress path: closes every per-route listener and
+	// releases all allocated UDP endpoints.
+	if err := s.udp.Shutdown(); err != nil {
+		// Non-fatal — continue with liveness/registry shutdown
+		_ = err
+	}
+
 	// Cancel the liveness loop
 	if s.cancel != nil {
 		s.cancel()
@@ -181,6 +194,56 @@ func (s *Service) Client() *ControlClient {
 // Metrics returns the service's diagnostic counters.
 func (s *Service) Metrics() *Metrics {
 	return s.metrics
+}
+
+// UDP returns the service's UDP ingress listener.
+func (s *Service) UDP() *UDPListener {
+	return s.udp
+}
+
+// SetPacketSink binds the Core-tunnel boundary (packet sink) for a
+// registration. Datagrams arriving on any route owned by the registration
+// are delivered to this sink, opaque and byte-identical. M4.4 terminates
+// the Core-tunnel side at a test sink; replacing the sink for a
+// registration is allowed (the sink itself is not identity).
+func (s *Service) SetPacketSink(regID RegistrationID, sink PacketSink) {
+	s.udp.SetSink(regID, sink)
+}
+
+// OpenRouteEndpoint allocates a public UDP endpoint for an existing route
+// and transitions the route to Open. The route must already exist and be
+// owned by regID; the returned endpoint is the route's exclusive public
+// UDP ingress address. Datagrams arriving there are delivered only to the
+// owning registration's packet sink.
+func (s *Service) OpenRouteEndpoint(regID RegistrationID, routeID RouteID) (UDPEndpoint, error) {
+	if _, err := s.registry.OpenRoute(regID, routeID); err != nil {
+		return "", err
+	}
+
+	ep, err := s.udp.Bind(routeID)
+	if err != nil {
+		// Roll back the state transition so the route state stays
+		// coherent with its (now failed) endpoint allocation.
+		_, _ = s.registry.CloseRoute(regID, routeID)
+		return "", err
+	}
+	if err := s.registry.SetRouteEndpoint(regID, routeID, string(ep)); err != nil {
+		_ = s.udp.Close(routeID)
+		_, _ = s.registry.CloseRoute(regID, routeID)
+		return "", err
+	}
+	return ep, nil
+}
+
+// CloseRouteEndpoint tears down a route's UDP endpoint and closes the
+// route. The released UDP port becomes available for reuse by other
+// routes immediately.
+func (s *Service) CloseRouteEndpoint(regID RegistrationID, routeID RouteID) error {
+	if err := s.udp.Close(routeID); err != nil && !errors.Is(err, ErrUDPRouteNotFound) {
+		return err
+	}
+	_, err := s.registry.CloseRoute(regID, routeID)
+	return err
 }
 
 // Diagnostics returns a snapshot of service state for monitoring.
