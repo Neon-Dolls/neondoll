@@ -14,6 +14,13 @@ func secAsDuration(s int64) time.Duration {
 	return time.Duration(s) * time.Second
 }
 
+// RelayConfig for the Doll Relay connection.
+type RelayConfig struct {
+	Enabled bool   `json:"enabled"`
+	URL     string `json:"url"`
+	Token   string `json:"token"`
+}
+
 // Config holds the Doll's runtime configuration.
 type Config struct {
 	Core      CoreConfig      `json:"core"`
@@ -22,6 +29,7 @@ type Config struct {
 	Paths     PathConfig      `json:"paths"`
 	Link      LinkConfig      `json:"link"`
 	HTTP      HTTPConfig      `json:"http"`
+	Relay     RelayConfig     `json:"relay"`
 }
 
 // PulseConfig holds runtime configuration for the Pulse temporal subsystem.
@@ -112,6 +120,9 @@ func Defaults() Config {
 			Enabled:    true,
 			Listen:     "127.0.0.1:8080",
 			EnableCORS: true,
+		},
+		Relay: RelayConfig{
+			Enabled: false,
 		},
 	}
 }
