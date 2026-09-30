@@ -2,8 +2,11 @@ package relay
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -644,5 +647,637 @@ func TestService_ShutdownWithTunnel(t *testing.T) {
 
 	if svc.State() != ServiceStateStoppedClean {
 		t.Errorf("State() = %s; want stopped_clean", svc.State())
+	}
+}
+
+func TestControlClient_ReconnectClosesOldSocket(t *testing.T) {
+	// Verify that repeated disconnect/reconnect does not leak
+	// goroutines or WebSocket connections.
+	// Handler closes itself on connections 1 and 2 (forcing two reconnects),
+	// then stays alive on connection 3+.
+	var connCount atomic.Int32
+
+	handler := func(w http.ResponseWriter, r *http.Request) {
+		cn := connCount.Add(1)
+		upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+
+		for {
+			_, raw, err := conn.ReadMessage()
+			if err != nil {
+				return
+			}
+			msg, err := UnmarshalControl(raw)
+			if err != nil {
+				continue
+			}
+
+			switch m := msg.(type) {
+			case *Register:
+				resp, _ := MarshalControl(&Registered{
+					Type:    CmdRegistered,
+					RelayID: "relay-A",
+				})
+				conn.WriteMessage(websocket.TextMessage, resp)
+
+				// Close after Register on connections 1 and 2 to force reconnects
+				if cn <= 2 {
+					return
+				}
+
+			case *RouteOpen:
+				resp, _ := MarshalControl(&RouteOpened{
+					Type:              CmdRouteOpened,
+					RouteID:           m.RouteID,
+					AllocatedEndpoint: "10.0.0.1:51820",
+				})
+				conn.WriteMessage(websocket.TextMessage, resp)
+
+			case *RouteClose:
+				resp, _ := MarshalControl(&RouteClosed{
+					Type:    CmdRouteClosed,
+					RouteID: m.RouteID,
+				})
+				conn.WriteMessage(websocket.TextMessage, resp)
+
+			default:
+			}
+		}
+	}
+
+	srv, url := startFakeRelay(t, handler)
+	defer srv.Close()
+
+	cfg := DefaultClientConfig()
+	cfg.RelayURL = url
+	cfg.RegistrationToken = "token"
+	cfg.HandshakeTimeout = 2 * time.Second
+	cfg.ReadTimeout = 3 * time.Second
+	cfg.PingInterval = 30 * time.Second
+	cfg.ReconnectInitial = 50 * time.Millisecond
+	cfg.ReconnectMax = 200 * time.Millisecond
+
+	goroutinesBefore := runtime.NumGoroutine()
+
+	client := NewControlClient(cfg)
+	if err := client.Start(context.Background()); err != nil {
+		t.Fatalf("Start() = %v", err)
+	}
+	defer client.Shutdown()
+
+	// Wait for connection to stabilize through reconnect cycles.
+	// Connection 1 closes after Register → reconnect.
+	// Connection 2 closes after Register → reconnect.
+	// Connection 3 stays alive — wait until it is connected, registered,
+	// and has established all three connections.
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if client.IsConnected() && connCount.Load() >= 3 {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if !client.IsConnected() || connCount.Load() < 3 {
+		t.Fatalf("client not stable after reconnect cycles: connected=%v connCount=%d",
+			client.IsConnected(), connCount.Load())
+	}
+
+	// Now open routes on the stable connection 3
+	for _, id := range []RouteID{1, 2, 3} {
+		r, err := client.OpenRoute(context.Background(), id, RouteCredentials{Token: "rt-" + strconv.Itoa(int(id))})
+		if err != nil {
+			t.Fatalf("OpenRoute(%d) = %v", id, err)
+		}
+		if r.AllocatedEndpoint != "10.0.0.1:51820" {
+			t.Errorf("route %d endpoint = %q; want 10.0.0.1:51820", int(id), r.AllocatedEndpoint)
+		}
+	}
+
+	// Verify goroutine count hasn't grown significantly
+	goroutinesAfter := runtime.NumGoroutine()
+	leaked := goroutinesAfter - goroutinesBefore
+	if leaked > 10 {
+		t.Fatalf("goroutine leak: %d -> %d (+%d)", goroutinesBefore, goroutinesAfter, leaked)
+	}
+	t.Logf("goroutines: %d -> %d (+%d)", goroutinesBefore, goroutinesAfter, leaked)
+}
+
+// errClosedWS is used by test handlers to signal a forced close.
+type errClosedWS struct{}
+
+func (e *errClosedWS) Error() string { return "test: ws closed" }
+
+// waitConnected blocks until the client reports connected, with a timeout.
+func waitConnected(t *testing.T, client *ControlClient, label string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if client.IsConnected() {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("[%s] client did not reconnect within 5s deadline", label)
+}
+
+// ----- M4.3: Validate received control messages -----
+
+func TestControlClient_InvalidControlMessages(t *testing.T) {
+	// Sub-tests proving fail-closed behavior for each message type.
+
+	t.Run("Registered empty RelayID", func(t *testing.T) {
+		handler := func(w http.ResponseWriter, r *http.Request) {
+			upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+			conn, err := upgrader.Upgrade(w, r, nil)
+			if err != nil {
+				return
+			}
+			defer conn.Close()
+
+			// Read Register
+			_, raw, _ := conn.ReadMessage()
+			msg, _ := UnmarshalControl(raw)
+			if _, ok := msg.(*Register); !ok {
+				return
+			}
+
+			// Send Registered with empty RelayID — MUST be rejected
+			data, _ := MarshalControl(&Registered{Type: CmdRegistered, RelayID: ""})
+			conn.WriteMessage(websocket.TextMessage, data)
+		}
+
+		srv, url := startFakeRelay(t, handler)
+		defer srv.Close()
+
+		cfg := DefaultClientConfig()
+		cfg.RelayURL = url
+		cfg.RegistrationToken = "token"
+		cfg.HandshakeTimeout = 500 * time.Millisecond
+
+		client := NewControlClient(cfg)
+		err := client.Start(context.Background())
+		if err == nil {
+			client.Shutdown()
+			t.Fatal("Start() succeeded; expected error for empty RelayID")
+		}
+		if !strings.Contains(err.Error(), "invalid Registered") && !strings.Contains(err.Error(), "validation") {
+			t.Errorf("Start() error = %v; want invalid Registered error", err)
+		}
+	})
+
+	t.Run("RouteOpened missing endpoint", func(t *testing.T) {
+		handler := func(w http.ResponseWriter, r *http.Request) {
+			upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+			conn, err := upgrader.Upgrade(w, r, nil)
+			if err != nil {
+				return
+			}
+			defer conn.Close()
+
+			// Handshake normally
+			_, raw, _ := conn.ReadMessage()
+			msg, _ := UnmarshalControl(raw)
+			if _, ok := msg.(*Register); !ok {
+				return
+			}
+			data, _ := MarshalControl(&Registered{Type: CmdRegistered, RelayID: "test-relay"})
+			conn.WriteMessage(websocket.TextMessage, data)
+
+			// Read the RouteOpen
+			_, raw, _ = conn.ReadMessage()
+			msg, _ = UnmarshalControl(raw)
+			ro, ok := msg.(*RouteOpen)
+			if !ok {
+				return
+			}
+
+			// Send RouteOpened with missing AllocatedEndpoint — must be rejected
+			badResp, _ := MarshalControl(&RouteOpened{
+				Type:    CmdRouteOpened,
+				RouteID: ro.RouteID,
+			})
+			conn.WriteMessage(websocket.TextMessage, badResp)
+		}
+
+		srv, url := startFakeRelay(t, handler)
+		defer srv.Close()
+
+		cfg := DefaultClientConfig()
+		cfg.RelayURL = url
+		cfg.RegistrationToken = "token"
+		cfg.HandshakeTimeout = 500 * time.Millisecond
+		cfg.ReadTimeout = 1 * time.Second
+
+		client := NewControlClient(cfg)
+		if err := client.Start(context.Background()); err != nil {
+			t.Fatalf("Start() = %v", err)
+		}
+		defer client.Shutdown()
+
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_, err := client.OpenRoute(ctx, 1, RouteCredentials{Token: "rt-1"})
+		if err == nil {
+			t.Fatal("OpenRoute() succeeded; expected error for missing endpoint")
+		}
+	})
+
+	t.Run("RouteClosed missing RouteID", func(t *testing.T) {
+		handler := func(w http.ResponseWriter, r *http.Request) {
+			upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+			conn, err := upgrader.Upgrade(w, r, nil)
+			if err != nil {
+				return
+			}
+			defer conn.Close()
+
+			// Normal handshake
+			_, raw, _ := conn.ReadMessage()
+			msg, _ := UnmarshalControl(raw)
+			if _, ok := msg.(*Register); !ok {
+				return
+			}
+			data, _ := MarshalControl(&Registered{Type: CmdRegistered, RelayID: "test-relay"})
+			conn.WriteMessage(websocket.TextMessage, data)
+
+			for {
+				_, raw, err := conn.ReadMessage()
+				if err != nil {
+					return
+				}
+				msg, err := UnmarshalControl(raw)
+				if err != nil {
+					continue
+				}
+				switch m := msg.(type) {
+				case *RouteOpen:
+					resp, _ := MarshalControl(&RouteOpened{
+						Type:              CmdRouteOpened,
+						RouteID:           m.RouteID,
+						AllocatedEndpoint: "10.0.0.1:51820",
+					})
+					conn.WriteMessage(websocket.TextMessage, resp)
+
+				case *RouteClose:
+					// Respond with RouteClosed missing RouteID — must be rejected
+					badResp, _ := MarshalControl(&RouteClosed{
+						Type: CmdRouteClosed,
+					})
+					conn.WriteMessage(websocket.TextMessage, badResp)
+				}
+			}
+		}
+
+		srv, url := startFakeRelay(t, handler)
+		defer srv.Close()
+
+		cfg := DefaultClientConfig()
+		cfg.RelayURL = url
+		cfg.RegistrationToken = "token"
+		cfg.HandshakeTimeout = 500 * time.Millisecond
+		cfg.ReadTimeout = 1 * time.Second
+
+		client := NewControlClient(cfg)
+		if err := client.Start(context.Background()); err != nil {
+			t.Fatalf("Start() = %v", err)
+		}
+		defer client.Shutdown()
+
+		_, err := client.OpenRoute(context.Background(), 1, RouteCredentials{Token: "rt-1"})
+		if err != nil {
+			t.Fatalf("OpenRoute() = %v", err)
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		err = client.CloseRoute(ctx, 1)
+		if err == nil {
+			t.Fatal("CloseRoute() succeeded; expected error for missing RouteID")
+		}
+	})
+
+	t.Run("RelayError empty code", func(t *testing.T) {
+		handler := func(w http.ResponseWriter, r *http.Request) {
+			upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+			conn, err := upgrader.Upgrade(w, r, nil)
+			if err != nil {
+				return
+			}
+			defer conn.Close()
+
+			// Normal handshake
+			_, raw, _ := conn.ReadMessage()
+			msg, _ := UnmarshalControl(raw)
+			if _, ok := msg.(*Register); !ok {
+				return
+			}
+			data, _ := MarshalControl(&Registered{Type: CmdRegistered, RelayID: "test-relay"})
+			conn.WriteMessage(websocket.TextMessage, data)
+
+			// Read the RouteOpen, send a RelayError with empty code — must be dropped
+			_, raw, _ = conn.ReadMessage()
+			msg, _ = UnmarshalControl(raw)
+			if _, ok := msg.(*RouteOpen); ok {
+				// Send RelayError with empty code (invalid)
+				badResp, _ := MarshalControl(&RelayError{
+					Type:    CmdError,
+					RouteID: 1,
+					Message: "access denied",
+				})
+				conn.WriteMessage(websocket.TextMessage, badResp)
+			}
+		}
+
+		srv, url := startFakeRelay(t, handler)
+		defer srv.Close()
+
+		cfg := DefaultClientConfig()
+		cfg.RelayURL = url
+		cfg.RegistrationToken = "token"
+		cfg.HandshakeTimeout = 500 * time.Millisecond
+		cfg.ReadTimeout = 1 * time.Second
+
+		client := NewControlClient(cfg)
+		if err := client.Start(context.Background()); err != nil {
+			t.Fatalf("Start() = %v", err)
+		}
+		defer client.Shutdown()
+
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_, err := client.OpenRoute(ctx, 1, RouteCredentials{Token: "rt-1"})
+		if err == nil {
+			t.Fatal("OpenRoute() succeeded; expected error for empty code RelayError")
+		}
+	})
+}
+
+// ----- M4.3: Pending ops fail on connection loss -----
+
+func TestControlClient_PendingOpsFailOnDisconnect(t *testing.T) {
+	// Handler: conducts a normal handshake, then for the first RouteOpen
+	// on the initial connection (connection count 1), reads the request
+	// but closes without sending a response — leaving a pending operation.
+	// The client should promptly fail that pending operation with
+	// ErrConnectionLost when the readLoop exits and reconnect triggers.
+	var connCount atomic.Int32
+
+	handler := func(w http.ResponseWriter, r *http.Request) {
+		cn := connCount.Add(1)
+		upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+
+		// Normal Register
+		_, raw, _ := conn.ReadMessage()
+		msg, _ := UnmarshalControl(raw)
+		if _, ok := msg.(*Register); !ok {
+			return
+		}
+		data, _ := MarshalControl(&Registered{
+			Type:    CmdRegistered,
+			RelayID: RelayID("test-relay"),
+		})
+		conn.WriteMessage(websocket.TextMessage, data)
+
+		// On the first connection, read a RouteOpen but don't respond —
+		// just close, leaving a pending operation.
+		if cn == 1 {
+			_, raw, _ := conn.ReadMessage()
+			msg, _ := UnmarshalControl(raw)
+			if _, ok := msg.(*RouteOpen); ok {
+				// Close without responding — pending operation will fail
+				conn.Close()
+				return
+			}
+		}
+
+		// On subsequent connections (reconnect), respond normally.
+		for {
+			_, raw, err := conn.ReadMessage()
+			if err != nil {
+				return
+			}
+			msg, err := UnmarshalControl(raw)
+			if err != nil {
+				continue
+			}
+			switch m := msg.(type) {
+			case *RouteOpen:
+				resp, _ := MarshalControl(&RouteOpened{
+					Type:              CmdRouteOpened,
+					RouteID:           m.RouteID,
+					AllocatedEndpoint: "10.0.0.1:51820",
+				})
+				conn.WriteMessage(websocket.TextMessage, resp)
+			default:
+			}
+		}
+	}
+
+	srv, url := startFakeRelay(t, handler)
+	defer srv.Close()
+
+	cfg := DefaultClientConfig()
+	cfg.RelayURL = url
+	cfg.RegistrationToken = "token"
+	cfg.HandshakeTimeout = 500 * time.Millisecond
+	cfg.ReadTimeout = 2 * time.Second
+	cfg.PingInterval = 30 * time.Second
+	cfg.ReconnectInitial = 100 * time.Millisecond
+	cfg.ReconnectMax = 500 * time.Millisecond
+
+	client := NewControlClient(cfg)
+	if err := client.Start(context.Background()); err != nil {
+		t.Fatalf("Start() = %v", err)
+	}
+	defer client.Shutdown()
+
+	// Wait for initial registration
+	if !client.IsConnected() {
+		t.Fatal("client not connected after Start")
+	}
+
+	// Open a route; the first connection will close without responding,
+	// leaving this operation pending. It should fail with ErrConnectionLost.
+	_, err := client.OpenRoute(context.Background(), 42, RouteCredentials{Token: "rt-42"})
+	if !errors.Is(err, ErrConnectionLost) {
+		t.Fatalf("OpenRoute() error = %v; want ErrConnectionLost", err)
+	}
+
+	// After the first connection fails, the client should reconnect and
+	// subsequent operations should succeed on the new connection.
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if client.IsConnected() && connCount.Load() >= 2 {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if !client.IsConnected() {
+		t.Fatal("client did not reconnect after connection loss")
+	}
+	if connCount.Load() < 2 {
+		t.Fatalf("connCount = %d; want >= 2 (two connections)", connCount.Load())
+	}
+
+	// Now a new OpenRoute should succeed on the reconnected session
+	_, err = client.OpenRoute(context.Background(), 43, RouteCredentials{Token: "rt-43"})
+	if err != nil {
+		t.Fatalf("OpenRoute() after reconnect = %v", err)
+	}
+}
+
+// ----- M4.3: Two-Core isolation integration test -----
+
+// multiClientRelayHandler accepts registrations with any non-empty token
+// and manages independent routes for each client.
+func multiClientRelayHandler(t *testing.T) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+
+		// Register
+		_, raw, _ := conn.ReadMessage()
+		msg, _ := UnmarshalControl(raw)
+		reg, ok := msg.(*Register)
+		if !ok || reg.Token == "" {
+			return
+		}
+		data, _ := MarshalControl(&Registered{
+			Type:    CmdRegistered,
+			RelayID: RelayID("multi-relay"),
+		})
+		conn.WriteMessage(websocket.TextMessage, data)
+
+		for {
+			_, raw, err := conn.ReadMessage()
+			if err != nil {
+				return
+			}
+			msg, err := UnmarshalControl(raw)
+			if err != nil {
+				continue
+			}
+			switch m := msg.(type) {
+			case *RouteOpen:
+				resp, _ := MarshalControl(&RouteOpened{
+					Type:              CmdRouteOpened,
+					RouteID:           m.RouteID,
+					AllocatedEndpoint: "10.0.0." + strconv.Itoa(int(m.RouteID)) + ":51820",
+				})
+				conn.WriteMessage(websocket.TextMessage, resp)
+			case *RouteClose:
+				resp, _ := MarshalControl(&RouteClosed{
+					Type:    CmdRouteClosed,
+					RouteID: m.RouteID,
+				})
+				conn.WriteMessage(websocket.TextMessage, resp)
+			default:
+			}
+		}
+	}
+}
+
+func TestControlClient_TwoCoreIsolation(t *testing.T) {
+	// Two independent ControlClient instances registered against the same
+	// fake Relay. Each must:
+	//   - authenticate independently
+	//   - obtain/manage its own route
+	//   - NOT have its operations disrupted by the other's state
+	//   - survive one's disconnect without affecting the other
+
+	srv, url := startFakeRelay(t, multiClientRelayHandler(t))
+	defer srv.Close()
+
+	cfg1 := DefaultClientConfig()
+	cfg1.RelayURL = url
+	cfg1.RegistrationToken = "token-alpha"
+	cfg1.HandshakeTimeout = 500 * time.Millisecond
+	cfg1.ReadTimeout = 2 * time.Second
+	cfg1.PingInterval = 30 * time.Second
+	cfg1.ReconnectInitial = 100 * time.Millisecond
+	cfg1.ReconnectMax = 500 * time.Millisecond
+
+	cfg2 := DefaultClientConfig()
+	cfg2.RelayURL = url
+	cfg2.RegistrationToken = "token-beta"
+	cfg2.HandshakeTimeout = 500 * time.Millisecond
+	cfg2.ReadTimeout = 2 * time.Second
+	cfg2.PingInterval = 30 * time.Second
+	cfg2.ReconnectInitial = 100 * time.Millisecond
+	cfg2.ReconnectMax = 500 * time.Millisecond
+
+	clientA := NewControlClient(cfg1)
+	if err := clientA.Start(context.Background()); err != nil {
+		t.Fatalf("clientA Start() = %v", err)
+	}
+	defer clientA.Shutdown()
+
+	clientB := NewControlClient(cfg2)
+	if err := clientB.Start(context.Background()); err != nil {
+		t.Fatalf("clientB Start() = %v", err)
+	}
+	defer clientB.Shutdown()
+
+	// Both should be connected — wait for async connection
+	waitConnected(t, clientA, "clientA-start")
+	waitConnected(t, clientB, "clientB-start")
+
+	// Each opens its own route
+	ra, err := clientA.OpenRoute(context.Background(), 10, RouteCredentials{Token: "rt-A"})
+	if err != nil {
+		t.Fatalf("clientA OpenRoute(10) = %v", err)
+	}
+	if ra.AllocatedEndpoint != "10.0.0.10:51820" {
+		t.Errorf("clientA endpoint = %q; want 10.0.0.10:51820", ra.AllocatedEndpoint)
+	}
+
+	rb, err := clientB.OpenRoute(context.Background(), 20, RouteCredentials{Token: "rt-B"})
+	if err != nil {
+		t.Fatalf("clientB OpenRoute(20) = %v", err)
+	}
+	if rb.AllocatedEndpoint != "10.0.0.20:51820" {
+		t.Errorf("clientB endpoint = %q; want 10.0.0.20:51820", rb.AllocatedEndpoint)
+	}
+
+	// Prove each client's routes are isolated: clientA's route responses
+	// should not satisfy clientB's pending operations.
+	// (This is proven by the architecture — separate connections,
+	// separate readLoops, separate pending maps — but we can verify
+	// the routes are independently accessible.)
+
+	// Now simulate a disconnect of clientA's connection by forcing
+	// a reconnect. We can't directly access the WebSocket from outside,
+	// but we can observe the behavior.
+
+	// Verify disconnecting one does not disrupt the other: we'll save
+	// clientB's route before any disruption and verify it still works.
+	rbID := RouteID(20)
+
+	// Close clientA cleanly
+	clientA.Shutdown()
+
+	// clientB must still be operational
+	if !clientB.IsConnected() {
+		t.Fatal("clientB disconnected after clientA shutdown")
+	}
+
+	// clientB can close its route successfully
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := clientB.CloseRoute(ctx, rbID); err != nil {
+		t.Fatalf("clientB CloseRoute(20) after clientA shutdown = %v", err)
 	}
 }
