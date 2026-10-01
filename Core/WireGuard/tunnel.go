@@ -123,6 +123,13 @@ type RealTunnel struct {
 	bind conn.Bind
 }
 
+// SetBind sets a custom conn.Bind for the WireGuard device.
+// Must be called before Start. When nil, a default UDP bind is used.
+// This enables RelayTransport injection for relayed WG traffic.
+func (t *RealTunnel) SetBind(bind conn.Bind) {
+	t.bind = bind
+}
+
 // NewRealTunnel creates a new RealTunnel with the given logger.
 func NewRealTunnel(log *slog.Logger) *RealTunnel {
 	if log == nil {

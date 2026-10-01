@@ -440,6 +440,33 @@ func (u *UDPListener) Close(routeID RouteID) error {
 	return nil
 }
 
+// SendTo sends a datagram to the last-seen source endpoint for a route.
+// The datagram is sent on the route's own UDP socket, preserving the
+// relay's source port. Returns ErrUDPRouteNotFound if the route has
+// no open UDP endpoint. Returns an error if no source endpoint has been
+// observed (no inbound datagrams yet).
+func (u *UDPListener) SendTo(routeID RouteID, payload []byte) error {
+	u.mu.RLock()
+	h, ok := u.routes[routeID]
+	u.mu.RUnlock()
+	if !ok {
+		return ErrUDPRouteNotFound
+	}
+
+	h.mu.Lock()
+	addr := h.lastSeen
+	conn := h.conn
+	h.mu.Unlock()
+
+	if addr.IP == "" || addr.Port == 0 {
+		return fmt.Errorf("relay: no known source endpoint for route %d", routeID)
+	}
+
+	udpAddr := &net.UDPAddr{IP: net.ParseIP(addr.IP), Port: addr.Port}
+	_, err := conn.WriteTo(payload, udpAddr)
+	return err
+}
+
 // LastSeen returns the most recently observed source endpoint for a
 // route. It exists for return-routing topology observation only.
 func (u *UDPListener) LastSeen(routeID RouteID) (SourceEndpoint, bool) {
