@@ -38,7 +38,7 @@ func (c *ControlClient) OpenRoute(ctx context.Context, routeID RouteID, creds Ro
 		}
 		c.routesMu.Lock()
 		c.routes[routeID] = &managedRoute{
-			Credentials:       creds,
+			Credentials:       m.Credentials,
 			AllocatedEndpoint: m.AllocatedEndpoint,
 		}
 		c.routesMu.Unlock()

@@ -275,38 +275,33 @@ func (cs *ControlServer) handleWS(w http.ResponseWriter, r *http.Request) {
 					continue
 				}
 
-				// Register the route in the registry with CLIENT-PROVIDED credentials.
+				// Register the route in the registry with SERVER-GENERATED
+				// credentials. AllocateRoute independently establishes random
+				// credentials for the route; they are NOT derived from anything
+				// the client presents. If the route already exists, the presented
+				// credentials are verified against the route's established ones.
 				if _, err := cs.svc.Registry().AllocateRoute(regID, m.RouteID); err != nil {
-					_ = cs.svc.UDP().Close(m.RouteID)
-					cs.sendReply(wsConn, &RelayError{
-						Type: CmdError, Code: ErrInternal,
-						Message: err.Error(), RouteID: m.RouteID,
-					})
-					continue
-				}
+					if !errors.Is(err, ErrRouteAlreadyExists) {
+						_ = cs.svc.UDP().Close(m.RouteID)
+						cs.sendReply(wsConn, &RelayError{
+							Type: CmdError, Code: ErrInternal,
+							Message: err.Error(), RouteID: m.RouteID,
+						})
+						continue
+					}
 
-				// Overwrite the randomly-generated credentials with the
-				// client-provided ones so the client knows what to send.
-				if err := cs.svc.Registry().SetRouteCredentials(regID, m.RouteID, m.Credentials); err != nil {
-					_ = cs.svc.UDP().Close(m.RouteID)
-					_, _ = cs.svc.Registry().CloseRoute(regID, m.RouteID)
-					cs.sendReply(wsConn, &RelayError{
-						Type: CmdError, Code: ErrInternal,
-						Message: err.Error(), RouteID: m.RouteID,
-					})
-					continue
-				}
-
-				// Verify the client-provided credentials match what is stored.
-				entry, ok := cs.svc.Registry().Route(m.RouteID)
-				if !ok || m.Credentials.Token != entry.Credentials.Token {
-					_ = cs.svc.UDP().Close(m.RouteID)
-					_, _ = cs.svc.Registry().CloseRoute(regID, m.RouteID)
-					cs.sendReply(wsConn, &RelayError{
-						Type: CmdError, Code: ErrAuthFailed,
-						Message: "route credentials mismatch", RouteID: m.RouteID,
-					})
-					continue
+					// Existing route: the presented credential must match the
+					// route's independently established credential. Never replace
+					// the established credential with a client-presented one.
+					stored, lookupErr := cs.svc.Registry().RouteCredentialsFromEntry(m.RouteID)
+					if lookupErr != nil || m.Credentials.Token != stored.Token {
+						_ = cs.svc.UDP().Close(m.RouteID)
+						cs.sendReply(wsConn, &RelayError{
+							Type: CmdError, Code: ErrAuthFailed,
+							Message: "route credentials mismatch", RouteID: m.RouteID,
+						})
+						continue
+					}
 				}
 
 				// Open route.
@@ -323,10 +318,13 @@ func (cs *ControlServer) handleWS(w http.ResponseWriter, r *http.Request) {
 				_ = cs.svc.Registry().SetRouteEndpoint(regID, m.RouteID, string(ep))
 				core.routes[m.RouteID] = true
 
+				// Return the server-established credentials so the client learns them.
+				openedCreds, _ := cs.svc.Registry().RouteCredentialsFromEntry(m.RouteID)
 				cs.sendReply(wsConn, &RouteOpened{
 					Type:              CmdRouteOpened,
 					RouteID:           m.RouteID,
 					AllocatedEndpoint: string(ep),
+					Credentials:       openedCreds,
 				})
 				cs.log.Debug("control_server: route opened",
 					"route_id", m.RouteID, "endpoint", string(ep),

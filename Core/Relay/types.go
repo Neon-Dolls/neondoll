@@ -61,10 +61,13 @@ type RouteOpen struct {
 
 // RouteOpened confirms a route was created. AllocatedEndpoint is the public
 // UDP endpoint the Relay has assigned for this route's WireGuard traffic.
+// Credentials are the route's independently established credentials that the
+// client must present on subsequent operations (e.g. reconnect).
 type RouteOpened struct {
 	Type              ControlMessageType `json:"type"`
 	RouteID           RouteID            `json:"route_id"`
 	AllocatedEndpoint string             `json:"endpoint"`
+	Credentials       RouteCredentials   `json:"credentials"`
 }
 
 // RouteClose requests closing a relay route.
