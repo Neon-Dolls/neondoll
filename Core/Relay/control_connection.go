@@ -175,8 +175,10 @@ func (c *ControlClient) SetFrameHandler(handler func(*Frame) error) {
 }
 
 // ClearFrameHandler removes the binary Frame message handler.
+// A typed-nil handler is stored because atomic.Value panics on storing
+// an untyped nil; readLoop treats a nil-typed handler as "none".
 func (c *ControlClient) ClearFrameHandler() {
-	c.frameHandler.Store(nil)
+	c.frameHandler.Store((func(*Frame) error)(nil))
 }
 
 // writeFrame marshals a Frame to wire format and sends it as a binary
@@ -241,12 +243,21 @@ func (c *ControlClient) readLoop(ctx context.Context, conn *websocket.Conn, gen 
 		if msgType == websocket.BinaryMessage {
 			if handler := c.frameHandler.Load(); handler != nil {
 				fn := handler.(func(*Frame) error)
+				if fn == nil {
+					continue // handler cleared; drop frame
+				}
 				frame, ferr := UnmarshalFrame(raw)
 				if ferr != nil {
 					// Malformed frame — fail closed per §2 of M4.5.
 					continue
 				}
-				fn(frame)
+				if herr := fn(frame); herr != nil {
+					// The frame handler failed (e.g. inbound queue full).
+					// Make the failure observable and keep the read loop
+					// alive: dropping the frame is deterministic, and the
+					// counter lets operators detect silent loss.
+					c.frameHandlerErrors.Add(1)
+				}
 			}
 			continue
 		}

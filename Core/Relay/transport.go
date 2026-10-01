@@ -12,6 +12,7 @@ package relay
 import (
 	"errors"
 	"fmt"
+	"net"
 	"net/netip"
 	"strconv"
 	"strings"
@@ -43,10 +44,15 @@ var (
 // PacketQueue is a bounded FIFO of opaque WG datagrams received from the Relay.
 // Push returns an error when full (deterministic backpressure). Pop blocks until
 // a packet is available or the queue is closed.
+type queuedPacket struct {
+	routeID RouteID
+	payload []byte
+}
+
 type PacketQueue struct {
 	mu      sync.Mutex
 	cond    *sync.Cond
-	packets [][]byte
+	packets []queuedPacket
 	max     int
 	closed  bool
 }
@@ -55,7 +61,7 @@ type PacketQueue struct {
 func NewPacketQueue(max int) *PacketQueue {
 	q := &PacketQueue{
 		mu:      sync.Mutex{},
-		packets: make([][]byte, 0),
+		packets: make([]queuedPacket, 0),
 		max:     max,
 	}
 	q.cond = sync.NewCond(&q.mu)
@@ -64,7 +70,7 @@ func NewPacketQueue(max int) *PacketQueue {
 
 // Push adds a packet to the queue. Returns ErrQueueFull if at capacity.
 // Returns ErrTransportClosed after Close().
-func (q *PacketQueue) Push(packet []byte) error {
+func (q *PacketQueue) Push(routeID RouteID, packet []byte) error {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
@@ -74,14 +80,14 @@ func (q *PacketQueue) Push(packet []byte) error {
 	if len(q.packets) >= q.max {
 		return ErrQueueFull
 	}
-	q.packets = append(q.packets, packet)
+	q.packets = append(q.packets, queuedPacket{routeID: routeID, payload: packet})
 	q.cond.Signal()
 	return nil
 }
 
 // Pop waits for and returns the oldest packet. Blocks while empty.
-// Returns (nil, nil) when the queue is closed and drained.
-func (q *PacketQueue) Pop() ([]byte, error) {
+// Returns (0, nil, nil) when the queue is closed and drained.
+func (q *PacketQueue) Pop() (RouteID, []byte, error) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
@@ -89,11 +95,11 @@ func (q *PacketQueue) Pop() ([]byte, error) {
 		q.cond.Wait()
 	}
 	if len(q.packets) == 0 {
-		return nil, nil // closed and empty
+		return 0, nil, nil // closed and empty
 	}
-	packet := q.packets[0]
+	pkt := q.packets[0]
 	q.packets = q.packets[1:]
-	return packet, nil
+	return pkt.routeID, pkt.payload, nil
 }
 
 // Len returns the current queue depth (for diagnostics/metrics).
@@ -124,7 +130,9 @@ type RelayEndpoint struct {
 }
 
 // ParseRelayEndpoint parses "relay:<integer>" into a RelayEndpoint.
-// The integer is the RouteID in decimal.
+// The integer is the RouteID in decimal. RouteID 0 and values above
+// MaxRouteID are rejected: zero is the "no route" sentinel and values
+// beyond MaxRouteID cannot be encoded in a frame.
 func ParseRelayEndpoint(s string) (*RelayEndpoint, error) {
 	if !strings.HasPrefix(s, RelayEndpointPrefix) {
 		return nil, ErrEndpointFormat
@@ -133,6 +141,9 @@ func ParseRelayEndpoint(s string) (*RelayEndpoint, error) {
 	id, err := strconv.ParseUint(idStr, 10, 64)
 	if err != nil {
 		return nil, fmt.Errorf("relay: parse route ID: %w", err)
+	}
+	if id == 0 || RouteID(id) > MaxRouteID {
+		return nil, fmt.Errorf("relay: route ID out of range: %d", id)
 	}
 	return &RelayEndpoint{routeID: RouteID(id)}, nil
 }
@@ -222,46 +233,58 @@ func NewRelayTransport(client *ControlClient) *RelayTransport {
 // Open puts the bind into service and returns the receive functions for the
 // WG device. port is ignored (relay mode uses the control tunnel, not UDP);
 // actualPort is returned as 0.
+//
+// Open is reopenable: the real WG runtime's BindUpdate() closes and then
+// reopens the bind (e.g. on Up() or listen_port changes). A previously
+// closed transport gets a fresh queue and re-registered frame handler.
 func (t *RelayTransport) Open(port uint16) ([]conn.ReceiveFunc, uint16, error) {
 	t.receiveMu.Lock()
 	defer t.receiveMu.Unlock()
 
 	if t.closed {
-		return nil, 0, ErrTransportClosed
+		// Reopen: BindUpdate closes the bind before opening it again.
+		t.closed = false
+		t.receiveFns = nil
+		t.queue = NewPacketQueue(MaxQueuePackets)
 	}
 	if len(t.receiveFns) > 0 {
 		return t.receiveFns, 0, nil
 	}
 
 	recvFn := func(packets [][]byte, sizes []int, eps []conn.Endpoint) (int, error) {
-		packet, err := t.queue.Pop()
+		routeID, packet, err := t.queue.Pop()
 		if err != nil {
 			return 0, err
 		}
 		if packet == nil {
-			return 0, ErrTransportClosed
+			// Queue closed and drained. Per the conn.Bind contract, receive
+			// funcs must return net.ErrClosed after Close() so the WG device
+			// terminates its receive loop cleanly.
+			return 0, net.ErrClosed
 		}
 		if len(packets) < 1 || len(sizes) < 1 || len(eps) < 1 {
 			return 0, errors.New("relay: receive func buffers too small")
 		}
-		packets[0] = packet
+		// The WG device reads the datagram from the preallocated buffer it
+		// passed in (bufsArrs[i][:size]), not from the slice header. The
+		// receive func MUST copy into the provided buffer.
+		if len(packets[0]) < len(packet) {
+			return 0, fmt.Errorf("relay: receive buffer too small: have %d, need %d", len(packets[0]), len(packet))
+		}
+		packets[0] = packets[0][:len(packet)]
+		copy(packets[0], packet)
 		sizes[0] = len(packet)
-		eps[0] = t.makeVirtualEndpoint()
+		eps[0] = &RelayEndpoint{routeID: routeID}
 		return 1, nil
 	}
 	t.receiveFns = []conn.ReceiveFunc{recvFn}
 
 	// Register binary frame handler on the control client.
 	t.client.SetFrameHandler(func(frame *Frame) error {
-		return t.queue.Push(frame.Payload)
+		return t.queue.Push(frame.RouteID, frame.Payload)
 	})
 
 	return t.receiveFns, 0, nil
-}
-
-// makeVirtualEndpoint creates a generic virtual endpoint for inbound packets.
-func (t *RelayTransport) makeVirtualEndpoint() conn.Endpoint {
-	return &RelayEndpoint{routeID: 0}
 }
 
 // Close stops the transport and cleans up.

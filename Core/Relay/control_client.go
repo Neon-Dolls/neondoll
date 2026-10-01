@@ -88,6 +88,10 @@ type ControlClient struct {
 	RoutesRestored   atomic.Int64
 	LastConnectError atomic.Value
 
+	// frameHandlerErrors counts errors returned by the registered frame
+	// handler (e.g. queue-full drops). Observable via FrameHandlerErrors().
+	frameHandlerErrors atomic.Int64
+
 	// frameHandler is called by readLoop when a binary Frame message arrives
 	// from the Relay. Set by RelayTransport on Open; cleared on Close.
 	frameHandler atomic.Value
@@ -183,15 +187,23 @@ func (c *ControlClient) Shutdown() error {
 // reconnect and restoration behaviour.
 func (c *ControlClient) Metrics() ControlClientMetrics {
 	return ControlClientMetrics{
-		Reconnects:     c.Reconnects.Load(),
-		RoutesRestored: c.RoutesRestored.Load(),
+		Reconnects:         c.Reconnects.Load(),
+		RoutesRestored:     c.RoutesRestored.Load(),
+		FrameHandlerErrors: c.frameHandlerErrors.Load(),
 	}
+}
+
+// FrameHandlerErrors returns the number of inbound frames whose
+// registered frame handler returned an error (e.g. queue-full drops).
+func (c *ControlClient) FrameHandlerErrors() int64 {
+	return c.frameHandlerErrors.Load()
 }
 
 // ControlClientMetrics exposes observable counters.
 type ControlClientMetrics struct {
-	Reconnects     int64
-	RoutesRestored int64
+	Reconnects         int64
+	RoutesRestored     int64
+	FrameHandlerErrors int64
 }
 
 // IsConnected reports whether the client currently has an established
