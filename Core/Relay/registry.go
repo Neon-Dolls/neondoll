@@ -282,6 +282,24 @@ func (r *Registry) OpenRoute(regID RegistrationID, routeID RouteID) (*RouteEntry
 	}
 }
 
+// SetRouteCredentials updates the credentials on an existing allocated route.
+// The caller must own the registration that owns the route.
+func (r *Registry) SetRouteCredentials(regID RegistrationID, routeID RouteID, creds RouteCredentials) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	entry, ok := r.routes[routeID]
+	if !ok {
+		return ErrRouteNotFound
+	}
+	if entry.RegistrationID != regID {
+		return ErrRouteWrongOwner
+	}
+	entry.Credentials = creds
+	entry.UpdatedAt = time.Now()
+	return nil
+}
+
 // CloseRoute transitions a route to Closed (via Closing) and removes it.
 func (r *Registry) CloseRoute(regID RegistrationID, routeID RouteID) (*RouteEntry, error) {
 	r.mu.Lock()

@@ -275,12 +275,36 @@ func (cs *ControlServer) handleWS(w http.ResponseWriter, r *http.Request) {
 					continue
 				}
 
-				// Register the route in the registry.
+				// Register the route in the registry with CLIENT-PROVIDED credentials.
 				if _, err := cs.svc.Registry().AllocateRoute(regID, m.RouteID); err != nil {
 					_ = cs.svc.UDP().Close(m.RouteID)
 					cs.sendReply(wsConn, &RelayError{
 						Type: CmdError, Code: ErrInternal,
 						Message: err.Error(), RouteID: m.RouteID,
+					})
+					continue
+				}
+
+				// Overwrite the randomly-generated credentials with the
+				// client-provided ones so the client knows what to send.
+				if err := cs.svc.Registry().SetRouteCredentials(regID, m.RouteID, m.Credentials); err != nil {
+					_ = cs.svc.UDP().Close(m.RouteID)
+					_, _ = cs.svc.Registry().CloseRoute(regID, m.RouteID)
+					cs.sendReply(wsConn, &RelayError{
+						Type: CmdError, Code: ErrInternal,
+						Message: err.Error(), RouteID: m.RouteID,
+					})
+					continue
+				}
+
+				// Verify the client-provided credentials match what is stored.
+				entry, ok := cs.svc.Registry().Route(m.RouteID)
+				if !ok || m.Credentials.Token != entry.Credentials.Token {
+					_ = cs.svc.UDP().Close(m.RouteID)
+					_, _ = cs.svc.Registry().CloseRoute(regID, m.RouteID)
+					cs.sendReply(wsConn, &RelayError{
+						Type: CmdError, Code: ErrAuthFailed,
+						Message: "route credentials mismatch", RouteID: m.RouteID,
 					})
 					continue
 				}
