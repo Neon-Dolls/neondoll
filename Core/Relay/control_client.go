@@ -87,6 +87,10 @@ type ControlClient struct {
 	Reconnects       atomic.Int64
 	RoutesRestored   atomic.Int64
 	LastConnectError atomic.Value
+
+	// frameHandler is called by readLoop when a binary Frame message arrives
+	// from the Relay. Set by RelayTransport on Open; cleared on Close.
+	frameHandler atomic.Value
 }
 
 // NewControlClient creates a ControlClient with the given config.

@@ -167,6 +167,42 @@ func (c *ControlClient) writeMsg(data []byte) error {
 	return conn.WriteMessage(websocket.TextMessage, data)
 }
 
+// SetFrameHandler registers a callback for binary Frame messages received
+// over the data channel. The handler is called from the readLoop goroutine
+// when a Binary WebSocket message arrives.
+func (c *ControlClient) SetFrameHandler(handler func(*Frame) error) {
+	c.frameHandler.Store(handler)
+}
+
+// ClearFrameHandler removes the binary Frame message handler.
+func (c *ControlClient) ClearFrameHandler() {
+	c.frameHandler.Store(nil)
+}
+
+// writeFrame marshals a Frame to wire format and sends it as a binary
+// WebSocket message over the control tunnel.
+func (c *ControlClient) writeFrame(frame *Frame) error {
+	data, err := MarshalFrame(frame)
+	if err != nil {
+		return err
+	}
+
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+
+	c.connMu.Lock()
+	conn := c.conn
+	c.connMu.Unlock()
+	if conn == nil {
+		return ErrNotConnected
+	}
+
+	if err := conn.SetWriteDeadline(time.Now().Add(c.config.WriteTimeout)); err != nil {
+		return err
+	}
+	return conn.WriteMessage(websocket.BinaryMessage, data)
+}
+
 // readLoop reads control messages from the WebSocket and dispatches
 // them to the appropriate pending operation's channel.
 func (c *ControlClient) readLoop(ctx context.Context, conn *websocket.Conn, gen int64) {
@@ -194,9 +230,25 @@ func (c *ControlClient) readLoop(ctx context.Context, conn *websocket.Conn, gen 
 			return
 		}
 
-		_, raw, err := conn.ReadMessage()
+		msgType, raw, err := conn.ReadMessage()
 		if err != nil {
 			return
+		}
+
+		// Binary frames carry WireGuard datagrams (Frame protocol).
+		// Route them to the registered frame handler rather than
+		// attempting JSON control-message parsing.
+		if msgType == websocket.BinaryMessage {
+			if handler := c.frameHandler.Load(); handler != nil {
+				fn := handler.(func(*Frame) error)
+				frame, ferr := UnmarshalFrame(raw)
+				if ferr != nil {
+					// Malformed frame — fail closed per §2 of M4.5.
+					continue
+				}
+				fn(frame)
+			}
+			continue
 		}
 
 		msg, err := UnmarshalControl(raw)
