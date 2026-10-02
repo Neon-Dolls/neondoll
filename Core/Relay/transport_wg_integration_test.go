@@ -241,8 +241,13 @@ func TestRelayTransport_RealWireGuardHandshakeAndTraffic(t *testing.T) {
 		cfg.RelayURL = url
 		cfg.RegistrationToken = "wg-token"
 		cfg.HandshakeTimeout = 2 * time.Second
-		cfg.ReadTimeout = 5 * time.Second
-		cfg.PingInterval = 30 * time.Second
+		// ReadTimeout must comfortably exceed the WG handshake retry cadence
+		// (REKEY_TIMEOUT = 5s between initiation attempts); otherwise the client
+		// flags the quiet pre-handshake connection as dead and enters reconnect
+		// churn, dropping initiations and stalling the handshake. PingInterval
+		// refreshes the read deadline more often than ReadTimeout expires.
+		cfg.ReadTimeout = 15 * time.Second
+		cfg.PingInterval = 5 * time.Second
 		client := NewControlClient(cfg)
 		if err := client.Start(context.Background()); err != nil {
 			t.Fatalf("[%s] Start(): %v", label, err)

@@ -265,13 +265,12 @@ func (t *RelayTransport) Open(port uint16) ([]conn.ReceiveFunc, uint16, error) {
 		if len(packets) < 1 || len(sizes) < 1 || len(eps) < 1 {
 			return 0, errors.New("relay: receive func buffers too small")
 		}
-		// The WG device reads the datagram from the preallocated buffer it
-		// passed in (bufsArrs[i][:size]), not from the slice header. The
-		// receive func MUST copy into the provided buffer.
-		if len(packets[0]) < len(packet) {
-			return 0, fmt.Errorf("relay: receive buffer too small: have %d, need %d", len(packets[0]), len(packet))
-		}
-		packets[0] = packets[0][:len(packet)]
+		// Copy the datagram into the device's buffer. The slice header in
+		// packets[0] must NOT be shortened here: the WG device reuses the
+		// same bufs array across receive calls, and a permanently resliced
+		// (smaller) buffer makes every later, larger datagram fail with
+		// "receive buffer too small" — which, after the device's death
+		// spiral, kills the receive routine permanently.
 		copy(packets[0], packet)
 		sizes[0] = len(packet)
 		eps[0] = &RelayEndpoint{routeID: routeID}

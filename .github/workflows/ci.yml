@@ -32,3 +32,6 @@ jobs:
 
       - name: Integration Tests
         run: go test -tags=integration -count=1 ./test/...
+
+      - name: E2E Tests
+        run: go test -tags=e2e -count=1 -timeout 300s ./test/...

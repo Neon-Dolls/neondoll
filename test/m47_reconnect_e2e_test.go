@@ -1,173 +1,158 @@
 //go:build e2e
 
+// M4.7 E2E reconnect test on the REAL M4.6 topology:
+//
+//	Body → WG → Relay → RelayTransport → Core WG → Doll Network → Doll Link
+//
+// The Core ↔ Relay WS control tunnel is interrupted (ControlServer context
+// cancelled — the relay SERVICE and its UDP sockets stay alive), a new
+// ControlServer is started on the same port, and the ControlClient must
+// reconnect, restore its route on the same UDP endpoint, and prove:
+//
+//   - WG path still works (overlay echo through the relay)
+//   - Doll Link still works (WS event round-trip over the overlay)
+//   - identity invariants unchanged (NetworkID, PeerIDs, WG keys,
+//     overlay IPv6, membership, invitation state)
+//   - no re-pairing (membership count still 1, invitation still consumed)
 package integration
 
 import (
 	"context"
-	"fmt"
-	"io"
-	"log/slog"
-	"net"
-	"net/netip"
 	"testing"
 	"time"
 
 	relay "github.com/Neon-Dolls/neondoll/Core/Relay"
 )
 
-// TestM47_ReconnectE2E proves client can survive a relay rebuild.
-//
-// Scenario:
-//  1. Relay + ControlServer start
-//  2. Core attaches via WS, opens a route
-//  3. Full shutdown (ControlServer + relay service)
-//  4. Client detects disconnection (short ReadTimeout forces detection)
-//  5. New relay + ControlServer on same ports
-//  6. Client reconnects automatically
-//  7. Route restored, traffic flows
 func TestM47_ReconnectE2E(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
-	log := slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelError}))
+	log := discardLogger()
 
-	relayPortSvc := pickPort(t)
-	relayPortWS := pickPort(t)
+	// Real M4.6 topology with fast disconnect detection + reconnect tuning.
+	tp := setupM46Topology(t, ctx, log, "reconnect", withReconnectTuning())
 
-	relayCfg := relay.DefaultServiceConfig()
-	relayCfg.UDP.ListenAddress = "127.0.0.1"
-	relayCfg.UDP.PortMin = relayPortSvc
-	relayCfg.UDP.PortMax = relayPortSvc
-	svc, err := relay.NewService(relayCfg, relay.ClientConfig{})
-	if err != nil {
-		t.Fatalf("NewService: %v", err)
+	// Baseline proofs on the real stack.
+	proveWgHandshake(t, ctx, tp)
+	time.Sleep(500 * time.Millisecond)
+	proveOverlayEcho(t, ctx, log, tp, "baseline")
+	proveDollLink(t, ctx, log, tp, "baseline", "m47-reconnect-baseline")
+
+	before := captureIdentityState(t, ctx, tp)
+	m0 := tp.ctrlClient.Metrics()
+	t.Logf("Before interruption: reconnects=%d routes_restored=%d connected=%v",
+		m0.Reconnects, m0.RoutesRestored, tp.ctrlClient.IsConnected())
+
+	// ── Interrupt Core ↔ Relay WS. Relay service stays alive. ──
+	tp.csCancel()
+	waitConnected(t, tp, false, 10*time.Second)
+
+	// Restart the ControlServer on the same WS port over the SAME relay
+	// service. The ControlClient's reconnectLoop must pick it up.
+	tp.restartControlServer(t, ctx, log)
+	waitConnected(t, tp, true, 20*time.Second)
+
+	// Route 1 must be restored on the SAME UDP endpoint the Body is
+	// already using — no endpoint migration, no new registration needed
+	// on the Body side.
+	waitRouteOpen(t, ctx, tp, tp.relaySvc, relay.RouteID(1), tp.routeEndpoint, 15*time.Second)
+
+	m1 := tp.ctrlClient.Metrics()
+	if m1.Reconnects <= m0.Reconnects {
+		t.Fatalf("Reconnects did not increase: before=%d after=%d", m0.Reconnects, m1.Reconnects)
 	}
-
-	sCtx, sCancel := context.WithCancel(ctx)
-	defer sCancel()
-	go func() { _ = svc.Start(sCtx) }()
-
-	cs := relay.NewControlServer(svc, fmt.Sprintf("127.0.0.1:%d", relayPortWS), log)
-	csCtx, csCancel := context.WithCancel(ctx)
-	defer csCancel()
-	go func() { _ = cs.Start(csCtx) }()
-	time.Sleep(200 * time.Millisecond)
-
-	relayURL := fmt.Sprintf("ws://127.0.0.1:%d/relay", relayPortWS)
-
-	// Core attaches via WS control tunnel.
-	// Short ReadTimeout (2s) ensures the client detects disconnect quickly
-	// after the server stops; http.Server.Shutdown does not close hijacked
-	// WS connections, so the read deadline is the only detection mechanism.
-	clientCfg := relay.ClientConfig{
-		RelayURL:          relayURL,
-		HandshakeTimeout:  10 * time.Second,
-		RegistrationToken: "reconn-tkn",
-		ReconnectInitial:  100 * time.Millisecond,
-		ReconnectMax:      2 * time.Second,
-		ReadTimeout:       2 * time.Second,
-		PingInterval:      30 * time.Second,
+	if m1.RoutesRestored < 1 {
+		t.Fatalf("RoutesRestored = %d, want >= 1", m1.RoutesRestored)
 	}
-	ctrlClient := relay.NewControlClient(clientCfg)
-	if err := ctrlClient.Start(ctx); err != nil {
-		t.Fatalf("ControlClient Start: %v", err)
-	}
-	defer ctrlClient.Shutdown()
+	t.Logf("After reconnect: reconnects=%d routes_restored=%d connected=%v",
+		m1.Reconnects, m1.RoutesRestored, tp.ctrlClient.IsConnected())
 
-	opened, err := ctrlClient.OpenRoute(ctx, 1, relay.RouteCredentials{Token: "reconn-route"})
-	if err != nil {
-		t.Fatalf("OpenRoute: %v", err)
-	}
-	t.Logf("Route opened (endpoint=%q)", opened.AllocatedEndpoint)
-	time.Sleep(200 * time.Millisecond)
+	// ── Proofs after reconnect ──
+	proveOverlayEcho(t, ctx, log, tp, "after reconnect")
+	proveDollLink(t, ctx, log, tp, "after reconnect", "m47-reconnect-after")
 
-	// ── Full shutdown — cancel both ControlServer and Service ──
-	csCancel()
-	sCancel()
+	// ── Identity invariants must be UNCHANGED ──
+	after := captureIdentityState(t, ctx, tp)
+	assertIdentityUnchanged(t, "after reconnect", before, after)
 
-	// Wait 6s: covers the 5s http.Server.Shutdown timeout and gives the
-	// client's 2s ReadTimeout time to expire and flag the connection dead.
-	time.Sleep(6 * time.Second)
-
-	// Verify the client has disconnected (poll up to 2s more if needed)
-	disconnected := false
-	for i := 0; i < 20; i++ {
-		if !ctrlClient.IsConnected() {
-			disconnected = true
-			break
-		}
-		time.Sleep(100 * time.Millisecond)
+	// No re-pairing: the membership snapshot above proves count==1 with
+	// identical PeerID/WG key/overlay/endpoint/status, and the invitation
+	// is still consumed — a Body cannot re-pair against it.
+	if !after.invConsumed {
+		t.Fatal("invitation is no longer consumed — a re-pairing window opened")
 	}
-	if !disconnected {
-		t.Fatal("client did not disconnect after relay shutdown")
-	}
-	t.Logf("Client disconnected after shutdown")
-
-	// ── Start new relay + server ──
-	// New service uses a wider UDP port range because the old service's
-	// UDP socket may still hold relayPortSvc (context cancel doesn't close it).
-	relayCfg2 := relay.DefaultServiceConfig()
-	relayCfg2.UDP.ListenAddress = "127.0.0.1"
-	relayCfg2.UDP.PortMin = relayPortSvc
-	relayCfg2.UDP.PortMax = relayPortSvc + 2
-	svc2, err := relay.NewService(relayCfg2, relay.ClientConfig{})
-	if err != nil {
-		t.Fatalf("NewService 2: %v", err)
-	}
-	sCtx2, sCancel2 := context.WithCancel(ctx)
-	defer sCancel2()
-	go func() { _ = svc2.Start(sCtx2) }()
-
-	cs2 := relay.NewControlServer(svc2, fmt.Sprintf("127.0.0.1:%d", relayPortWS), log)
-	csCtx2, csCancel2 := context.WithCancel(ctx)
-	defer csCancel2()
-	go func() { _ = cs2.Start(csCtx2) }()
-
-	// Wait for client to reconnect
-	reconnected := false
-	for i := 0; i < 100; i++ {
-		if ctrlClient.IsConnected() {
-			reconnected = true
-			break
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-	if !reconnected {
-		t.Fatal("client did not reconnect after relay rebuild")
-	}
-	t.Logf("Client reconnected")
-
-	metrics := ctrlClient.Metrics()
-	t.Logf("Reconnect metrics: %d reconnects", metrics.Reconnects)
-	if metrics.Reconnects == 0 {
-		t.Error("expected at least 1 reconnect")
-	}
-
-	// ── Open route after reconnect (use a fresh ID, old relay is gone) ──
-	opened2, err := ctrlClient.OpenRoute(ctx, 2, relay.RouteCredentials{Token: "reconn-route-2"})
-	if err != nil {
-		t.Fatalf("OpenRoute after reconnect: %v", err)
-	}
-	t.Logf("New route opened (endpoint=%q)", opened2.AllocatedEndpoint)
-	time.Sleep(200 * time.Millisecond)
-
-	// ── Verify traffic ──
-	routeAddr := netip.MustParseAddrPort(opened2.AllocatedEndpoint)
-	conn, err := net.DialUDP("udp4", nil, net.UDPAddrFromAddrPort(routeAddr))
-	if err != nil {
-		t.Fatalf("UDP dial: %v", err)
-	}
-	defer conn.Close()
-	_, err = conn.Write([]byte("reconnect-verify"))
-	if err != nil {
-		t.Fatalf("UDP write: %v", err)
-	}
-	t.Log("Traffic flowing")
-
-	route, ok := svc2.Registry().Route(2)
-	if !ok {
-		t.Fatal("route 2 missing from registry")
-	}
-	t.Logf("Route 2 in registry: state=%v endpoint=%s", route.State, route.Endpoint)
+	t.Log("No re-pairing: membership unchanged, invitation still consumed")
 
 	t.Log("=== M4.7 Reconnect E2E: ALL PASS ===")
+}
+
+// TestM47_FailureE2E proves control-plane failure handling on the REAL M4.6
+// topology (no standalone harness):
+//
+//   - WS interruption: ControlServer cancelled → client detects disconnect
+//     → new ControlServer on the same port → client reconnects, restores
+//     its route, overlay path works again
+//   - closed route: CloseRoute removes the route from the registry AND
+//     releases its UDP endpoint
+//   - empty route token: OpenRoute with an empty token is rejected
+func TestM47_FailureE2E(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+	log := discardLogger()
+
+	// Real M4.6 topology with fast disconnect detection + reconnect tuning.
+	tp := setupM46Topology(t, ctx, log, "failure", withReconnectTuning())
+
+	proveWgHandshake(t, ctx, tp)
+	time.Sleep(500 * time.Millisecond)
+	proveOverlayEcho(t, ctx, log, tp, "baseline")
+
+	// ── 1. WS interruption → reconnect on the real topology ──
+	m0 := tp.ctrlClient.Metrics()
+	tp.csCancel()
+	waitConnected(t, tp, false, 10*time.Second)
+	tp.restartControlServer(t, ctx, log)
+	waitConnected(t, tp, true, 20*time.Second)
+	waitRouteOpen(t, ctx, tp, tp.relaySvc, relay.RouteID(1), tp.routeEndpoint, 15*time.Second)
+	m1 := tp.ctrlClient.Metrics()
+	if m1.Reconnects <= m0.Reconnects {
+		t.Fatalf("Reconnects did not increase after WS interruption: before=%d after=%d", m0.Reconnects, m1.Reconnects)
+	}
+	proveOverlayEcho(t, ctx, log, tp, "after WS interruption reconnect")
+	t.Log("WS interruption → reconnect → route restored → overlay path recovered: PASS")
+
+	// ── 2. Closed route: registry entry gone + UDP endpoint released ──
+	routesBefore := tp.relaySvc.Registry().RouteCount()
+	opened3, err := tp.ctrlClient.OpenRoute(ctx, relay.RouteID(3), relay.RouteCredentials{Token: "test-route-credential-3"})
+	if err != nil {
+		t.Fatalf("OpenRoute(3): %v", err)
+	}
+	if opened3.AllocatedEndpoint == "" {
+		t.Fatal("OpenRoute(3) allocated no endpoint")
+	}
+	if got := tp.relaySvc.Registry().RouteCount(); got != routesBefore+1 {
+		t.Fatalf("RouteCount after OpenRoute(3) = %d, want %d", got, routesBefore+1)
+	}
+	if err := tp.ctrlClient.CloseRoute(ctx, relay.RouteID(3)); err != nil {
+		t.Fatalf("CloseRoute(3): %v", err)
+	}
+	if r, ok := tp.relaySvc.Registry().Route(relay.RouteID(3)); ok && r.State == relay.RouteStateOpen {
+		t.Fatalf("route 3 still open after CloseRoute: %+v", r)
+	}
+	if _, ok := tp.relaySvc.UDP().LastSeen(relay.RouteID(3)); ok {
+		t.Fatal("route 3's UDP endpoint still present after CloseRoute — endpoint not released")
+	}
+	if got := tp.relaySvc.Registry().RouteCount(); got != routesBefore {
+		t.Fatalf("RouteCount after CloseRoute(3) = %d, want %d", got, routesBefore)
+	}
+	t.Logf("Closed route 3 (endpoint %s): registry entry removed, UDP endpoint released, route count back to %d", opened3.AllocatedEndpoint, routesBefore)
+
+	// ── 3. Empty route token → rejected ──
+	if _, err := tp.ctrlClient.OpenRoute(ctx, relay.RouteID(4), relay.RouteCredentials{Token: ""}); err == nil {
+		t.Fatal("OpenRoute with empty token did not fail")
+	} else {
+		t.Logf("OpenRoute with empty token rejected: %v", err)
+	}
+
+	t.Log("=== M4.7 Failure E2E: ALL PASS ===")
 }

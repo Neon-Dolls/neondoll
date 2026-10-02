@@ -218,10 +218,24 @@ func (cs *ControlServer) handleWS(w http.ResponseWriter, r *http.Request) {
 			cs.mu.Lock()
 			delete(cs.conns, regID)
 			cs.mu.Unlock()
+			// Collect the routes this registration owned. The read loop
+			// goroutine is the only writer of core.routes, and this defer
+			// runs in the same goroutine, so no extra locking is needed.
+			routes := make([]RouteID, 0, len(core.routes))
+			for rid := range core.routes {
+				routes = append(routes, rid)
+			}
 			// Remove the sink on disconnect.
 			cs.svc.SetPacketSink(regID, nil)
 			// Remove registration from registry.
 			cs.svc.Registry().RemoveRegistration(regID)
+			// Release the registration's UDP endpoints so the ports are
+			// free again: a reconnecting client restores its routes with
+			// the same route IDs, and the endpoints must be re-bindable
+			// on the same ports for the overlay path to recover.
+			for _, rid := range routes {
+				_ = cs.svc.UDP().Close(rid)
+			}
 			_ = wsConn.Close()
 		}()
 
