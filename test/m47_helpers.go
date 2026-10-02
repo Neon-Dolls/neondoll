@@ -269,6 +269,7 @@ func setupM46Topology(t *testing.T, ctx context.Context, log *slog.Logger, suffi
 	tp.relayPortWS = pickPort(t)
 
 	tp.relayCfg = relay.DefaultServiceConfig()
+	tp.relayCfg.Credentials = []string{"d89e45dd5a9a2557aa7e36afca04a58e0c47eddd613992f13896c60bef14ac29"}
 	tp.relayCfg.UDP.ListenAddress = "127.0.0.1"
 	tp.relayCfg.UDP.PortMin = tp.relayPortSvc
 	// Room for a second route (or a second relay instance) at adjacent
