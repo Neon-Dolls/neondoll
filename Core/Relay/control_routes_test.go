@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"net"
 	"strings"
 	"testing"
@@ -288,5 +289,96 @@ func TestControlServer_RouteCredentials_WrongCredential(t *testing.T) {
 	if !strings.Contains(err.Error(), "auth_failed") &&
 		!strings.Contains(err.Error(), "route credentials mismatch") {
 		t.Errorf("OpenRoute error = %q; want auth error (auth_failed or route credentials mismatch)", err)
+	}
+}
+
+// TestControlServer_RegistrationIDGenerationFailure proves that when
+// RegistrationID generation fails (crypto/rand unavailable), the server
+// does NOT panic and creates NO registration state. The connection is
+// rejected with an internal error, and the server remains operational.
+//
+// The smallest test seam: override the ControlServer's generateRegID
+// field with a function that always returns an error.
+func TestControlServer_RegistrationIDGenerationFailure(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	svcCfg := DefaultServiceConfig()
+	hash := sha256.Sum256([]byte("fail-reg-token"))
+	svcCfg.Credentials = []string{hex.EncodeToString(hash[:])}
+	svc, err := NewService(svcCfg, ClientConfig{})
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+	if err := svc.Start(ctx); err != nil {
+		t.Fatalf("svc.Start: %v", err)
+	}
+	defer func() {
+		sc, scCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer scCancel()
+		_ = svc.Shutdown(sc)
+	}()
+
+	addr := findFreePort(t)
+	cs := NewControlServer(svc, addr, nil)
+
+	// Smallest test seam: override generateRegID to simulate crypto/rand failure.
+	cs.generateRegID = func() (RegistrationID, error) {
+		return RegistrationID(""), fmt.Errorf("crypto/rand: simulated failure")
+	}
+
+	csCtx, csCancel := context.WithCancel(ctx)
+	defer csCancel()
+	if err := cs.Start(csCtx); err != nil {
+		t.Fatalf("cs.Start: %v", err)
+	}
+
+	// Verify server is alive before connecting.
+	if cs.Addr() == "" {
+		t.Fatal("ControlServer not listening before test")
+	}
+	if cs.ActiveRegistrations() != 0 {
+		t.Errorf("ActiveRegistrations before connect = %d; want 0", cs.ActiveRegistrations())
+	}
+	if svc.Registry().RegistrationCount() != 0 {
+		t.Errorf("RegistrationCount before connect = %d; want 0", svc.Registry().RegistrationCount())
+	}
+
+	// Attempt client registration — must fail because generateRegID fails.
+	cfg := DefaultClientConfig()
+	cfg.RelayURL = "ws://" + addr + "/relay"
+	cfg.RegistrationToken = "fail-reg-token"
+	cfg.HandshakeTimeout = 5 * time.Second
+	cfg.ReadTimeout = 5 * time.Second
+	cfg.PingInterval = 30 * time.Second
+
+	client := NewControlClient(cfg)
+	err = client.Start(ctx)
+	if err == nil {
+		client.Shutdown()
+		t.Fatal("client.Start should have failed (generateRegID simulated failure)")
+	}
+	defer client.Shutdown()
+
+	// Verify the error mentions registration or internal error.
+	if !strings.Contains(err.Error(), "registration") &&
+		!strings.Contains(err.Error(), "internal_error") {
+		t.Errorf("error = %q; want something containing 'registration' or 'internal_error'", err.Error())
+	}
+
+	// Verify NO registration state was created anywhere.
+	if cs.ActiveRegistrations() != 0 {
+		t.Errorf("ActiveRegistrations after failure = %d; want 0 (no state created)", cs.ActiveRegistrations())
+	}
+	if svc.Registry().RegistrationCount() != 0 {
+		t.Errorf("RegistrationCount after failure = %d; want 0 (no state created)", svc.Registry().RegistrationCount())
+	}
+
+	// Verify server is still running (did not panic / crash).
+	if cs.Addr() == "" {
+		t.Error("ControlServer is not running after failed registration")
+	}
+	if cs.ActiveRegistrations() != 0 {
+		t.Errorf("server is in inconsistent state after failure: ActiveRegistrations = %d", cs.ActiveRegistrations())
 	}
 }
