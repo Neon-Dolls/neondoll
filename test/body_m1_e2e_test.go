@@ -71,8 +71,8 @@ func TestM1LocalBodyExists(t *testing.T) {
 	if caps[0].ID != "runtime.info" {
 		t.Errorf("AC5: capability ID = %q, want %q", caps[0].ID, "runtime.info")
 	}
-	if len(caps[0].Operations) != 1 || caps[0].Operations[0] != "read" {
-		t.Errorf("AC5: capability Operations = %v, want [read]", caps[0].Operations)
+	if len(caps[0].Operations) != 2 || caps[0].Operations[0] != "read" || caps[0].Operations[1] != "list" {
+		t.Errorf("AC5: capability Operations = %v, want [read list]", caps[0].Operations)
 	}
 	if !caps[0].Available {
 		t.Error("AC5: capability Available = false, want true")

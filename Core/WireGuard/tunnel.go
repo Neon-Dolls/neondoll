@@ -116,6 +116,18 @@ type RealTunnel struct {
 	cfg     Config
 	log     *slog.Logger
 	started bool
+
+	// bind is an optional custom transport for WireGuard packets.
+	// When non-nil, it replaces the default UDP conn.NewDefaultBind().
+	// Used by M4.5 RelayTransport; nil preserves direct M3 operation.
+	bind conn.Bind
+}
+
+// SetBind sets a custom conn.Bind for the WireGuard device.
+// Must be called before Start. When nil, a default UDP bind is used.
+// This enables RelayTransport injection for relayed WG traffic.
+func (t *RealTunnel) SetBind(bind conn.Bind) {
+	t.bind = bind
 }
 
 // NewRealTunnel creates a new RealTunnel with the given logger.
@@ -153,8 +165,12 @@ func (t *RealTunnel) Start(ctx context.Context, cfg Config) error {
 	t.tunDevice = tunDev
 	t.net = net
 
-	// Create the WireGuard device with a default UDP bind.
-	bind := conn.NewDefaultBind()
+	// Create the WireGuard device. Use custom bind if configured
+	// (e.g. RelayTransport from M4.5), otherwise default UDP bind.
+	bind := t.bind
+	if bind == nil {
+		bind = conn.NewDefaultBind()
+	}
 	logger := device.NewLogger(
 		device.LogLevelError,
 		fmt.Sprintf("(%s) ", cfg.OverlayAddress.String()),
