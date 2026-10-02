@@ -10,6 +10,7 @@ package relay
 import (
 	"context"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -160,16 +161,18 @@ func (cs *ControlServer) ActiveRegistrations() int {
 }
 
 // VerifyRegistrationToken checks the provided token against configured
-// credential verifiers (SHA-256 hex hashes). If no verifiers are configured,
-// any non-empty token is accepted for backward compatibility.
+// credential verifiers (SHA-256 hex hashes) using constant-time comparison.
+// The token's SHA-256 digest must match one of the configured verifier
+// digests. If no verifiers are configured, registration fails (fail-closed).
 func VerifyRegistrationToken(token string, credentials []string) error {
-	if len(credentials) == 0 {
-		return nil
-	}
 	hash := sha256.Sum256([]byte(token))
-	tokenHash := hex.EncodeToString(hash[:])
+	tokenBytes := hash[:]
 	for _, cred := range credentials {
-		if tokenHash == cred {
+		credBytes, err := hex.DecodeString(cred)
+		if err != nil {
+			continue
+		}
+		if subtle.ConstantTimeCompare(tokenBytes, credBytes) != 0 {
 			return nil
 		}
 	}

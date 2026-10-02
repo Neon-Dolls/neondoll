@@ -53,10 +53,10 @@ type ServiceConfig struct {
 
 	// Credentials contains the set of authorized registration token verifiers.
 	// Each entry is a hex-encoded SHA-256 hash of an authorized registration
-	// token. When non-empty, the Relay verifies incoming Register.Token against
-	// these hashes before accepting a registration. When empty, any non-empty
-	// token is accepted (backward compatible). Credentials are separate from
-	// per-route RouteCredentials.
+	// token. The Relay verifies incoming Register.Token against these hashes
+	// before accepting a registration. When empty, all registration attempts
+	// are rejected (fail-closed). Credentials are separate from per-route
+	// RouteCredentials.
 	Credentials []string `json:"credentials,omitempty"`
 
 	// UDP configures the Relay UDP ingress path (per-route public endpoints).

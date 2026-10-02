@@ -13,13 +13,13 @@ import (
 // with both valid and invalid tokens.
 
 // TestVerifyRegistrationToken_EmptyCredentials verifies that when no
-// credential verifiers are configured, any non-empty token is accepted.
+// credential verifiers are configured, any token is rejected (fail-closed).
 func TestVerifyRegistrationToken_EmptyCredentials(t *testing.T) {
 	t.Parallel()
 
 	err := VerifyRegistrationToken("my-token", []string{})
-	if err != nil {
-		t.Fatalf("empty credentials + non-empty token: err = %v; want nil", err)
+	if err == nil {
+		t.Fatal("empty credentials + non-empty token: err = nil; expected auth error")
 	}
 }
 
