@@ -189,6 +189,21 @@ func (r *Registry) Keepalive(id RegistrationID) error {
 	return nil
 }
 
+// TouchRoute updates the UpdatedAt timestamp for an existing route,
+// indicating that the route is actively passing traffic.
+// Returns ErrRouteNotFound if the route doesn't exist.
+func (r *Registry) TouchRoute(routeID RouteID) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	entry, ok := r.routes[routeID]
+	if !ok {
+		return ErrRouteNotFound
+	}
+	entry.UpdatedAt = time.Now()
+	return nil
+}
+
 // --- Route management ---
 
 // GenerateRouteCredentials creates cryptographically random route-scoped

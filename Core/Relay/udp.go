@@ -347,6 +347,10 @@ func (u *UDPListener) dispatch(h *routeHandle, payload []byte, src SourceEndpoin
 		return
 	}
 
+	// Refresh route liveness timestamp — every valid inbound datagram
+	// for a route refreshes that route, preventing premature expiration.
+	_ = u.registry.TouchRoute(h.routeID)
+
 	// Record last-seen source as runtime topology (return-routing hint).
 	// This is observation only — identity is the route, never the source.
 	// The payload is copied because it aliases the read loop's reused

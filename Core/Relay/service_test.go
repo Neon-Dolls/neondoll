@@ -390,6 +390,93 @@ func TestRouteCredentials_NotDerived(t *testing.T) {
 	}
 }
 
+// --- Liveness: registration and route expiry prevention ---
+
+func TestRegistry_ActiveRegistrationSurvivesKeepalive(t *testing.T) {
+	t.Parallel()
+	r := NewRegistry(defaultTestMaxReg, defaultTestMaxRoutes)
+	r.AddRegistration("reg-keepalive", "hash-1")
+	rid := RouteID(1)
+	r.AllocateRoute("reg-keepalive", rid)
+
+	// Use a short timeout. Call Keepalive to stay alive.
+	timeout := 5 * time.Millisecond
+	r.Keepalive("reg-keepalive")
+
+	// Give ExpireStale a chance to fire — the Keepalive we just called
+	// means the registration's LastKeepalive is now, so it should NOT expire.
+	result := r.ExpireStale(timeout, time.Hour)
+	if len(result.ExpiredRegistrations) != 0 {
+		t.Fatalf("ExpireStale expired %d registrations after Keepalive; want 0",
+			len(result.ExpiredRegistrations))
+	}
+
+	// The route should also still exist (registration wasn't expired).
+	if _, ok := r.Route(rid); !ok {
+		t.Fatal("Route was removed even though registration survived")
+	}
+}
+
+func TestRegistry_ActiveRouteSurvivesTouchRoute(t *testing.T) {
+	t.Parallel()
+	r := NewRegistry(defaultTestMaxReg, defaultTestMaxRoutes)
+	r.AddRegistration("reg-route", "hash-1")
+	rid := RouteID(1)
+	r.AllocateRoute("reg-route", rid)
+
+	// Use a short route timeout. Call TouchRoute to stay alive.
+	routeTimeout := 5 * time.Millisecond
+	r.TouchRoute(rid)
+
+	// With regTimeout large, only stale routes should be expired.
+	// TouchRoute sets UpdatedAt to now, so the route should survive.
+	result := r.ExpireStale(time.Hour, routeTimeout)
+	if len(result.StaleRoutes) != 0 {
+		t.Fatalf("ExpireStale expired %d stale routes after TouchRoute; want 0",
+			len(result.StaleRoutes))
+	}
+	if len(result.ExpiredRegistrations) != 0 {
+		t.Fatalf("ExpireStale expired %d registrations; want 0",
+			len(result.ExpiredRegistrations))
+	}
+
+	// The route should still exist.
+	if _, ok := r.Route(rid); !ok {
+		t.Fatal("Route was removed even though TouchRoute was called")
+	}
+}
+
+func TestRegistry_InactiveRegistrationExpires(t *testing.T) {
+	t.Parallel()
+	r := NewRegistry(defaultTestMaxReg, defaultTestMaxRoutes)
+	r.AddRegistration("reg-inactive", "hash-1")
+
+	// No Keepalive call — registration should expire with any non-zero timeout
+	// since LastKeepalive was set at AddRegistration time.
+	time.Sleep(time.Millisecond) // ensure time has passed
+	result := r.ExpireStale(time.Nanosecond, time.Hour)
+	if len(result.ExpiredRegistrations) != 1 {
+		t.Fatalf("ExpireStale expired %d registrations; want 1 (inactive)",
+			len(result.ExpiredRegistrations))
+	}
+}
+
+func TestRegistry_InactiveRouteExpires(t *testing.T) {
+	t.Parallel()
+	r := NewRegistry(defaultTestMaxReg, defaultTestMaxRoutes)
+	r.AddRegistration("reg-inactive-route", "hash-1")
+	rid := RouteID(1)
+	r.AllocateRoute("reg-inactive-route", rid)
+
+	// No TouchRoute call — route should expire via stale route timeout.
+	time.Sleep(time.Millisecond) // ensure time has passed
+	result := r.ExpireStale(time.Hour, time.Nanosecond)
+	if len(result.StaleRoutes) != 1 {
+		t.Fatalf("ExpireStale expired %d stale routes; want 1 (inactive)",
+			len(result.StaleRoutes))
+	}
+}
+
 // --- Registry: Keepalive ---
 
 func TestRegistry_Keepalive(t *testing.T) {

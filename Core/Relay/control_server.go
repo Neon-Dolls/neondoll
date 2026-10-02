@@ -257,6 +257,10 @@ func (cs *ControlServer) handleWS(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 
+			// Every message from the Core — control or binary — refreshes
+			// the registration's LastKeepalive, preventing premature expiry.
+			_ = cs.svc.Registry().Keepalive(regID)
+
 			if msgType == websocket.BinaryMessage {
 				// Binary frame from Core → forward to UDP
 				frame, err := UnmarshalFrame(raw)
