@@ -9,6 +9,8 @@ package relay
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -157,6 +159,23 @@ func (cs *ControlServer) ActiveRegistrations() int {
 	return len(cs.conns)
 }
 
+// VerifyRegistrationToken checks the provided token against configured
+// credential verifiers (SHA-256 hex hashes). If no verifiers are configured,
+// any non-empty token is accepted for backward compatibility.
+func VerifyRegistrationToken(token string, credentials []string) error {
+	if len(credentials) == 0 {
+		return nil
+	}
+	hash := sha256.Sum256([]byte(token))
+	tokenHash := hex.EncodeToString(hash[:])
+	for _, cred := range credentials {
+		if tokenHash == cred {
+			return nil
+		}
+	}
+	return fmt.Errorf("register.token does not match any configured credential")
+}
+
 // handleWS upgrades an HTTP connection to WebSocket and manages the
 // Core's control protocol lifecycle.
 func (cs *ControlServer) handleWS(w http.ResponseWriter, r *http.Request) {
@@ -184,6 +203,13 @@ func (cs *ControlServer) handleWS(w http.ResponseWriter, r *http.Request) {
 	reg, ok := msg.(*Register)
 	if !ok || reg.Token == "" {
 		cs.sendError(wsConn, 0, ErrAuthFailed, "register.token is required")
+		wsConn.Close()
+		return
+	}
+
+	// Verify the registration token against configured credential verifiers.
+	if err := VerifyRegistrationToken(reg.Token, cs.svc.Config().Credentials); err != nil {
+		cs.sendError(wsConn, 0, ErrAuthFailed, err.Error())
 		wsConn.Close()
 		return
 	}
@@ -288,7 +314,7 @@ func (cs *ControlServer) handleWS(w http.ResponseWriter, r *http.Request) {
 			switch m := msg.(type) {
 			case *RouteOpen:
 				if err := ValidateControl(m); err != nil {
-					core.reply( &RelayError{
+					core.reply(&RelayError{
 						Type: CmdError, Code: ErrAuthFailed,
 						Message: err.Error(), RouteID: m.RouteID,
 					})
@@ -298,7 +324,7 @@ func (cs *ControlServer) handleWS(w http.ResponseWriter, r *http.Request) {
 				// Allocate UDP endpoint.
 				ep, err := cs.svc.UDP().Bind(m.RouteID)
 				if err != nil {
-					core.reply( &RelayError{
+					core.reply(&RelayError{
 						Type: CmdError, Code: ErrRouteLimit,
 						Message: err.Error(), RouteID: m.RouteID,
 					})
@@ -313,7 +339,7 @@ func (cs *ControlServer) handleWS(w http.ResponseWriter, r *http.Request) {
 				if _, err := cs.svc.Registry().AllocateRoute(regID, m.RouteID); err != nil {
 					if !errors.Is(err, ErrRouteAlreadyExists) {
 						_ = cs.svc.UDP().Close(m.RouteID)
-						core.reply( &RelayError{
+						core.reply(&RelayError{
 							Type: CmdError, Code: ErrInternal,
 							Message: err.Error(), RouteID: m.RouteID,
 						})
@@ -326,7 +352,7 @@ func (cs *ControlServer) handleWS(w http.ResponseWriter, r *http.Request) {
 					stored, lookupErr := cs.svc.Registry().RouteCredentialsFromEntry(m.RouteID)
 					if lookupErr != nil || m.Credentials.Token != stored.Token {
 						_ = cs.svc.UDP().Close(m.RouteID)
-						core.reply( &RelayError{
+						core.reply(&RelayError{
 							Type: CmdError, Code: ErrAuthFailed,
 							Message: "route credentials mismatch", RouteID: m.RouteID,
 						})
@@ -338,7 +364,7 @@ func (cs *ControlServer) handleWS(w http.ResponseWriter, r *http.Request) {
 				if _, err := cs.svc.Registry().OpenRoute(regID, m.RouteID); err != nil {
 					_ = cs.svc.UDP().Close(m.RouteID)
 					_, _ = cs.svc.Registry().CloseRoute(regID, m.RouteID)
-					core.reply( &RelayError{
+					core.reply(&RelayError{
 						Type: CmdError, Code: ErrInternal,
 						Message: err.Error(), RouteID: m.RouteID,
 					})
@@ -350,7 +376,7 @@ func (cs *ControlServer) handleWS(w http.ResponseWriter, r *http.Request) {
 
 				// Return the server-established credentials so the client learns them.
 				openedCreds, _ := cs.svc.Registry().RouteCredentialsFromEntry(m.RouteID)
-				core.reply( &RouteOpened{
+				core.reply(&RouteOpened{
 					Type:              CmdRouteOpened,
 					RouteID:           m.RouteID,
 					AllocatedEndpoint: string(ep),
@@ -362,14 +388,14 @@ func (cs *ControlServer) handleWS(w http.ResponseWriter, r *http.Request) {
 
 			case *RouteClose:
 				if err := ValidateControl(m); err != nil {
-					core.reply( &RelayError{
+					core.reply(&RelayError{
 						Type: CmdError, Code: ErrAuthFailed,
 						Message: err.Error(), RouteID: m.RouteID,
 					})
 					continue
 				}
 				if !core.routes[m.RouteID] {
-					core.reply( &RelayError{
+					core.reply(&RelayError{
 						Type: CmdError, Code: ErrNotFound,
 						Message: "route not owned by this registration",
 						RouteID: m.RouteID,
@@ -380,7 +406,7 @@ func (cs *ControlServer) handleWS(w http.ResponseWriter, r *http.Request) {
 				_, _ = cs.svc.Registry().CloseRoute(regID, m.RouteID)
 				delete(core.routes, m.RouteID)
 
-				core.reply( &RouteClosed{
+				core.reply(&RouteClosed{
 					Type:    CmdRouteClosed,
 					RouteID: m.RouteID,
 				})
