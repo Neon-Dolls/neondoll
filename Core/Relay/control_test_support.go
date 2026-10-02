@@ -116,8 +116,27 @@ type errClosedWS struct{}
 func (e *errClosedWS) Error() string { return "test: ws closed" }
 
 // waitConnected blocks until the client reports connected, with a timeout.
+// If the client is already connected, it first waits for a brief disconnect
+// pulse (up to 500ms), then waits for reconnection. This avoids a race where
+// waitConnected returns on stale connected=true before the readLoop has set
+// it false after a WebSocket drop — causing the caller to proceed before
+// the reconnect cycle even begins.
 func waitConnected(t *testing.T, client *ControlClient, label string) {
 	t.Helper()
+
+	// If already connected, wait briefly for a disconnect pulse that may
+	// be imminent (the WS drop hasn't propagated to connected=false yet).
+	// This ensures the reconnect cycle establishes a fresh connection.
+	if client.IsConnected() {
+		pulseDeadline := time.Now().Add(500 * time.Millisecond)
+		for time.Now().Before(pulseDeadline) {
+			if !client.IsConnected() {
+				break
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		if client.IsConnected() {

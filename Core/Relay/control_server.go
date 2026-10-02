@@ -44,6 +44,10 @@ type ControlServer struct {
 
 	mu    sync.RWMutex
 	conns map[RegistrationID]*coreWSConn
+
+	// generateRegID creates RegistrationIDs. Default uses crypto/rand
+	// (GenerateRegistrationID). Overridable in tests to simulate failure.
+	generateRegID func() (RegistrationID, error)
 }
 
 // coreWSConn tracks one Core's WebSocket connection and its routes.
@@ -101,10 +105,11 @@ func NewControlServer(svc *Service, addr string, log *slog.Logger) *ControlServe
 		log = slog.Default()
 	}
 	cs := &ControlServer{
-		svc:   svc,
-		addr:  addr,
-		log:   log.With("component", "relay.control_server"),
-		conns: make(map[RegistrationID]*coreWSConn),
+		svc:           svc,
+		addr:          addr,
+		log:           log.With("component", "relay.control_server"),
+		conns:         make(map[RegistrationID]*coreWSConn),
+		generateRegID: func() (RegistrationID, error) { return GenerateRegistrationID() },
 	}
 	return cs
 }
@@ -218,8 +223,13 @@ func (cs *ControlServer) handleWS(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Register with the service's registry.
-	regID := RegistrationID(fmt.Sprintf("core-%x-%d", reg.Token, time.Now().UnixNano()))
-	if err := cs.svc.Registry().AddRegistration(regID, reg.Token); err != nil {
+	regID, err := cs.generateRegID()
+	if err != nil {
+		cs.sendError(wsConn, 0, ErrInternal, "registration ID generation failed")
+		wsConn.Close()
+		return
+	}
+	if err := cs.svc.Registry().AddRegistration(regID); err != nil {
 		cs.sendError(wsConn, 0, ErrRateLimited, err.Error())
 		wsConn.Close()
 		return

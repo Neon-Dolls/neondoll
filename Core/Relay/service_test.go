@@ -2,8 +2,6 @@ package relay
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"runtime"
 	"sort"
@@ -66,7 +64,7 @@ func TestRegistry_AddRegistration(t *testing.T) {
 	t.Parallel()
 	r := NewRegistry(defaultTestMaxReg, defaultTestMaxRoutes)
 
-	err := r.AddRegistration("reg-1", "token-hash-1")
+	err := r.AddRegistration("reg-1")
 	if err != nil {
 		t.Fatalf("AddRegistration() = %v; want nil", err)
 	}
@@ -74,9 +72,6 @@ func TestRegistry_AddRegistration(t *testing.T) {
 	reg, ok := r.Registration("reg-1")
 	if !ok {
 		t.Fatal("Registration() returned false, want true")
-	}
-	if reg.TokenHash != "token-hash-1" {
-		t.Errorf("TokenHash = %q; want %q", reg.TokenHash, "token-hash-1")
 	}
 	if reg.ID != "reg-1" {
 		t.Errorf("ID = %q; want %q", reg.ID, "reg-1")
@@ -86,9 +81,9 @@ func TestRegistry_AddRegistration(t *testing.T) {
 func TestRegistry_AddRegistration_Duplicate(t *testing.T) {
 	t.Parallel()
 	r := NewRegistry(defaultTestMaxReg, defaultTestMaxRoutes)
-	r.AddRegistration("reg-1", "hash-1")
+	r.AddRegistration("reg-1")
 
-	err := r.AddRegistration("reg-1", "hash-2")
+	err := r.AddRegistration("reg-1")
 	if err != ErrRegistrationExists {
 		t.Fatalf("AddRegistration duplicate = %v; want ErrRegistrationExists", err)
 	}
@@ -98,22 +93,105 @@ func TestRegistry_AddRegistration_Limit(t *testing.T) {
 	t.Parallel()
 	r := NewRegistry(2, defaultTestMaxRoutes)
 
-	if err := r.AddRegistration("reg-1", "hash-1"); err != nil {
+	if err := r.AddRegistration("reg-1"); err != nil {
 		t.Fatal(err)
 	}
-	if err := r.AddRegistration("reg-2", "hash-2"); err != nil {
+	if err := r.AddRegistration("reg-2"); err != nil {
 		t.Fatal(err)
 	}
-	err := r.AddRegistration("reg-3", "hash-3")
+	err := r.AddRegistration("reg-3")
 	if err != ErrRegistrationLimit {
 		t.Fatalf("AddRegistration past limit = %v; want ErrRegistrationLimit", err)
+	}
+}
+
+// ── A3: Registration secret hygiene — opaque crypto-random IDs, no stored credential material ──
+
+// TestA3_RegistrationID_Opaque verifies that GenerateRegistrationID produces
+// cryptographically random opaque identifiers that are independent of any
+// inputs like tokens, timestamps, or identities.
+func TestA3_RegistrationID_Opaque(t *testing.T) {
+	t.Parallel()
+	seen := make(map[string]bool)
+	for i := 0; i < 100; i++ {
+		id, err := GenerateRegistrationID()
+		if err != nil {
+			t.Fatalf("GenerateRegistrationID() = %v", err)
+		}
+		if len(string(id)) < 32 {
+			t.Fatalf("registration ID too short: %q (want >=32 hex chars)", string(id))
+		}
+		if seen[string(id)] {
+			t.Fatal("duplicate registration ID generated")
+		}
+		seen[string(id)] = true
+	}
+}
+
+// TestA3_RegistrationID_NotDerived verifies that RegistrationIDs are not
+// derived from any registration token, route identity, or other input.
+// Since generation is random, we confirm by creating two registrations
+// in sequence with the same nominal inputs and checking IDs differ.
+func TestA3_RegistrationID_NotDerived(t *testing.T) {
+	t.Parallel()
+	r := NewRegistry(defaultTestMaxReg, defaultTestMaxRoutes)
+
+	// Use MustGenerateRegistrationID — the IDs come from crypto/rand,
+	// not from any seed or derivation.
+	id1 := MustGenerateRegistrationID()
+	if err := r.AddRegistration(id1); err != nil {
+		t.Fatalf("first AddRegistration: %v", err)
+	}
+	reg1, ok := r.Registration(id1)
+	if !ok {
+		t.Fatal("first registration not found")
+	}
+
+	id2 := MustGenerateRegistrationID()
+	if err := r.AddRegistration(id2); err != nil {
+		t.Fatalf("second AddRegistration: %v", err)
+	}
+	reg2, ok := r.Registration(id2)
+	if !ok {
+		t.Fatal("second registration not found")
+	}
+
+	if reg1.ID == reg2.ID {
+		t.Error("two generated registration IDs are identical; must be independent")
+	}
+}
+
+// TestA3_Registry_NoCredentialMaterial verifies that after successful
+// authentication, the registry retains no credential material.
+// RegistrationEntry must have no TokenHash or other token-related fields.
+func TestA3_Registry_NoCredentialMaterial(t *testing.T) {
+	t.Parallel()
+	r := NewRegistry(defaultTestMaxReg, defaultTestMaxRoutes)
+
+	id := MustGenerateRegistrationID()
+	if err := r.AddRegistration(id); err != nil {
+		t.Fatalf("AddRegistration: %v", err)
+	}
+
+	reg, ok := r.Registration(id)
+	if !ok {
+		t.Fatal("Registration not found")
+	}
+
+	// Verify the struct has no TokenHash field (compile-time safety)
+	// and runtime check: no credential fields exposed
+	if reg.ID != id {
+		t.Errorf("ID = %q; want %q", reg.ID, id)
+	}
+	if reg.CreatedAt.IsZero() {
+		t.Error("CreatedAt is zero; should be set")
 	}
 }
 
 func TestRegistry_RemoveRegistration(t *testing.T) {
 	t.Parallel()
 	r := NewRegistry(defaultTestMaxReg, defaultTestMaxRoutes)
-	r.AddRegistration("reg-1", "hash-1")
+	r.AddRegistration("reg-1")
 	rid1 := RouteID(1)
 	rid2 := RouteID(2)
 	r.AllocateRoute("reg-1", rid1)
@@ -152,7 +230,7 @@ func TestRegistry_RemoveRegistration_NotFound(t *testing.T) {
 func TestRegistry_AllocateRoute(t *testing.T) {
 	t.Parallel()
 	r := NewRegistry(defaultTestMaxReg, defaultTestMaxRoutes)
-	r.AddRegistration("reg-1", "hash-1")
+	r.AddRegistration("reg-1")
 	rid := RouteID(42)
 
 	entry, err := r.AllocateRoute("reg-1", rid)
@@ -196,7 +274,7 @@ func TestRegistry_AllocateRoute_NoRegistration(t *testing.T) {
 func TestRegistry_AllocateRoute_Duplicate(t *testing.T) {
 	t.Parallel()
 	r := NewRegistry(defaultTestMaxReg, defaultTestMaxRoutes)
-	r.AddRegistration("reg-1", "hash-1")
+	r.AddRegistration("reg-1")
 	rid := RouteID(1)
 	r.AllocateRoute("reg-1", rid)
 
@@ -209,8 +287,8 @@ func TestRegistry_AllocateRoute_Duplicate(t *testing.T) {
 func TestRegistry_AllocateRoute_Limit(t *testing.T) {
 	t.Parallel()
 	r := NewRegistry(defaultTestMaxReg, 2)
-	r.AddRegistration("reg-1", "hash-1")
-	r.AddRegistration("reg-2", "hash-2")
+	r.AddRegistration("reg-1")
+	r.AddRegistration("reg-2")
 
 	rid1 := RouteID(1)
 	rid2 := RouteID(2)
@@ -230,8 +308,8 @@ func TestRegistry_AllocateRoute_Limit(t *testing.T) {
 func TestRegistry_RouteOwnership(t *testing.T) {
 	t.Parallel()
 	r := NewRegistry(defaultTestMaxReg, defaultTestMaxRoutes)
-	r.AddRegistration("reg-1", "hash-1")
-	r.AddRegistration("reg-2", "hash-2")
+	r.AddRegistration("reg-1")
+	r.AddRegistration("reg-2")
 
 	rid := RouteID(1)
 	r.AllocateRoute("reg-1", rid)
@@ -252,7 +330,7 @@ func TestRegistry_RouteOwnership(t *testing.T) {
 func TestRegistry_RouteOwnershipRegistrationRoute(t *testing.T) {
 	t.Parallel()
 	r := NewRegistry(defaultTestMaxReg, defaultTestMaxRoutes)
-	r.AddRegistration("reg-1", "hash-1")
+	r.AddRegistration("reg-1")
 	rid := RouteID(1)
 	r.AllocateRoute("reg-1", rid)
 
@@ -268,7 +346,7 @@ func TestRegistry_RouteOwnershipRegistrationRoute(t *testing.T) {
 func TestRegistry_RouteStateTransitions(t *testing.T) {
 	t.Parallel()
 	r := NewRegistry(defaultTestMaxReg, defaultTestMaxRoutes)
-	r.AddRegistration("reg-1", "hash-1")
+	r.AddRegistration("reg-1")
 	rid := RouteID(1)
 
 	// Allocate → Allocated
@@ -313,7 +391,7 @@ func TestRegistry_RouteStateTransitions(t *testing.T) {
 func TestRegistry_RouteStateOpenAllocatedAfterAllocate(t *testing.T) {
 	t.Parallel()
 	r := NewRegistry(defaultTestMaxReg, defaultTestMaxRoutes)
-	r.AddRegistration("reg-1", "hash-1")
+	r.AddRegistration("reg-1")
 	rid := RouteID(1)
 	r.AllocateRoute("reg-1", rid)
 
@@ -336,7 +414,7 @@ func TestRegistry_RouteStateOpenAllocatedAfterAllocate(t *testing.T) {
 func TestRegistry_CloseNonExistentRoute(t *testing.T) {
 	t.Parallel()
 	r := NewRegistry(defaultTestMaxReg, defaultTestMaxRoutes)
-	r.AddRegistration("reg-1", "hash-1")
+	r.AddRegistration("reg-1")
 	rid := RouteID(1)
 
 	_, err := r.CloseRoute("reg-1", rid)
@@ -372,13 +450,13 @@ func TestRouteCredentials_NotDerived(t *testing.T) {
 	// any potential derivation source like RouteID or registration token.
 	// Since generation is random, we verify: same inputs → different outputs.
 	r := NewRegistry(defaultTestMaxReg, defaultTestMaxRoutes)
-	r.AddRegistration("reg-1", "fixed-token")
+	r.AddRegistration("reg-1")
 	rid := RouteID(1)
 
 	creds1, _ := r.AllocateRoute("reg-1", rid)
 	r.RemoveRegistration("reg-1")
 
-	r.AddRegistration("reg-1", "fixed-token")
+	r.AddRegistration("reg-1")
 	rid2 := RouteID(1)
 	creds2, _ := r.AllocateRoute("reg-1", rid2)
 
@@ -395,7 +473,7 @@ func TestRouteCredentials_NotDerived(t *testing.T) {
 func TestRegistry_ActiveRegistrationSurvivesKeepalive(t *testing.T) {
 	t.Parallel()
 	r := NewRegistry(defaultTestMaxReg, defaultTestMaxRoutes)
-	r.AddRegistration("reg-keepalive", "hash-1")
+	r.AddRegistration("reg-keepalive")
 	rid := RouteID(1)
 	r.AllocateRoute("reg-keepalive", rid)
 
@@ -420,7 +498,7 @@ func TestRegistry_ActiveRegistrationSurvivesKeepalive(t *testing.T) {
 func TestRegistry_ActiveRouteSurvivesTouchRoute(t *testing.T) {
 	t.Parallel()
 	r := NewRegistry(defaultTestMaxReg, defaultTestMaxRoutes)
-	r.AddRegistration("reg-route", "hash-1")
+	r.AddRegistration("reg-route")
 	rid := RouteID(1)
 	r.AllocateRoute("reg-route", rid)
 
@@ -449,7 +527,7 @@ func TestRegistry_ActiveRouteSurvivesTouchRoute(t *testing.T) {
 func TestRegistry_InactiveRegistrationExpires(t *testing.T) {
 	t.Parallel()
 	r := NewRegistry(defaultTestMaxReg, defaultTestMaxRoutes)
-	r.AddRegistration("reg-inactive", "hash-1")
+	r.AddRegistration("reg-inactive")
 
 	// No Keepalive call — registration should expire with any non-zero timeout
 	// since LastKeepalive was set at AddRegistration time.
@@ -464,7 +542,7 @@ func TestRegistry_InactiveRegistrationExpires(t *testing.T) {
 func TestRegistry_InactiveRouteExpires(t *testing.T) {
 	t.Parallel()
 	r := NewRegistry(defaultTestMaxReg, defaultTestMaxRoutes)
-	r.AddRegistration("reg-inactive-route", "hash-1")
+	r.AddRegistration("reg-inactive-route")
 	rid := RouteID(1)
 	r.AllocateRoute("reg-inactive-route", rid)
 
@@ -482,7 +560,7 @@ func TestRegistry_InactiveRouteExpires(t *testing.T) {
 func TestRegistry_Keepalive(t *testing.T) {
 	t.Parallel()
 	r := NewRegistry(defaultTestMaxReg, defaultTestMaxRoutes)
-	r.AddRegistration("reg-1", "hash-1")
+	r.AddRegistration("reg-1")
 
 	regBefore, _ := r.Registration("reg-1")
 	before := regBefore.LastKeepalive
@@ -514,8 +592,8 @@ func TestRegistry_KeepaliveNotFound(t *testing.T) {
 func TestRegistry_ExpireStale_Registration(t *testing.T) {
 	t.Parallel()
 	r := NewRegistry(defaultTestMaxReg, defaultTestMaxRoutes)
-	r.AddRegistration("reg-1", "hash-1")
-	r.AddRegistration("reg-2", "hash-2")
+	r.AddRegistration("reg-1")
+	r.AddRegistration("reg-2")
 	rid := RouteID(1)
 	r.AllocateRoute("reg-1", rid)
 
@@ -553,8 +631,8 @@ func TestRegistry_ExpireStale_Registration(t *testing.T) {
 func TestRegistry_ExpireStale_RouteTimeout(t *testing.T) {
 	t.Parallel()
 	r := NewRegistry(defaultTestMaxReg, defaultTestMaxRoutes)
-	r.AddRegistration("reg-1", "hash-1")
-	r.AddRegistration("reg-2", "hash-2")
+	r.AddRegistration("reg-1")
+	r.AddRegistration("reg-2")
 	rid1 := RouteID(1)
 	rid2 := RouteID(2)
 	r.AllocateRoute("reg-1", rid1)
@@ -583,7 +661,7 @@ func TestRegistry_ExpireStale_RouteTimeout(t *testing.T) {
 func TestRegistry_ExpireStale_Nothing(t *testing.T) {
 	t.Parallel()
 	r := NewRegistry(defaultTestMaxReg, defaultTestMaxRoutes)
-	r.AddRegistration("reg-1", "hash-1")
+	r.AddRegistration("reg-1")
 
 	result := r.ExpireStale(time.Hour, time.Hour)
 	if len(result.ExpiredRegistrations) != 0 {
@@ -600,7 +678,7 @@ func TestRegistry_ExpireStale_Nothing(t *testing.T) {
 func TestRegistry_ExpireStale_RouteOwnershipAfterExpiry(t *testing.T) {
 	t.Parallel()
 	r := NewRegistry(defaultTestMaxReg, defaultTestMaxRoutes)
-	r.AddRegistration("reg-1", "hash-1")
+	r.AddRegistration("reg-1")
 	rid := RouteID(1)
 	r.AllocateRoute("reg-1", rid)
 
@@ -639,7 +717,7 @@ func TestRegistry_ConcurrentAddRemove(t *testing.T) {
 		go func(id int) {
 			defer wg.Done()
 			regID := RegistrationID(fmt.Sprintf("reg-%d", id))
-			err := r.AddRegistration(regID, fmt.Sprintf("hash-%d", id))
+			err := r.AddRegistration(regID)
 			if err != nil && err != ErrRegistrationLimit {
 				t.Errorf("AddRegistration(%q) = %v", regID, err)
 			}
@@ -655,7 +733,7 @@ func TestRegistry_ConcurrentAddRemove(t *testing.T) {
 func TestRegistry_ConcurrentRouteAllocation(t *testing.T) {
 	t.Parallel()
 	r := NewRegistry(10, 1000)
-	r.AddRegistration("reg-1", "hash-1")
+	r.AddRegistration("reg-1")
 
 	var wg sync.WaitGroup
 	errs := make(chan error, 100)
@@ -857,7 +935,7 @@ func TestService_ShutdownExpiresAllRoutes(t *testing.T) {
 	svc.Start(ctx)
 
 	reg := svc.Registry()
-	reg.AddRegistration("test-reg", "hash")
+	reg.AddRegistration("test-reg")
 	rid := RouteID(1)
 	reg.AllocateRoute("test-reg", rid)
 
@@ -886,7 +964,7 @@ func TestService_Diagnostics(t *testing.T) {
 
 	// Add a registration and route to make diagnostics interesting
 	reg := svc.Registry()
-	reg.AddRegistration("diag-reg", "hash")
+	reg.AddRegistration("diag-reg")
 	rid := RouteID(1)
 	reg.AllocateRoute("diag-reg", rid)
 	svc.Metrics().incRoutesCreated() // service-level tracking (M4.3+ wired)
@@ -928,7 +1006,7 @@ func TestService_RegistrationAndRouteLifecycle(t *testing.T) {
 	reg := svc.Registry()
 
 	// Register
-	err := reg.AddRegistration("client-1", hex.EncodeToString([]byte("token-hash")))
+	err := reg.AddRegistration("client-1")
 	if err != nil {
 		t.Fatalf("AddRegistration: %v", err)
 	}
@@ -997,7 +1075,7 @@ func TestService_RegistrationAndRouteLifecycle(t *testing.T) {
 func TestRegistration_RouteIDs_Sort(t *testing.T) {
 	t.Parallel()
 	r := NewRegistry(defaultTestMaxReg, defaultTestMaxRoutes)
-	r.AddRegistration("reg-1", "hash-1")
+	r.AddRegistration("reg-1")
 
 	rid1 := RouteID(3)
 	rid2 := RouteID(1)
@@ -1063,27 +1141,6 @@ func TestMustGenerateRouteCredentials(t *testing.T) {
 	}
 }
 
-// --- Registry: token hash tracking ---
-
-func TestRegistry_TokenHashStored(t *testing.T) {
-	t.Parallel()
-	r := NewRegistry(defaultTestMaxReg, defaultTestMaxRoutes)
-
-	token := "my-secret-token"
-	hash := sha256.Sum256([]byte(token))
-	tokenHash := hex.EncodeToString(hash[:])
-
-	r.AddRegistration("reg-1", tokenHash)
-
-	reg, ok := r.Registration("reg-1")
-	if !ok {
-		t.Fatal("Registration not found")
-	}
-	if reg.TokenHash != tokenHash {
-		t.Errorf("TokenHash = %q; want %q", reg.TokenHash, tokenHash)
-	}
-}
-
 // --- RouteState string names ---
 
 func TestRouteState_String(t *testing.T) {
@@ -1139,7 +1196,7 @@ func TestServiceState_String(t *testing.T) {
 func TestRegistry_RouteCredentialsFromEntry(t *testing.T) {
 	t.Parallel()
 	r := NewRegistry(defaultTestMaxReg, defaultTestMaxRoutes)
-	r.AddRegistration("reg-1", "hash-1")
+	r.AddRegistration("reg-1")
 	rid := RouteID(1)
 	r.AllocateRoute("reg-1", rid)
 

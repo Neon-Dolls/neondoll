@@ -67,7 +67,7 @@ func TestM47_Failure_MalformedPacketFrame(t *testing.T) {
 // unallocated RouteID returns an appropriate error.
 func TestM47_Failure_UnknownRouteID(t *testing.T) {
 	reg := NewRegistry(10, 50)
-	if err := reg.AddRegistration("test", "hash"); err != nil {
+	if err := reg.AddRegistration("test"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -88,10 +88,10 @@ func TestM47_Failure_UnknownRouteID(t *testing.T) {
 // registration cannot manipulate routes it does not own.
 func TestM47_Failure_UnauthorizedCrossRegistration(t *testing.T) {
 	reg := NewRegistry(10, 50)
-	if err := reg.AddRegistration("owner", "hash-a"); err != nil {
+	if err := reg.AddRegistration("owner"); err != nil {
 		t.Fatal(err)
 	}
-	if err := reg.AddRegistration("intruder", "hash-b"); err != nil {
+	if err := reg.AddRegistration("intruder"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -128,7 +128,7 @@ func TestM47_Failure_UnauthorizedCrossRegistration(t *testing.T) {
 // simply verifies the registry does not panic or leak routes.
 func TestM47_Failure_WrongRouteCredential(t *testing.T) {
 	reg := NewRegistry(10, 50)
-	if err := reg.AddRegistration("test", "hash"); err != nil {
+	if err := reg.AddRegistration("test"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -192,7 +192,7 @@ func TestM47_Failure_RegistrationNotFound(t *testing.T) {
 func TestM47_Failure_TooManyRoutes(t *testing.T) {
 	maxRoutes := 5
 	reg := NewRegistry(10, maxRoutes)
-	if err := reg.AddRegistration("test", "hash"); err != nil {
+	if err := reg.AddRegistration("test"); err != nil {
 		t.Fatal(err)
 	}
 

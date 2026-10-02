@@ -72,9 +72,9 @@ type RouteEntry struct {
 }
 
 // RegistrationEntry holds the state of a Core registration.
+// After successful authentication, no credential material is retained.
 type RegistrationEntry struct {
 	ID            RegistrationID
-	TokenHash     string
 	CreatedAt     time.Time
 	LastKeepalive time.Time
 	routes        map[RouteID]struct{}
@@ -114,10 +114,11 @@ func NewRegistry(maxRegistrations, maxRoutes int) *Registry {
 
 // --- Registration management ---
 
-// AddRegistration creates a new registration with the given ID and token hash.
+// AddRegistration creates a new registration with the given ID.
+// After successful authentication, no credential material is stored.
 // Returns ErrRegistrationExists if the ID is already registered,
 // ErrRegistrationLimit if the limit would be exceeded.
-func (r *Registry) AddRegistration(id RegistrationID, tokenHash string) error {
+func (r *Registry) AddRegistration(id RegistrationID) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -131,12 +132,10 @@ func (r *Registry) AddRegistration(id RegistrationID, tokenHash string) error {
 	now := time.Now()
 	r.registrations[id] = &RegistrationEntry{
 		ID:            id,
-		TokenHash:     tokenHash,
 		CreatedAt:     now,
 		LastKeepalive: now,
 		routes:        make(map[RouteID]struct{}),
 	}
-	_ = now // used via RegistrationEntry
 	return nil
 }
 
@@ -227,6 +226,29 @@ func MustGenerateRouteCredentials() RouteCredentials {
 		panic(err)
 	}
 	return c
+}
+
+// GenerateRegistrationID creates a cryptographically random opaque
+// registration identifier. It is completely independent of Register.Token,
+// timestamps, Core identity, and route identity — ensuring that the
+// registration ID leaks no credential material and cannot be predicted
+// or correlated with any authentication secret.
+func GenerateRegistrationID() (RegistrationID, error) {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return RegistrationID(""), fmt.Errorf("relay: generate registration ID: %w", err)
+	}
+	return RegistrationID(hex.EncodeToString(b)), nil
+}
+
+// MustGenerateRegistrationID is like GenerateRegistrationID but panics on
+// failure. Suitable for tests and startup where failure is fatal.
+func MustGenerateRegistrationID() RegistrationID {
+	id, err := GenerateRegistrationID()
+	if err != nil {
+		panic(err)
+	}
+	return id
 }
 
 // AllocateRoute creates a new route owned by the given registration and

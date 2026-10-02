@@ -19,10 +19,10 @@ func TestM47_RouteIsolation_CannotAccessAnotherRegistrationsRoute(t *testing.T) 
 	reg := NewRegistry(10, 50)
 
 	// Two independent registrations
-	if err := reg.AddRegistration("reg-a", "hash-a"); err != nil {
+	if err := reg.AddRegistration("reg-a"); err != nil {
 		t.Fatalf("AddRegistration reg-a: %v", err)
 	}
-	if err := reg.AddRegistration("reg-b", "hash-b"); err != nil {
+	if err := reg.AddRegistration("reg-b"); err != nil {
 		t.Fatalf("AddRegistration reg-b: %v", err)
 	}
 
@@ -65,10 +65,10 @@ func TestM47_RouteIsolation_CannotAccessAnotherRegistrationsRoute(t *testing.T) 
 func TestM47_RouteIsolation_CloseOneDoesNotAffectOther(t *testing.T) {
 	reg := NewRegistry(10, 50)
 
-	if err := reg.AddRegistration("reg-a", "hash-a"); err != nil {
+	if err := reg.AddRegistration("reg-a"); err != nil {
 		t.Fatal(err)
 	}
-	if err := reg.AddRegistration("reg-b", "hash-b"); err != nil {
+	if err := reg.AddRegistration("reg-b"); err != nil {
 		t.Fatal(err)
 	}
 

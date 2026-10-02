@@ -28,6 +28,13 @@ func (c *ControlClient) connect(ctx context.Context) error {
 
 	if oldConn != nil {
 		oldConn.Close()
+		// Explicitly mark disconnected before starting a new connection.
+		// This prevents a race where the old readLoop's defer checks
+		// c.conn == conn but finds c.conn = nil (set above) and skips
+		// connected.Store(false), leaving the client stuck as
+		// "connected" on a dead WebSocket — preventing reconnectLoop
+		// from ever attempting a reconnect.
+		c.connected.Store(false)
 	}
 
 	// Fail all pending operations from the old connection promptly.
