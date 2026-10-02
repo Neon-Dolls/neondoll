@@ -382,46 +382,39 @@ func TestA4_CrossRegistrationIsolation(t *testing.T) {
 	cs, addr, csCancel := startControlServer(t, svc)
 	defer csCancel()
 
-	// ── Connect both clients ──
+	// ── Connect client A, capture its RegistrationID ──
 	clientA := connectClient(t, makeClientConfig(fmt.Sprintf("ws://%s/relay", addr), "token-alpha"))
 	defer clientA.Shutdown()
 	waitConnected(t, clientA, "A")
 
+	// Capture A's RegistrationID while only one registration exists.
+	regIDA := onlyRegID(cs)
+	if regIDA == "" {
+		t.Fatal("A has no RegistrationID in ControlServer")
+	}
+	t.Logf("A's RegistrationID: %q", regIDA)
+
+	// ── Connect client B ──
 	clientB := connectClient(t, makeClientConfig(fmt.Sprintf("ws://%s/relay", addr), "token-beta"))
 	defer clientB.Shutdown()
 	waitConnected(t, clientB, "B")
 
-	// Capture RegistrationIDs.
-	regIDA := onlyRegID(cs) // temporary; gets the "first" one
-	// Get both regIDs from the server's conns map.
-	var regIDA2, regIDB2 RegistrationID
-	var foundFirst bool
+	// Determine B's RegistrationID as the one that's NOT A's.
+	var regIDB RegistrationID
 	cs.mu.RLock()
 	for id := range cs.conns {
-		if !foundFirst {
-			regIDA2 = id
-			foundFirst = true
-		} else {
-			regIDB2 = id
+		if id != regIDA {
+			regIDB = id
 		}
 	}
 	cs.mu.RUnlock()
-
-	// If regIDA == regIDA2, then regIDA2 is A's and regIDB2 is B's.
-	// Otherwise regIDA2 is B's and regIDB2 is A's.
-	var regIDAMain, regIDBMain RegistrationID
-	if regIDA == regIDA2 {
-		regIDAMain = regIDA2
-		regIDBMain = regIDB2
-	} else {
-		regIDAMain = regIDB2
-		regIDBMain = regIDA2
+	if regIDB == "" {
+		t.Fatal("could not find B's RegistrationID in ControlServer conns")
 	}
+	t.Logf("B's RegistrationID: %q", regIDB)
 
-	t.Logf("A reg = %q, B reg = %q", regIDAMain, regIDBMain)
-
-	if regIDAMain == regIDBMain {
-		t.Fatalf("both clients got same RegistrationID %q", regIDAMain)
+	if regIDA == regIDB {
+		t.Fatalf("both clients got same RegistrationID %q", regIDA)
 	}
 
 	// ── B opens route 100 via the REAL ControlServer path ──
@@ -447,8 +440,8 @@ func TestA4_CrossRegistrationIsolation(t *testing.T) {
 	if !ok {
 		t.Fatal("B's route 100 vanished after Attack 1")
 	}
-	if regOwner != regIDBMain {
-		t.Errorf("Attack 1: route 100 owner changed to %q; want %q", regOwner, regIDBMain)
+	if regOwner != regIDB {
+		t.Errorf("Attack 1: route 100 owner changed to %q; want %q", regOwner, regIDB)
 	}
 
 	// ── Attack 2: A opens B's route with B's correct route credentials ──
@@ -468,8 +461,8 @@ func TestA4_CrossRegistrationIsolation(t *testing.T) {
 	if !ok {
 		t.Fatal("B's route 100 vanished after Attack 2")
 	}
-	if regOwner2 != regIDBMain {
-		t.Errorf("Attack 2: route 100 owner changed to %q; want %q", regOwner2, regIDBMain)
+	if regOwner2 != regIDB {
+		t.Errorf("Attack 2: route 100 owner changed to %q; want %q", regOwner2, regIDB)
 	}
 
 	// ── Attack 3: A closes B's route 100 ──
