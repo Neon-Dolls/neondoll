@@ -2,6 +2,8 @@ package relay
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"net"
 	"strings"
 	"testing"
@@ -135,7 +137,11 @@ func TestControlServer_RouteCredentials_CorrectCredential(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	svc, err := NewService(DefaultServiceConfig(), ClientConfig{})
+	svcCfg := DefaultServiceConfig()
+	// Set Relay credentials so registration passes.
+	hash := sha256.Sum256([]byte("test-token-1"))
+	svcCfg.Credentials = []string{hex.EncodeToString(hash[:])}
+	svc, err := NewService(svcCfg, ClientConfig{})
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
@@ -213,7 +219,11 @@ func TestControlServer_RouteCredentials_WrongCredential(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	svc, err := NewService(DefaultServiceConfig(), ClientConfig{})
+	svcCfg := DefaultServiceConfig()
+	// Set Relay credentials so registration passes.
+	hash := sha256.Sum256([]byte("test-token-2"))
+	svcCfg.Credentials = []string{hex.EncodeToString(hash[:])}
+	svc, err := NewService(svcCfg, ClientConfig{})
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}

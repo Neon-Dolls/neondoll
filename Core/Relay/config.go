@@ -1,6 +1,7 @@
 package relay
 
 import (
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"time"
@@ -49,6 +50,14 @@ type ServiceConfig struct {
 	// a registration is considered stale and removed. Zero means the default
 	// (300s).
 	RegistrationTimeout time.Duration `json:"registration_timeout,omitempty"`
+
+	// Credentials contains the set of authorized registration token verifiers.
+	// Each entry is a hex-encoded SHA-256 hash of an authorized registration
+	// token. The Relay verifies incoming Register.Token against these hashes
+	// before accepting a registration. When empty, all registration attempts
+	// are rejected (fail-closed). Credentials are separate from per-route
+	// RouteCredentials.
+	Credentials []string `json:"credentials,omitempty"`
 
 	// UDP configures the Relay UDP ingress path (per-route public endpoints).
 	// Zero-valued fields are filled with defaults.
@@ -142,8 +151,25 @@ func (c *ServiceConfig) Validate() error {
 	if c.RegistrationTimeout < c.KeepaliveInterval {
 		return errors.New("relay: RegistrationTimeout must be >= KeepaliveInterval")
 	}
+	// Validate credentials: each must be a 64-char hex-encoded SHA-256 hash.
+	if err := validateCredentials(c.Credentials); err != nil {
+		return err
+	}
 	if err := c.UDP.Validate(); err != nil {
 		return err
+	}
+	return nil
+}
+
+// validateCredentials checks each credential for valid hex format and length.
+func validateCredentials(creds []string) error {
+	for _, cred := range creds {
+		if len(cred) != 64 {
+			return fmt.Errorf("relay: credential %q is not a valid SHA-256 hash (expected 64 hex chars)", cred)
+		}
+		if _, err := hex.DecodeString(cred); err != nil {
+			return fmt.Errorf("relay: credential %q is not valid hex: %w", cred, err)
+		}
 	}
 	return nil
 }
