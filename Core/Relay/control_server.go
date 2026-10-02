@@ -218,8 +218,8 @@ func (cs *ControlServer) handleWS(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Register with the service's registry.
-	regID := RegistrationID(fmt.Sprintf("core-%x-%d", reg.Token, time.Now().UnixNano()))
-	if err := cs.svc.Registry().AddRegistration(regID, reg.Token); err != nil {
+	regID := MustGenerateRegistrationID()
+	if err := cs.svc.Registry().AddRegistration(regID); err != nil {
 		cs.sendError(wsConn, 0, ErrRateLimited, err.Error())
 		wsConn.Close()
 		return

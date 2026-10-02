@@ -23,7 +23,7 @@ func newUDPTestEnv(t *testing.T, routes map[RegistrationID][]RouteID, queueDepth
 	r := NewRegistry(100, 1000)
 	m := NewMetrics()
 	for regID, routeIDs := range routes {
-		if err := r.AddRegistration(regID, "hash-"+string(regID)); err != nil {
+		if err := r.AddRegistration(regID); err != nil {
 			t.Fatalf("AddRegistration(%s): %v", regID, err)
 		}
 		for _, rid := range routeIDs {
@@ -167,7 +167,7 @@ func TestUDPListener_PacketSizeLimit(t *testing.T) {
 	// Custom setup: MaxPacketSize = 64 for this test.
 	r := NewRegistry(100, 1000)
 	m := NewMetrics()
-	if err := r.AddRegistration("reg-a", "hash-reg-a"); err != nil {
+	if err := r.AddRegistration("reg-a"); err != nil {
 		t.Fatalf("AddRegistration: %v", err)
 	}
 	if _, err := r.AllocateRoute("reg-a", 1); err != nil {
@@ -470,7 +470,7 @@ func TestLiveness_ClosesStaleRouteEndpoint(t *testing.T) {
 
 	reg := svc.Registry()
 	regID := RegistrationID("test-reg")
-	if err := reg.AddRegistration(regID, "hash-test"); err != nil {
+	if err := reg.AddRegistration(regID); err != nil {
 		t.Fatalf("AddRegistration: %v", err)
 	}
 
@@ -550,7 +550,7 @@ func TestLiveness_RegistrationExpiryClosesAllRouteEndpoints(t *testing.T) {
 
 	reg := svc.Registry()
 	regID := RegistrationID("test-reg")
-	if err := reg.AddRegistration(regID, "hash-test"); err != nil {
+	if err := reg.AddRegistration(regID); err != nil {
 		t.Fatalf("AddRegistration: %v", err)
 	}
 
@@ -644,7 +644,7 @@ func TestLiveness_RouteAlreadyClosedNotExpired(t *testing.T) {
 
 	reg := svc.Registry()
 	regID := RegistrationID("test-reg")
-	if err := reg.AddRegistration(regID, "hash-test"); err != nil {
+	if err := reg.AddRegistration(regID); err != nil {
 		t.Fatalf("AddRegistration: %v", err)
 	}
 
