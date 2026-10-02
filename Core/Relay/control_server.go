@@ -47,7 +47,7 @@ type ControlServer struct {
 type coreWSConn struct {
 	conn   *websocket.Conn
 	regID  RegistrationID
-	mu     sync.Mutex // guards write on conn
+	mu     sync.Mutex // guards write on conn — shared with packetSink
 	routes map[RouteID]bool
 
 	ctx    context.Context
@@ -55,12 +55,24 @@ type coreWSConn struct {
 	done   chan struct{}
 }
 
+// reply serializes a control message text write on the WS connection.
+// The same mutex is shared with packetSink which writes binary frames.
+func (c *coreWSConn) reply(msg any) {
+	data, err := MarshalControl(msg)
+	if err != nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	_ = c.conn.WriteMessage(websocket.TextMessage, data)
+}
+
 // packetSink delivers UDP datagrams from the service back to the Core's
 // WS connection as binary frames. Registered via SetPacketSink so the
 // Service's UDPListener delivers received datagrams to this coreWSConn.
 type packetSink struct {
-	conn *websocket.Conn
-	mu   sync.Mutex // serialize writes on the WebSocket
+	conn    *websocket.Conn
+	writeMu *sync.Mutex // shared with coreWSConn.mu
 }
 
 func (s *packetSink) Deliver(routeID RouteID, payload []byte, source SourceEndpoint) {
@@ -72,8 +84,8 @@ func (s *packetSink) Deliver(routeID RouteID, payload []byte, source SourceEndpo
 	if err != nil {
 		return
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 	_ = s.conn.WriteMessage(websocket.BinaryMessage, frame)
 }
 
@@ -201,7 +213,7 @@ func (cs *ControlServer) handleWS(w http.ResponseWriter, r *http.Request) {
 
 	// Set the packet sink: UDP datagrams for this registration's routes
 	// will be delivered to the WS connection as binary frames.
-	cs.svc.SetPacketSink(regID, &packetSink{conn: core.conn})
+	cs.svc.SetPacketSink(regID, &packetSink{conn: core.conn, writeMu: &core.mu})
 
 	// Send Registered response.
 	resp, _ := MarshalControl(&Registered{
@@ -272,7 +284,7 @@ func (cs *ControlServer) handleWS(w http.ResponseWriter, r *http.Request) {
 			switch m := msg.(type) {
 			case *RouteOpen:
 				if err := ValidateControl(m); err != nil {
-					cs.sendReply(wsConn, &RelayError{
+					core.reply( &RelayError{
 						Type: CmdError, Code: ErrAuthFailed,
 						Message: err.Error(), RouteID: m.RouteID,
 					})
@@ -282,7 +294,7 @@ func (cs *ControlServer) handleWS(w http.ResponseWriter, r *http.Request) {
 				// Allocate UDP endpoint.
 				ep, err := cs.svc.UDP().Bind(m.RouteID)
 				if err != nil {
-					cs.sendReply(wsConn, &RelayError{
+					core.reply( &RelayError{
 						Type: CmdError, Code: ErrRouteLimit,
 						Message: err.Error(), RouteID: m.RouteID,
 					})
@@ -297,7 +309,7 @@ func (cs *ControlServer) handleWS(w http.ResponseWriter, r *http.Request) {
 				if _, err := cs.svc.Registry().AllocateRoute(regID, m.RouteID); err != nil {
 					if !errors.Is(err, ErrRouteAlreadyExists) {
 						_ = cs.svc.UDP().Close(m.RouteID)
-						cs.sendReply(wsConn, &RelayError{
+						core.reply( &RelayError{
 							Type: CmdError, Code: ErrInternal,
 							Message: err.Error(), RouteID: m.RouteID,
 						})
@@ -310,7 +322,7 @@ func (cs *ControlServer) handleWS(w http.ResponseWriter, r *http.Request) {
 					stored, lookupErr := cs.svc.Registry().RouteCredentialsFromEntry(m.RouteID)
 					if lookupErr != nil || m.Credentials.Token != stored.Token {
 						_ = cs.svc.UDP().Close(m.RouteID)
-						cs.sendReply(wsConn, &RelayError{
+						core.reply( &RelayError{
 							Type: CmdError, Code: ErrAuthFailed,
 							Message: "route credentials mismatch", RouteID: m.RouteID,
 						})
@@ -322,7 +334,7 @@ func (cs *ControlServer) handleWS(w http.ResponseWriter, r *http.Request) {
 				if _, err := cs.svc.Registry().OpenRoute(regID, m.RouteID); err != nil {
 					_ = cs.svc.UDP().Close(m.RouteID)
 					_, _ = cs.svc.Registry().CloseRoute(regID, m.RouteID)
-					cs.sendReply(wsConn, &RelayError{
+					core.reply( &RelayError{
 						Type: CmdError, Code: ErrInternal,
 						Message: err.Error(), RouteID: m.RouteID,
 					})
@@ -334,7 +346,7 @@ func (cs *ControlServer) handleWS(w http.ResponseWriter, r *http.Request) {
 
 				// Return the server-established credentials so the client learns them.
 				openedCreds, _ := cs.svc.Registry().RouteCredentialsFromEntry(m.RouteID)
-				cs.sendReply(wsConn, &RouteOpened{
+				core.reply( &RouteOpened{
 					Type:              CmdRouteOpened,
 					RouteID:           m.RouteID,
 					AllocatedEndpoint: string(ep),
@@ -346,14 +358,14 @@ func (cs *ControlServer) handleWS(w http.ResponseWriter, r *http.Request) {
 
 			case *RouteClose:
 				if err := ValidateControl(m); err != nil {
-					cs.sendReply(wsConn, &RelayError{
+					core.reply( &RelayError{
 						Type: CmdError, Code: ErrAuthFailed,
 						Message: err.Error(), RouteID: m.RouteID,
 					})
 					continue
 				}
 				if !core.routes[m.RouteID] {
-					cs.sendReply(wsConn, &RelayError{
+					core.reply( &RelayError{
 						Type: CmdError, Code: ErrNotFound,
 						Message: "route not owned by this registration",
 						RouteID: m.RouteID,
@@ -364,7 +376,7 @@ func (cs *ControlServer) handleWS(w http.ResponseWriter, r *http.Request) {
 				_, _ = cs.svc.Registry().CloseRoute(regID, m.RouteID)
 				delete(core.routes, m.RouteID)
 
-				cs.sendReply(wsConn, &RouteClosed{
+				core.reply( &RouteClosed{
 					Type:    CmdRouteClosed,
 					RouteID: m.RouteID,
 				})

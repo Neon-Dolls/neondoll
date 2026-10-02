@@ -53,8 +53,8 @@ func TestM2LocalBodyHasCapabilities(t *testing.T) {
 	if cap.ID != "runtime.info" {
 		t.Errorf("AC3: capability ID = %q, want %q", cap.ID, "runtime.info")
 	}
-	if len(cap.Operations) != 1 || cap.Operations[0] != "read" {
-		t.Errorf("AC3: capability Operations = %v, want [read]", cap.Operations)
+	if len(cap.Operations) != 2 || cap.Operations[0] != "read" || cap.Operations[1] != "list" {
+		t.Errorf("AC3: capability Operations = %v, want [read list]", cap.Operations)
 	}
 	if !cap.Available {
 		t.Error("AC3: capability Available = false, want true")
