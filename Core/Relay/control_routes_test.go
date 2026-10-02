@@ -322,9 +322,10 @@ func TestControlServer_RegistrationIDGenerationFailure(t *testing.T) {
 	addr := findFreePort(t)
 	cs := NewControlServer(svc, addr, nil)
 
-	// Smallest test seam: override generateRegID to simulate crypto/rand failure.
+	// Smallest test seam: override generateRegID to always return an error
+	// with a generic message (not leaking internal error details).
 	cs.generateRegID = func() (RegistrationID, error) {
-		return RegistrationID(""), fmt.Errorf("crypto/rand: simulated failure")
+		return RegistrationID(""), fmt.Errorf("registration ID generation failed")
 	}
 
 	csCtx, csCancel := context.WithCancel(ctx)
@@ -353,12 +354,15 @@ func TestControlServer_RegistrationIDGenerationFailure(t *testing.T) {
 	cfg.PingInterval = 30 * time.Second
 
 	client := NewControlClient(cfg)
+
+	// Start must fail because generateRegID fails on the server.
+	// NOTE: Do NOT call client.Shutdown() when Start fails — Shutdown
+	// blocks on <-c.done which the readLoop never signals on failure.
 	err = client.Start(ctx)
 	if err == nil {
 		client.Shutdown()
 		t.Fatal("client.Start should have failed (generateRegID simulated failure)")
 	}
-	defer client.Shutdown()
 
 	// Verify the error mentions registration or internal error.
 	if !strings.Contains(err.Error(), "registration") &&

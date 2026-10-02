@@ -225,7 +225,7 @@ func (cs *ControlServer) handleWS(w http.ResponseWriter, r *http.Request) {
 	// Register with the service's registry.
 	regID, err := cs.generateRegID()
 	if err != nil {
-		cs.sendError(wsConn, 0, ErrInternal, err.Error())
+		cs.sendError(wsConn, 0, ErrInternal, "registration ID generation failed")
 		wsConn.Close()
 		return
 	}
