@@ -33,7 +33,6 @@ import (
 type pairState struct {
 	mu    sync.Mutex
 	conns []*websocket.Conn
-	ready chan struct{}
 
 	// frameMu guards relay-side observation of forwarded frames.
 	frameMu sync.Mutex
@@ -53,6 +52,40 @@ func (ps *pairState) forwardedFrames() []*Frame {
 	out := make([]*Frame, len(ps.frames))
 	copy(out, ps.frames)
 	return out
+}
+
+// peerCount returns the number of registered peer connections.
+func (ps *pairState) peerCount() int {
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	return len(ps.conns)
+}
+
+// findPeer selects the first live connection that is not ours.
+// Returns nil when only one connection is registered.
+func (ps *pairState) findPeer(conn *websocket.Conn) *websocket.Conn {
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	for _, c := range ps.conns {
+		if c != conn {
+			return c
+		}
+	}
+	return nil
+}
+
+// removeConn removes the given connection from the registered set.
+// Called by each handler's defer when the WebSocket drops.
+func (ps *pairState) removeConn(conn *websocket.Conn) {
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	cleaned := make([]*websocket.Conn, 0, len(ps.conns))
+	for _, c := range ps.conns {
+		if c != conn {
+			cleaned = append(cleaned, c)
+		}
+	}
+	ps.conns = cleaned
 }
 
 // pairRelayHandler accepts up to two ControlClient connections, completes
@@ -88,34 +121,30 @@ func pairRelayHandler(t *testing.T, ps *pairState) http.HandlerFunc {
 			return
 		}
 
+		// Register this WS connection with the pair relay.
 		ps.mu.Lock()
-		first := len(ps.conns) == 0
 		ps.conns = append(ps.conns, conn)
-		if len(ps.conns) == 2 {
-			close(ps.ready)
-		}
 		ps.mu.Unlock()
 
-		if first {
-			// First client waits for the second to arrive before forwarding.
-			select {
-			case <-ps.ready:
-			case <-time.After(10 * time.Second):
-				return
-			}
-		}
+		// On exit, remove this connection from the pair relay's set.
+		// This prevents stale connections from being selected as the
+		// "peer" after a WebSocket reconnect creates a new handler.
+		defer ps.removeConn(conn)
 
-		ps.mu.Lock()
-		var peer *websocket.Conn
-		for _, c := range ps.conns {
-			if c != conn {
-				peer = c
+		// Wait for the peer to arrive (when len(ps.conns) >= 2).
+		// Uses polling instead of a channel signal to avoid the race
+		// between close(ch) and a concurrent select on <-ch that would
+		// leave the first handler permanently blocked until a 10s timeout.
+		peerDeadline := time.Now().Add(10 * time.Second)
+		for {
+			peer := ps.findPeer(conn)
+			if peer != nil {
 				break
 			}
-		}
-		ps.mu.Unlock()
-		if peer == nil {
-			return
+			if !time.Now().Before(peerDeadline) {
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
 		}
 
 		// Forward binary frames to the peer; record for assertions.
@@ -130,8 +159,10 @@ func pairRelayHandler(t *testing.T, ps *pairState) http.HandlerFunc {
 			if f, ferr := UnmarshalFrame(raw); ferr == nil {
 				ps.record(f)
 			}
-			if err := peer.WriteMessage(websocket.BinaryMessage, raw); err != nil {
-				return
+			if peer := ps.findPeer(conn); peer != nil {
+				if err := peer.WriteMessage(websocket.BinaryMessage, raw); err != nil {
+					return
+				}
 			}
 		}
 	}
@@ -139,7 +170,7 @@ func pairRelayHandler(t *testing.T, ps *pairState) http.HandlerFunc {
 
 func startPairedRelay(t *testing.T) (*pairState, string) {
 	t.Helper()
-	ps := &pairState{ready: make(chan struct{})}
+	ps := &pairState{}
 	srv, url := startFakeRelay(t, pairRelayHandler(t, ps))
 	t.Cleanup(srv.Close)
 	return ps, url
@@ -209,6 +240,7 @@ func startWgDevice(t *testing.T, tr *RelayTransport, keys testKeypair, overlay n
 
 // waitHandshake polls the device until at least one peer reports a completed
 // handshake (last_handshake_time_nsec != 0), or the timeout expires.
+// On timeout it dumps WG device state for diagnosis.
 func waitHandshake(t *testing.T, dev *device.Device, label string, timeout time.Duration) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
@@ -227,7 +259,43 @@ func waitHandshake(t *testing.T, dev *device.Device, label string, timeout time.
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	t.Fatalf("[%s] handshake did not complete within %v", label, timeout)
+	// Dump device state for diagnosis.
+	ipc, _ := dev.IpcGet()
+	t.Fatalf("[%s] handshake did not complete within %v; device state:\n%s",
+		label, timeout, trimLines(ipc))
+}
+
+// trimLines returns s with trailing whitespace stripped from each line
+// and empty trailing lines removed, capped at 40 lines.
+func trimLines(s string) string {
+	lines := strings.Split(s, "\n")
+	limit := 40
+	if len(lines) > limit {
+		lines = append(lines[:limit], "...")
+	}
+	for i, l := range lines {
+		lines[i] = strings.TrimRight(l, " 	\r")
+	}
+	for len(lines) > 0 && lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1]
+	}
+	return strings.Join(lines, "\n")
+}
+
+// waitAllPeers polls the pairState until both relay handler goroutines
+// have registered their WebSocket connections, confirming the forwarding
+// path is established before any WG device starts sending.
+func waitAllPeers(t *testing.T, ps *pairState) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if ps.peerCount() >= 2 {
+			// Both handlers registered — forwarding path ready.
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("relay: only %d peer(s) registered (want 2)", ps.peerCount())
 }
 
 // ── the integration proof ────────────────────────────────────────────────────
@@ -271,6 +339,10 @@ func TestRelayTransport_RealWireGuardHandshakeAndTraffic(t *testing.T) {
 		t.Fatalf("B Open(): %v", err)
 	}
 
+	// Wait until both relay handler goroutines have registered and entered
+	// the forwarding loop, before creating a WG device that sends frames.
+	waitAllPeers(t, ps)
+
 	// Real WG devices: A is fd00::1, B is fd00::2. Each routes to the other
 	// over a distinct relay route (relay:1 and relay:2).
 	keysA := newTestKeypair(t)
@@ -279,8 +351,10 @@ func TestRelayTransport_RealWireGuardHandshakeAndTraffic(t *testing.T) {
 	devB, netB := startWgDevice(t, trB, keysB, netip.MustParseAddr("fd00::2"), keysA.pubHex, "relay:2", "fd00::1/128")
 
 	// Real WG handshake must complete through the Relay-backed binds.
-	waitHandshake(t, devA, "A", 20*time.Second)
-	waitHandshake(t, devB, "B", 20*time.Second)
+	// Use a 25s timeout (3 retries * 5s + 10s headroom) instead of the
+	// earlier 20s to provide margin for a REKEY_TIMEOUT boundary crossing.
+	waitHandshake(t, devA, "A", 25*time.Second)
+	waitHandshake(t, devB, "B", 25*time.Second)
 
 	// Prove encrypted traffic flows end-to-end: a UDP datagram written into
 	// A's netstack must arrive at B's netstack, having been encrypted by the
