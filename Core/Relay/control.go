@@ -44,6 +44,10 @@ func UnmarshalControl(data []byte) (any, error) {
 		msg = &RouteClosed{}
 	case CmdError:
 		msg = &RelayError{}
+	case CmdBodyAttach:
+		msg = &BodyAttach{}
+	case CmdBodyAttached:
+		msg = &BodyAttached{}
 	default:
 		return nil, fmt.Errorf("relay: unknown control message type: %q", h.Type)
 	}
@@ -90,6 +94,23 @@ func ValidateControl(v any) error {
 	case *RelayError:
 		if m.Code == "" {
 			return fmt.Errorf("relay: RelayError.code is required")
+		}
+	case *BodyAttach:
+		if m.Version != ProtocolVersion {
+			return fmt.Errorf("relay: BodyAttach.version must be %d", ProtocolVersion)
+		}
+		if m.RouteID == 0 {
+			return fmt.Errorf("relay: BodyAttach.route_id is required")
+		}
+		if m.Credential == "" {
+			return fmt.Errorf("relay: BodyAttach.credential is required")
+		}
+	case *BodyAttached:
+		if m.Version != ProtocolVersion {
+			return fmt.Errorf("relay: BodyAttached.version must be %d", ProtocolVersion)
+		}
+		if m.RouteID == 0 {
+			return fmt.Errorf("relay: BodyAttached.route_id is required")
 		}
 	default:
 		return fmt.Errorf("relay: unknown control message type %T", v)

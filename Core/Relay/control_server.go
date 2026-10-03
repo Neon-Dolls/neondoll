@@ -44,6 +44,7 @@ type ControlServer struct {
 
 	mu    sync.RWMutex
 	conns map[RegistrationID]*coreWSConn
+	body  map[RouteID]*bodyWSConn
 
 	// generateRegID creates RegistrationIDs. Default uses crypto/rand
 	// (GenerateRegistrationID). Overridable in tests to simulate failure.
@@ -60,6 +61,14 @@ type coreWSConn struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 	done   chan struct{}
+}
+
+// bodyWSConn tracks one Body's WebSocket attachment to a route.
+// The connection is tracked per-route; at most one bodyWSConn exists per
+// route at any time. Replacement is deterministic (last-wins).
+type bodyWSConn struct {
+	conn    *websocket.Conn
+	routeID RouteID
 }
 
 // reply serializes a control message text write on the WS connection.
@@ -105,11 +114,12 @@ func NewControlServer(svc *Service, addr string, log *slog.Logger) *ControlServe
 		log = slog.Default()
 	}
 	cs := &ControlServer{
-		svc:           svc,
-		addr:          addr,
-		log:           log.With("component", "relay.control_server"),
-		conns:         make(map[RegistrationID]*coreWSConn),
-		generateRegID: func() (RegistrationID, error) { return GenerateRegistrationID() },
+			svc:           svc,
+			addr:          addr,
+			log:           slog.Default().With("component", "relay.control_server"),
+			conns:         make(map[RegistrationID]*coreWSConn),
+			body:          make(map[RouteID]*bodyWSConn),
+			generateRegID: func() (RegistrationID, error) { return GenerateRegistrationID() },
 	}
 	return cs
 }
@@ -118,6 +128,7 @@ func NewControlServer(svc *Service, addr string, log *slog.Logger) *ControlServe
 func (cs *ControlServer) Start(ctx context.Context) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/relay", cs.handleWS)
+	mux.HandleFunc("/body", cs.handleBodyWS)
 
 	cs.server = &http.Server{
 		Addr:    cs.addr,
@@ -445,4 +456,128 @@ func (cs *ControlServer) sendError(wsConn *websocket.Conn, routeID RouteID, code
 		Type: CmdError, Code: code,
 		Message: message, RouteID: routeID,
 	})
+}
+
+// ── Body WSS Attachment ───────────────────────────────────────────────
+//
+// handleBodyWS accepts an inbound WebSocket from a Body and processes
+// the mandatory "attach" message to authenticate and bind the connection
+// to an existing open Relay route.
+
+func (cs *ControlServer) handleBodyWS(w http.ResponseWriter, r *http.Request) {
+	upgrader := websocket.Upgrader{
+		CheckOrigin: func(*http.Request) bool { return true },
+	}
+	bodyConn, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		cs.log.Debug("control_server: body WS upgrade failed", "error", err)
+		return
+	}
+
+	// Expect a single BodyAttach message as the first message.
+	_, raw, err := bodyConn.ReadMessage()
+	if err != nil {
+		cs.sendError(bodyConn, 0, ErrAuthFailed, "route authentication failed")
+		bodyConn.Close()
+		return
+	}
+	msg, err := UnmarshalControl(raw)
+	if err != nil {
+		cs.sendError(bodyConn, 0, ErrAuthFailed, "route authentication failed")
+		bodyConn.Close()
+		return
+	}
+	attach, ok := msg.(*BodyAttach)
+	if !ok {
+		cs.sendError(bodyConn, 0, ErrAuthFailed, "route authentication failed")
+		bodyConn.Close()
+		return
+	}
+
+	// Validate required fields. All failures produce the same generic
+	// "route authentication failed" error to avoid route enumeration.
+	if attach.Version != ProtocolVersion {
+		cs.sendError(bodyConn, 0, ErrAuthFailed, "route authentication failed")
+		bodyConn.Close()
+		return
+	}
+	if attach.RouteID == 0 {
+		cs.sendError(bodyConn, 0, ErrAuthFailed, "route authentication failed")
+		bodyConn.Close()
+		return
+	}
+	if attach.Credential == "" {
+		cs.sendError(bodyConn, 0, ErrAuthFailed, "route authentication failed")
+		bodyConn.Close()
+		return
+	}
+
+	// Verify route exists and is open.
+	routeEntry, found := cs.svc.Registry().Route(attach.RouteID)
+	if !found {
+		cs.sendError(bodyConn, 0, ErrAuthFailed, "route authentication failed")
+		bodyConn.Close()
+		return
+	}
+	if routeEntry.State != RouteStateOpen {
+		cs.sendError(bodyConn, 0, ErrAuthFailed, "route authentication failed")
+		bodyConn.Close()
+		return
+	}
+
+	// Verify credential matches the route's stored credential.
+	stored, credErr := cs.svc.Registry().RouteCredentialsFromEntry(attach.RouteID)
+	if credErr != nil {
+		cs.sendError(bodyConn, 0, ErrAuthFailed, "route authentication failed")
+		bodyConn.Close()
+		return
+	}
+	if attach.Credential != stored.Token {
+		cs.sendError(bodyConn, 0, ErrAuthFailed, "route authentication failed")
+		bodyConn.Close()
+		return
+	}
+
+	// ── All checks passed; this Body is now attached to the route ──
+
+	cs.mu.Lock()
+	// Replacement: close the previous body attachment for this route, if any.
+	if existing := cs.body[attach.RouteID]; existing != nil {
+		existing.conn.Close()
+	}
+	bwc := &bodyWSConn{conn: bodyConn, routeID: attach.RouteID}
+	cs.body[attach.RouteID] = bwc
+	cs.mu.Unlock()
+
+	// Send success response.
+	resp, _ := MarshalControl(&BodyAttached{
+		Version: ProtocolVersion,
+		Type:    CmdBodyAttached,
+		RouteID: attach.RouteID,
+	})
+	_ = bodyConn.WriteMessage(websocket.TextMessage, resp)
+
+	// Read loop: drain messages until disconnect. M5.1 does not forward
+	// binary data — only authentication and lifecycle.
+	go func() {
+		defer func() {
+			cs.mu.Lock()
+			// Only clean up if this bodyWSConn is still the current
+			// attachment (pointer identity guards against a replacement
+			// that already set a new bodyWSConn for this route).
+			if cs.body[attach.RouteID] == bwc {
+				delete(cs.body, attach.RouteID)
+			}
+			cs.mu.Unlock()
+			_ = bodyConn.Close()
+		}()
+
+		for {
+			_, _, err := bodyConn.ReadMessage()
+			if err != nil {
+				return
+			}
+			// M5.1: no traffic forwarding; drain until disconnect.
+		}
+	}()
 }

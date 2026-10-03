@@ -29,6 +29,8 @@ const (
 	CmdRouteClose  ControlMessageType = "route_close"
 	CmdRouteClosed ControlMessageType = "route_closed"
 	CmdError       ControlMessageType = "error"
+	CmdBodyAttach  ControlMessageType = "attach"
+	CmdBodyAttached ControlMessageType = "attached"
 )
 
 // Register is sent by Core to authenticate with the Relay.
@@ -68,6 +70,25 @@ type RouteOpened struct {
 	RouteID           RouteID            `json:"route_id"`
 	AllocatedEndpoint string             `json:"endpoint"`
 	Credentials       RouteCredentials   `json:"credentials"`
+}
+
+// BodyAttach is sent by a Body to attach to an existing open Relay route.
+// The credential must match the route's independently established credential.
+// RouteID is routing topology, not authentication.
+type BodyAttach struct {
+	Version    uint8              `json:"version"`
+	Type       ControlMessageType `json:"type"`
+	RouteID    RouteID            `json:"route_id"`
+	Credential string             `json:"credential"`
+}
+
+// BodyAttached confirms that a Body has been authenticated and attached to
+// a route, and may henceforth exchange opaque packet traffic with this route.
+// It does NOT establish or imply Body identity, pairing, or Doll authority.
+type BodyAttached struct {
+	Version uint8              `json:"version"`
+	Type    ControlMessageType `json:"type"`
+	RouteID RouteID            `json:"route_id"`
 }
 
 // RouteClose requests closing a relay route.
