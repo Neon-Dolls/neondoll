@@ -18,6 +18,7 @@ import (
 	"net"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -66,9 +67,16 @@ type coreWSConn struct {
 // bodyWSConn tracks one Body's WebSocket attachment to a route.
 // The connection is tracked per-route; at most one bodyWSConn exists per
 // route at any time. Replacement is deterministic (last-wins).
+// Inbox is a bounded channel for Core→Body packets; a dedicated goroutine
+// drains it and writes to the WebSocket, serialized via writeMu.
 type bodyWSConn struct {
-	conn    *websocket.Conn
-	routeID RouteID
+	conn      *websocket.Conn
+	routeID   RouteID
+	writeMu   sync.Mutex
+	inbox     chan []byte
+	dropCount atomic.Int64
+	ctx       context.Context
+	cancel    context.CancelFunc
 }
 
 // reply serializes a control message text write on the WS connection.
@@ -326,6 +334,23 @@ func (cs *ControlServer) handleWS(w http.ResponseWriter, r *http.Request) {
 				if err := cs.svc.UDP().SendTo(frame.RouteID, frame.Payload); err != nil {
 					cs.log.Debug("control_server: sendto udp", "route_id", frame.RouteID, "error", err)
 				}
+
+				// Also enqueue for the Body WSS attachment, if any.
+				// Non-blocking send to a bounded channel; drops if full
+				// (backpressure without blocking other routes).
+				cs.mu.RLock()
+				bodyConn, hasBody := cs.body[frame.RouteID]
+				cs.mu.RUnlock()
+				if hasBody {
+					select {
+					case bodyConn.inbox <- frame.Payload:
+						// enqueued for body wss delivery
+					default:
+						bodyConn.dropCount.Add(1)
+						cs.log.Debug("control_server: body wss queue full, dropping packet",
+							"route_id", frame.RouteID)
+					}
+				}
 				continue
 			}
 
@@ -468,9 +493,89 @@ func (cs *ControlServer) detachBody(routeID RouteID) {
 	cs.mu.Lock()
 	if bwc := cs.body[routeID]; bwc != nil {
 		delete(cs.body, routeID)
+		bwc.cancel()
 		bwc.conn.Close()
 	}
 	cs.mu.Unlock()
+}
+
+// ── Body WSS: Inbox drain and frame handling ───────────────────────
+
+// drainInbox is a goroutine that drains the Core→Body packet channel
+// and writes binary frames to the Body WebSocket. writeMu serializes
+// both control responses and binary writes to the same connection,
+// satisfying Gorilla WebSocket's single-writer requirement.
+func (bw *bodyWSConn) drainInbox() {
+	for {
+		select {
+		case <-bw.ctx.Done():
+			return
+		case payload := <-bw.inbox:
+			bw.writeMu.Lock()
+			_ = bw.conn.WriteMessage(websocket.BinaryMessage, payload)
+			bw.writeMu.Unlock()
+		}
+	}
+}
+
+// handleBodyFrame validates a binary frame from a Body WebSocket and
+// forwards the opaque payload to the owning Core registration's packet
+// sink if validation passes. Invalid or unauthorized frames are silently
+// dropped with a warning log; no malformed frame reaches the Core sink.
+func (cs *ControlServer) handleBodyFrame(bwc *bodyWSConn, raw []byte) {
+	frame, err := UnmarshalFrame(raw)
+	if err != nil {
+		cs.log.Warn("body wss: unmarshal frame failed", "route", bwc.routeID, "err", err)
+		return
+	}
+	if frame.Version != ProtocolVersion {
+		cs.log.Warn("body wss: bad frame version", "route", bwc.routeID, "version", frame.Version)
+		return
+	}
+	if frame.RouteID == 0 || frame.RouteID > MaxRouteID {
+		cs.log.Warn("body wss: invalid route ID in frame", "route", bwc.routeID, "frame_route", frame.RouteID)
+		return
+	}
+	if frame.RouteID != bwc.routeID {
+		cs.log.Warn("body wss: frame RouteID mismatch", "auth_route", bwc.routeID, "frame_route", frame.RouteID)
+		return
+	}
+	if len(frame.Payload) == 0 {
+		cs.log.Warn("body wss: zero-length packet", "route", bwc.routeID)
+		return
+	}
+
+	// Route must still exist and be owned by a registration.
+	regID, ok := cs.svc.Registry().RouteRegistration(frame.RouteID)
+	if !ok {
+		cs.log.Warn("body wss: route not in registry", "route", frame.RouteID)
+		return
+	}
+
+	// Look up the Core connection and write the payload as a binary
+	// frame. We marshal the frame directly rather than going through
+	// the packetSink interface, because the sink lives inside the UDP
+	// listener and isn't exposed for direct invocation.
+	cs.mu.RLock()
+	coreConn, hasCore := cs.conns[regID]
+	cs.mu.RUnlock()
+	if !hasCore {
+		cs.log.Warn("body wss: no core registration for route", "route", frame.RouteID)
+		return
+	}
+
+	out, err := MarshalFrame(&Frame{
+		Version: ProtocolVersion,
+		RouteID: frame.RouteID,
+		Payload: frame.Payload,
+	})
+	if err != nil {
+		cs.log.Warn("body wss: marshal frame for core", "route", frame.RouteID, "err", err)
+		return
+	}
+	coreConn.mu.Lock()
+	_ = coreConn.conn.WriteMessage(websocket.BinaryMessage, out)
+	coreConn.mu.Unlock()
 }
 
 // ── Body WSS Attachment ───────────────────────────────────────────────
@@ -555,12 +660,29 @@ func (cs *ControlServer) handleBodyWS(w http.ResponseWriter, r *http.Request) {
 
 	// ── All checks passed; this Body is now attached to the route ──
 
+	maxDepth := cs.svc.Config().MaxBodyQueueDepth
+	bd := maxDepth
+	if bd == 0 {
+		bd = defaultBodyMaxQueueDepth
+	}
+	bwcCtx, bwcCancel := context.WithCancel(context.Background())
+
+	bwc := &bodyWSConn{
+		conn:      bodyConn,
+		routeID:   attach.RouteID,
+		writeMu:   sync.Mutex{},
+		inbox:     make(chan []byte, bd),
+		dropCount: atomic.Int64{},
+		ctx:       bwcCtx,
+		cancel:    bwcCancel,
+	}
+
 	cs.mu.Lock()
-	// Replacement: close the previous body attachment for this route, if any.
+	// Replacement: cancel any previous body attachment for this route.
 	if existing := cs.body[attach.RouteID]; existing != nil {
+		existing.cancel()
 		existing.conn.Close()
 	}
-	bwc := &bodyWSConn{conn: bodyConn, routeID: attach.RouteID}
 	cs.body[attach.RouteID] = bwc
 	cs.mu.Unlock()
 
@@ -572,8 +694,14 @@ func (cs *ControlServer) handleBodyWS(w http.ResponseWriter, r *http.Request) {
 	})
 	_ = bodyConn.WriteMessage(websocket.TextMessage, resp)
 
-	// Read loop: drain messages until disconnect. M5.1 does not forward
-	// binary data — only authentication and lifecycle.
+	// ── Inbox-draining goroutine (Core→Body) ────────────────
+	// Drains the bounded channel and writes binary packets to the
+	// Body WebSocket, serialized via writeMu.
+	go bwc.drainInbox()
+
+	// ── Read loop (Body→Core) ────────────────────────────────
+	// Reads binary frames from the Body, validates them, and
+	// forwards the opaque payload to the owning Core's packet sink.
 	go func() {
 		defer func() {
 			cs.mu.Lock()
@@ -584,15 +712,21 @@ func (cs *ControlServer) handleBodyWS(w http.ResponseWriter, r *http.Request) {
 				delete(cs.body, attach.RouteID)
 			}
 			cs.mu.Unlock()
+			bwc.cancel()
 			_ = bodyConn.Close()
 		}()
 
 		for {
-			_, _, err := bodyConn.ReadMessage()
+			msgType, raw, err := bodyConn.ReadMessage()
 			if err != nil {
 				return
 			}
-			// M5.1: no traffic forwarding; drain until disconnect.
+
+			if msgType == websocket.BinaryMessage {
+				cs.handleBodyFrame(bwc, raw)
+			}
+			// Text messages after auth are protocol violations; ignore.
+			// Ping/pong handled by Gorilla WebSocket automatically.
 		}
 	}()
 }

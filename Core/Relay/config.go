@@ -25,6 +25,8 @@ const (
 
 	defaultUDPListenAddress = "0.0.0.0"
 	defaultUDPMaxQueueDepth = 256
+
+	defaultBodyMaxQueueDepth = 256
 )
 
 // ServiceConfig configures the Relay service behaviour.
@@ -62,6 +64,12 @@ type ServiceConfig struct {
 	// UDP configures the Relay UDP ingress path (per-route public endpoints).
 	// Zero-valued fields are filled with defaults.
 	UDP UDPConfig `json:"udp,omitempty"`
+
+	// MaxBodyQueueDepth limits the per-connection body WSS packet buffer,
+	// in packets. When a body's inbound (Core→Body) packet queue is full,
+	// additional packets are dropped and counted. Zero means the default
+	// (256).
+	MaxBodyQueueDepth int `json:"max_body_queue_depth,omitempty"`
 }
 
 // UDPConfig configures the Relay UDP ingress path. Each open relay route
@@ -98,6 +106,7 @@ func DefaultServiceConfig() ServiceConfig {
 		KeepaliveInterval:   defaultKeepaliveInterval,
 		RouteTimeout:        defaultRouteTimeout,
 		RegistrationTimeout: defaultRegistrationTimeout,
+		MaxBodyQueueDepth:   defaultBodyMaxQueueDepth,
 	}
 	cfg.UDP.ApplyDefaults()
 	return cfg
@@ -157,6 +166,9 @@ func (c *ServiceConfig) Validate() error {
 	}
 	if err := c.UDP.Validate(); err != nil {
 		return err
+	}
+	if c.MaxBodyQueueDepth < 0 {
+		return errors.New("relay: MaxBodyQueueDepth must not be negative")
 	}
 	return nil
 }
