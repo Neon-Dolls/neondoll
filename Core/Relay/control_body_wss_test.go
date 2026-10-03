@@ -1159,7 +1159,7 @@ func TestBodyPacket_CoreToBodyArrives(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
-	ctx, _ := context.WithCancel(context.Background())
+	ctx := context.Background()
 	svc.Start(ctx)
 	defer func() {
 		sc, scCancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -1244,7 +1244,7 @@ func TestBodyPacket_CoreToBodyMultipleInOrder(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
-	ctx, _ := context.WithCancel(context.Background())
+	ctx := context.Background()
 	svc.Start(ctx)
 	defer func() {
 		sc, scCancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -1331,7 +1331,7 @@ func TestBodyPacket_CoreToBodyNoBodySilent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
-	ctx, _ := context.WithCancel(context.Background())
+	ctx := context.Background()
 	svc.Start(ctx)
 	defer func() {
 		sc, scCancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -1390,7 +1390,7 @@ func TestBodyPacket_CoreToBodyAfterDetach(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
-	ctx, _ := context.WithCancel(context.Background())
+	ctx := context.Background()
 	svc.Start(ctx)
 	defer func() {
 		sc, scCancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -1472,7 +1472,7 @@ func TestBodyPacket_CoreToBodyQueueDrops(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
-	ctx, _ := context.WithCancel(context.Background())
+	ctx := context.Background()
 	svc.Start(ctx)
 	defer func() {
 		sc, scCancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -1571,7 +1571,7 @@ func TestBodyPacket_BodyToCoreArrives(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
-	ctx, _ := context.WithCancel(context.Background())
+	ctx := context.Background()
 	svc.Start(ctx)
 	defer func() {
 		sc, scCancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -1660,7 +1660,7 @@ func TestBodyPacket_BodyToCoreWrongRoute(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
-	ctx, _ := context.WithCancel(context.Background())
+	ctx := context.Background()
 	svc.Start(ctx)
 	defer func() {
 		sc, scCancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -1752,7 +1752,7 @@ func TestBodyPacket_BodyToCoreBadVersion(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
-	ctx, _ := context.WithCancel(context.Background())
+	ctx := context.Background()
 	svc.Start(ctx)
 	defer func() {
 		sc, scCancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -1838,7 +1838,7 @@ func TestBodyPacket_BodyToCoreEmptyPayload(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
-	ctx, _ := context.WithCancel(context.Background())
+	ctx := context.Background()
 	svc.Start(ctx)
 	defer func() {
 		sc, scCancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -1922,7 +1922,7 @@ func TestBodyPacket_BodyToCoreNoCore(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
-	ctx, _ := context.WithCancel(context.Background())
+	ctx := context.Background()
 	svc.Start(ctx)
 	defer func() {
 		sc, scCancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -1976,7 +1976,7 @@ func TestBodyPacket_BodyToCoreMultipleInOrder(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
-	ctx, _ := context.WithCancel(context.Background())
+	ctx := context.Background()
 	svc.Start(ctx)
 	defer func() {
 		sc, scCancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -2067,7 +2067,7 @@ func TestBodyPacket_BodyToCoreAfterRouteClose(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
-	ctx, _ := context.WithCancel(context.Background())
+	ctx := context.Background()
 	svc.Start(ctx)
 	defer func() {
 		sc, scCancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -2149,7 +2149,7 @@ func TestBodyPacket_MaxQueueDepthConfig(t *testing.T) {
 		t.Fatalf("MaxBodyQueueDepth = %d; want 4", cfg.MaxBodyQueueDepth)
 	}
 
-	ctx, _ := context.WithCancel(context.Background())
+	ctx := context.Background()
 	svc.Start(ctx)
 	defer func() {
 		sc, scCancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -2248,7 +2248,7 @@ func TestBodyPacket_ZeroMaxQueueDepthUsesDefault(t *testing.T) {
 		t.Fatalf("MaxBodyQueueDepth = %d; want 0", cfg.MaxBodyQueueDepth)
 	}
 
-	ctx, _ := context.WithCancel(context.Background())
+	ctx := context.Background()
 	svc.Start(ctx)
 	defer func() {
 		sc, scCancel := context.WithTimeout(context.Background(), 5*time.Second)
