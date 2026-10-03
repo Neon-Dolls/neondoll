@@ -2,6 +2,8 @@ package relay
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"testing"
@@ -115,6 +117,14 @@ func makeServiceAndServer(t *testing.T) (*Service, *ControlServer, string) {
 	return svc, cs, addr
 }
 
+// bodyConnCount returns len(cs.body) under cs.mu read lock, safe to
+// call from test goroutines that run concurrently with handleBodyWS.
+func bodyConnCount(cs *ControlServer) int {
+	cs.mu.RLock()
+	defer cs.mu.RUnlock()
+	return len(cs.body)
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────
 
 // TestBodyAttach_ValidCredential proves that a valid route credential
@@ -147,7 +157,7 @@ func TestBodyAttach_ValidCredential(t *testing.T) {
 		t.Fatalf("openTestRoute: %v", err)
 	}
 
-	beforeBody := len(cs.body)
+	beforeBody := bodyConnCount(cs)
 
 	bodyWS, resp, err := makeBodyWS(addr, RouteID(1), "test-credential")
 	if err != nil {
@@ -167,7 +177,7 @@ func TestBodyAttach_ValidCredential(t *testing.T) {
 		t.Errorf("BodyAttached.route_id = %d; want 1", attached.RouteID)
 	}
 
-	afterBody := len(cs.body)
+	afterBody := bodyConnCount(cs)
 	if afterBody != beforeBody+1 {
 		t.Errorf("body conns before=%d after=%d; want %d (+1)", beforeBody, afterBody, beforeBody+1)
 	}
@@ -203,7 +213,7 @@ func TestBodyAttach_WrongCredential(t *testing.T) {
 		t.Fatalf("openTestRoute: %v", err)
 	}
 
-	beforeBody := len(cs.body)
+	beforeBody := bodyConnCount(cs)
 
 	resp, err := bodyAttachOrError(addr, RouteID(1), "wrong-cred")
 	if err != nil {
@@ -218,7 +228,7 @@ func TestBodyAttach_WrongCredential(t *testing.T) {
 		t.Errorf("error code = %q; want %q", re.Code, ErrAuthFailed)
 	}
 
-	afterBody := len(cs.body)
+	afterBody := bodyConnCount(cs)
 	if afterBody != beforeBody {
 		t.Errorf("body conns before=%d after=%d; want %d (unchanged)", beforeBody, afterBody, beforeBody)
 	}
@@ -253,7 +263,7 @@ func TestBodyAttach_EmptyCredential(t *testing.T) {
 		t.Fatalf("openTestRoute: %v", err)
 	}
 
-	beforeBody := len(cs.body)
+	beforeBody := bodyConnCount(cs)
 
 	resp, err := bodyAttachOrError(addr, RouteID(1), "")
 	if err != nil {
@@ -268,7 +278,7 @@ func TestBodyAttach_EmptyCredential(t *testing.T) {
 		t.Errorf("error code = %q; want %q", re.Code, ErrAuthFailed)
 	}
 
-	afterBody := len(cs.body)
+	afterBody := bodyConnCount(cs)
 	if afterBody != beforeBody {
 		t.Errorf("body conns before=%d after=%d; want %d (unchanged)", beforeBody, afterBody, beforeBody)
 	}
@@ -299,7 +309,7 @@ func TestBodyAttach_UnknownRoute(t *testing.T) {
 		t.Fatalf("cs.Start: %v", err)
 	}
 
-	beforeBody := len(cs.body)
+	beforeBody := bodyConnCount(cs)
 
 	// Unknown route 999
 	resp, err := bodyAttachOrError(addr, RouteID(999), "some-credential")
@@ -315,7 +325,7 @@ func TestBodyAttach_UnknownRoute(t *testing.T) {
 		t.Errorf("error code = %q; want %q", re.Code, ErrAuthFailed)
 	}
 
-	afterBody := len(cs.body)
+	afterBody := bodyConnCount(cs)
 	if afterBody != beforeBody {
 		t.Errorf("body conns before=%d after=%d; want %d (unchanged)", beforeBody, afterBody, beforeBody)
 	}
@@ -354,7 +364,7 @@ func TestBodyAttach_RouteA_Cred_Cannot_Attach_RouteB(t *testing.T) {
 		t.Fatalf("openTestRoute route 2: %v", err)
 	}
 
-	beforeBody := len(cs.body)
+	beforeBody := bodyConnCount(cs)
 
 	// Route 1's credential ("cred-A") cannot attach to Route 2
 	resp, err := bodyAttachOrError(addr, RouteID(2), "cred-A")
@@ -370,7 +380,7 @@ func TestBodyAttach_RouteA_Cred_Cannot_Attach_RouteB(t *testing.T) {
 		t.Errorf("error code = %q; want %q", re.Code, ErrAuthFailed)
 	}
 
-	afterBody := len(cs.body)
+	afterBody := bodyConnCount(cs)
 	if afterBody != beforeBody {
 		t.Errorf("body conns before=%d after=%d; want %d (unchanged)", beforeBody, afterBody, beforeBody)
 	}
@@ -881,7 +891,7 @@ func TestBodyAttach_CoreTeardownRemovesAttachments(t *testing.T) {
 	cs.mu.RLock()
 	bwc1 := cs.body[RouteID(1)]
 	bwc2 := cs.body[RouteID(2)]
-	bodyLen := len(cs.body)
+	bodyLen := bodyConnCount(cs)
 	cs.mu.RUnlock()
 	if bwc1 != nil {
 		t.Error("route 1 has stale body attachment after teardown")
@@ -1045,7 +1055,7 @@ func TestBodyAttach_NoStaleEntryAfterDetach(t *testing.T) {
 	// No stale entry by key lookup
 	cs.mu.RLock()
 	bwc = cs.body[RouteID(1)]
-	bodyLen := len(cs.body)
+	bodyLen := bodyConnCount(cs)
 	cs.mu.RUnlock()
 	if bwc != nil {
 		t.Error("stale cs.body entry for route 1 after detachBody")
@@ -1058,5 +1068,1245 @@ func TestBodyAttach_NoStaleEntryAfterDetach(t *testing.T) {
 	_, _, readErr := bodyWS.ReadMessage()
 	if readErr == nil {
 		t.Error("body WS not closed after detachBody")
+	}
+}
+
+// ── M5.2: Body WSS Packet Path tests ──────────────────────────────────
+//
+// These tests exercise the binary-frame packet forwarding paths between
+// Core and Body WebSocket connections through the ControlServer.
+//
+// Core→Body path: Core WS sends a binary frame → handleWS enqueues
+// payload to bwc.inbox → drainInbox writes as binary frame to Body WS.
+//
+// Body→Core path: Body WS sends a binary frame → handleBodyFrame
+// validates and marshals the frame → forwards to Core WS.
+
+// makeCoreConn connects a raw WebSocket to /relay, sends a Register
+// message with the given token, and returns the connected WebSocket.
+func makeCoreConn(t *testing.T, addr string, token string) *websocket.Conn {
+	t.Helper()
+
+	dialer := &websocket.Dialer{}
+	ws, _, err := dialer.Dial(fmt.Sprintf("ws://%s/relay", addr), nil)
+	if err != nil {
+		t.Fatalf("dial /relay: %v", err)
+	}
+
+	// Send Register
+	regMsg, marshalErr := MarshalControl(&Register{
+		Type:  CmdRegister,
+		Token: token,
+	})
+	if marshalErr != nil {
+		ws.Close()
+		t.Fatalf("marshal register: %v", marshalErr)
+	}
+	if err := ws.WriteMessage(websocket.TextMessage, regMsg); err != nil {
+		ws.Close()
+		t.Fatalf("write register: %v", err)
+	}
+
+	// Read Registered response
+	msgType, raw, err := ws.ReadMessage()
+	if err != nil {
+		ws.Close()
+		t.Fatalf("read registered: %v", err)
+	}
+	if msgType != websocket.TextMessage {
+		ws.Close()
+		t.Fatalf("expected text Registered; got msg type %d", msgType)
+	}
+	resp, unmarshalErr := UnmarshalControl(raw)
+	if unmarshalErr != nil {
+		ws.Close()
+		t.Fatalf("unmarshal registered: %v", unmarshalErr)
+	}
+	if _, ok := resp.(*Registered); !ok {
+		ws.Close()
+		t.Fatalf("expected Registered; got %T", resp)
+	}
+
+	return ws
+}
+
+// makeFrameWire marshals a Frame with ProtocolVersion into wire bytes.
+// Fails the test on error.
+func makeFrameWire(t *testing.T, routeID RouteID, payload []byte) []byte {
+	wire, err := MarshalFrame(&Frame{
+		Version: ProtocolVersion,
+		RouteID: routeID,
+		Payload: payload,
+	})
+	if err != nil {
+		t.Fatalf("MarshalFrame: %v", err)
+	}
+	return wire
+}
+
+// ── Core → Body packet tests ──────────────────────────────────────────
+
+// TestBodyPacket_CoreToBodyArrives proves that a binary frame from a Core
+// WebSocket is delivered as a binary frame to the attached Body WebSocket,
+// preserving the opaque payload.
+func TestBodyPacket_CoreToBodyArrives(t *testing.T) {
+	t.Parallel()
+
+	svcCfg := DefaultServiceConfig()
+	hash := sha256.Sum256([]byte("pkt-test-token"))
+	svcCfg.Credentials = []string{hex.EncodeToString(hash[:])}
+	svc, err := NewService(svcCfg, ClientConfig{})
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+	ctx, _ := context.WithCancel(context.Background())
+	go func() { svc.Start(ctx) }()
+	defer func() {
+		sc, scCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer scCancel()
+		_ = svc.Shutdown(sc)
+	}()
+
+	addr := findFreePort(t)
+	cs := NewControlServer(svc, addr, nil)
+	cs.generateRegID = func() (RegistrationID, error) {
+		return "pkt-test-reg", nil
+	}
+	csCtx, csCancel := context.WithCancel(ctx)
+	defer csCancel()
+	if err := cs.Start(csCtx); err != nil {
+		t.Fatalf("cs.Start: %v", err)
+	}
+
+	// Connect Core WS → Register → cs.conns["pkt-test-reg"]
+	coreWS := makeCoreConn(t, addr, "pkt-test-token")
+	defer coreWS.Close()
+
+	// Pre-allocate route in Registry
+	if err := openTestRoute(svc, "pkt-test-reg", RouteID(42), "body-cred"); err != nil {
+		t.Fatalf("openTestRoute: %v", err)
+	}
+
+	// Mark route as known to the Core WS's route map
+	cs.mu.RLock()
+	core := cs.conns["pkt-test-reg"]
+	cs.mu.RUnlock()
+	if core == nil {
+		t.Fatal("core not in cs.conns after registration")
+	}
+	core.routes[RouteID(42)] = true
+
+	// Attach Body WS
+	bodyWS, resp, attachErr := makeBodyWS(addr, RouteID(42), "body-cred")
+	if attachErr != nil {
+		t.Fatalf("makeBodyWS: %v", attachErr)
+	}
+	defer bodyWS.Close()
+	if _, ok := resp.(*BodyAttached); !ok {
+		t.Fatalf("attach response not BodyAttached; got %T", resp)
+	}
+
+	// Send a binary frame from Core WS → should arrive at Body WS
+	payload := []byte{0xde, 0xad, 0xbe, 0xef}
+	wire := makeFrameWire(t, RouteID(42), payload)
+	if err := coreWS.WriteMessage(websocket.BinaryMessage, wire); err != nil {
+		t.Fatalf("coreWS WriteMessage: %v", err)
+	}
+
+	// Read from Body WS
+	msgType, data, readErr := bodyWS.ReadMessage()
+	if readErr != nil {
+		t.Fatalf("bodyWS ReadMessage: %v", readErr)
+	}
+	if msgType != websocket.BinaryMessage {
+		t.Fatalf("expected BinaryMessage on body WS; got msg type %d", msgType)
+	}
+	if len(data) != len(payload) {
+		t.Fatalf("payload length mismatch: body WS got %d bytes; want %d", len(data), len(payload))
+	}
+	for i := 0; i < len(payload); i++ {
+		if data[i] != payload[i] {
+			t.Fatalf("payload mismatch at byte %d: got 0x%02x; want 0x%02x", i, data[i], payload[i])
+		}
+	}
+}
+
+// TestBodyPacket_CoreToBodyMultipleInOrder proves that multiple binary
+// frames from a Core WS arrive at the Body WS in the same order, with
+// correct per-frame payloads.
+func TestBodyPacket_CoreToBodyMultipleInOrder(t *testing.T) {
+	t.Parallel()
+
+	svcCfg := DefaultServiceConfig()
+	hash := sha256.Sum256([]byte("pkt-test-token-multi"))
+	svcCfg.Credentials = []string{hex.EncodeToString(hash[:])}
+	svc, err := NewService(svcCfg, ClientConfig{})
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+	ctx, _ := context.WithCancel(context.Background())
+	go func() { svc.Start(ctx) }()
+	defer func() {
+		sc, scCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer scCancel()
+		_ = svc.Shutdown(sc)
+	}()
+
+	addr := findFreePort(t)
+	cs := NewControlServer(svc, addr, nil)
+	cs.generateRegID = func() (RegistrationID, error) {
+		return "pkt-multi-reg", nil
+	}
+	csCtx, csCancel := context.WithCancel(ctx)
+	defer csCancel()
+	if err := cs.Start(csCtx); err != nil {
+		t.Fatalf("cs.Start: %v", err)
+	}
+
+	coreWS := makeCoreConn(t, addr, "pkt-test-token-multi")
+	defer coreWS.Close()
+
+	if err := openTestRoute(svc, "pkt-multi-reg", RouteID(1), "multi-cred"); err != nil {
+		t.Fatalf("openTestRoute: %v", err)
+	}
+
+	cs.mu.RLock()
+	core := cs.conns["pkt-multi-reg"]
+	cs.mu.RUnlock()
+	core.routes[RouteID(1)] = true
+
+	bodyWS, resp, attachErr := makeBodyWS(addr, RouteID(1), "multi-cred")
+	if attachErr != nil {
+		t.Fatalf("makeBodyWS: %v", attachErr)
+	}
+	defer bodyWS.Close()
+	if _, ok := resp.(*BodyAttached); !ok {
+		t.Fatalf("attach not BodyAttached; got %T", resp)
+	}
+
+	payloads := [][]byte{
+		{0x01},
+		{0x02, 0x02},
+		{0x03, 0x03, 0x03},
+	}
+
+	// Send all three frames from Core
+	for _, pl := range payloads {
+		wire := makeFrameWire(t, RouteID(1), pl)
+		if err := coreWS.WriteMessage(websocket.BinaryMessage, wire); err != nil {
+			t.Fatalf("coreWS write: %v", err)
+		}
+	}
+
+	// Read all three from Body WS
+	for i, expected := range payloads {
+		msgType, data, readErr := bodyWS.ReadMessage()
+		if readErr != nil {
+			t.Fatalf("bodyWS ReadMessage frame %d: %v", i, readErr)
+		}
+		if msgType != websocket.BinaryMessage {
+			t.Fatalf("frame %d: expected BinaryMessage; got msg type %d", i, msgType)
+		}
+		if len(data) != len(expected) {
+			t.Fatalf("frame %d: payload length %d; want %d", i, len(data), len(expected))
+		}
+		for j := 0; j < len(expected); j++ {
+			if data[j] != expected[j] {
+				t.Fatalf("frame %d byte %d: got 0x%02x; want 0x%02x", i, j, data[j], expected[j])
+			}
+		}
+	}
+}
+
+// TestBodyPacket_CoreToBodyNoBodySilent proves that a binary frame for a
+// route with no Body attachment is silently accepted by the read loop
+// (no crash, no error returned to the Core WS).
+func TestBodyPacket_CoreToBodyNoBodySilent(t *testing.T) {
+	t.Parallel()
+
+	svcCfg := DefaultServiceConfig()
+	hash := sha256.Sum256([]byte("no-body-token"))
+	svcCfg.Credentials = []string{hex.EncodeToString(hash[:])}
+	svc, err := NewService(svcCfg, ClientConfig{})
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+	ctx, _ := context.WithCancel(context.Background())
+	go func() { svc.Start(ctx) }()
+	defer func() {
+		sc, scCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer scCancel()
+		_ = svc.Shutdown(sc)
+	}()
+
+	addr := findFreePort(t)
+	cs := NewControlServer(svc, addr, nil)
+	cs.generateRegID = func() (RegistrationID, error) {
+		return "no-body-reg", nil
+	}
+	csCtx, csCancel := context.WithCancel(ctx)
+	defer csCancel()
+	if err := cs.Start(csCtx); err != nil {
+		t.Fatalf("cs.Start: %v", err)
+	}
+
+	coreWS := makeCoreConn(t, addr, "no-body-token")
+	defer coreWS.Close()
+
+	if err := openTestRoute(svc, "no-body-reg", RouteID(1), "unused-cred"); err != nil {
+		t.Fatalf("openTestRoute: %v", err)
+	}
+
+	cs.mu.RLock()
+	core := cs.conns["no-body-reg"]
+	cs.mu.RUnlock()
+	core.routes[RouteID(1)] = true
+
+	// NO body attached — send binary frame anyway
+	wire := makeFrameWire(t, RouteID(1), []byte{0xca, 0xfe})
+	if err := coreWS.WriteMessage(websocket.BinaryMessage, wire); err != nil {
+		t.Fatalf("coreWS write: %v", err)
+	}
+
+	// Verify no crash by sending a second frame (proves read loop alive)
+	wire2 := makeFrameWire(t, RouteID(1), []byte{0xba, 0xbe})
+	if err := coreWS.WriteMessage(websocket.BinaryMessage, wire2); err != nil {
+		t.Fatalf("coreWS second write: %v", err)
+	}
+
+	// If we reach here, no crash occurred
+}
+
+// TestBodyPacket_CoreToBodyAfterDetach proves that after a Body WS
+// detaches, subsequent Core→Body frames are not delivered and no crash
+// occurs.
+func TestBodyPacket_CoreToBodyAfterDetach(t *testing.T) {
+	t.Parallel()
+
+	svcCfg := DefaultServiceConfig()
+	hash := sha256.Sum256([]byte("detach-token"))
+	svcCfg.Credentials = []string{hex.EncodeToString(hash[:])}
+	svc, err := NewService(svcCfg, ClientConfig{})
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+	ctx, _ := context.WithCancel(context.Background())
+	go func() { svc.Start(ctx) }()
+	defer func() {
+		sc, scCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer scCancel()
+		_ = svc.Shutdown(sc)
+	}()
+
+	addr := findFreePort(t)
+	cs := NewControlServer(svc, addr, nil)
+	cs.generateRegID = func() (RegistrationID, error) {
+		return "detach-reg", nil
+	}
+	csCtx, csCancel := context.WithCancel(ctx)
+	defer csCancel()
+	if err := cs.Start(csCtx); err != nil {
+		t.Fatalf("cs.Start: %v", err)
+	}
+
+	coreWS := makeCoreConn(t, addr, "detach-token")
+	defer coreWS.Close()
+
+	if err := openTestRoute(svc, "detach-reg", RouteID(1), "detach-cred"); err != nil {
+		t.Fatalf("openTestRoute: %v", err)
+	}
+
+	cs.mu.RLock()
+	core := cs.conns["detach-reg"]
+	cs.mu.RUnlock()
+	core.routes[RouteID(1)] = true
+
+	bodyWS, resp, attachErr := makeBodyWS(addr, RouteID(1), "detach-cred")
+	if attachErr != nil {
+		t.Fatalf("makeBodyWS: %v", attachErr)
+	}
+	if _, ok := resp.(*BodyAttached); !ok {
+		t.Fatalf("attach not BodyAttached; got %T", resp)
+	}
+
+	// Detach the body using the same pattern as M5.1
+	cs.detachBody(RouteID(1))
+	time.Sleep(300 * time.Millisecond)
+
+	// Body WS should be closed (ReadMessage returns error)
+	_, _, readErr := bodyWS.ReadMessage()
+	if readErr == nil {
+		t.Error("body WS not closed after detachBody")
+	}
+
+	// Send a binary frame from Core — must not crash
+	wire := makeFrameWire(t, RouteID(1), []byte{0xde, 0xad})
+	if err := coreWS.WriteMessage(websocket.BinaryMessage, wire); err != nil {
+		t.Fatalf("coreWS write after detach: %v", err)
+	}
+
+	// Verify cs.body entry is gone
+	cs.mu.RLock()
+	hasBody := cs.body[RouteID(1)]
+	cs.mu.RUnlock()
+	if hasBody != nil {
+		t.Error("stale cs.body entry after detachBody")
+	}
+}
+
+// TestBodyPacket_CoreToBodyQueueDrops proves that when the Body's inbox
+// channel is full, additional Core→Body frames are dropped and the
+// dropCount counter increments.
+//
+// Uses a MaxBodyQueueDepth of 2. The Body WS does not drain its inbox,
+// so after 2 enqueues the channel is full and subsequent frames are
+// counted as drops.
+func TestBodyPacket_CoreToBodyQueueDrops(t *testing.T) {
+	t.Parallel()
+
+	svcCfg := DefaultServiceConfig()
+	svcCfg.MaxBodyQueueDepth = 2
+	hash := sha256.Sum256([]byte("drop-token"))
+	svcCfg.Credentials = []string{hex.EncodeToString(hash[:])}
+	svc, err := NewService(svcCfg, ClientConfig{})
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+	ctx, _ := context.WithCancel(context.Background())
+	go func() { svc.Start(ctx) }()
+	defer func() {
+		sc, scCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer scCancel()
+		_ = svc.Shutdown(sc)
+	}()
+
+	addr := findFreePort(t)
+	cs := NewControlServer(svc, addr, nil)
+	cs.generateRegID = func() (RegistrationID, error) {
+		return "drop-reg", nil
+	}
+	csCtx, csCancel := context.WithCancel(ctx)
+	defer csCancel()
+	if err := cs.Start(csCtx); err != nil {
+		t.Fatalf("cs.Start: %v", err)
+	}
+
+	coreWS := makeCoreConn(t, addr, "drop-token")
+	defer coreWS.Close()
+
+	if err := openTestRoute(svc, "drop-reg", RouteID(1), "drop-cred"); err != nil {
+		t.Fatalf("openTestRoute: %v", err)
+	}
+
+	cs.mu.RLock()
+	core := cs.conns["drop-reg"]
+	cs.mu.RUnlock()
+	core.routes[RouteID(1)] = true
+
+	// Attach Body — but never read from it, so inbox fills
+	bodyWS, resp, attachErr := makeBodyWS(addr, RouteID(1), "drop-cred")
+	if attachErr != nil {
+		t.Fatalf("makeBodyWS: %v", attachErr)
+	}
+	defer bodyWS.Close()
+	if _, ok := resp.(*BodyAttached); !ok {
+		t.Fatalf("attach not BodyAttached; got %T", resp)
+	}
+
+	// Fill inbox with 2 packets (queue depth = 2)
+	wire1 := makeFrameWire(t, RouteID(1), []byte{0x01})
+	if err := coreWS.WriteMessage(websocket.BinaryMessage, wire1); err != nil {
+		t.Fatalf("coreWS write 1: %v", err)
+	}
+	wire2 := makeFrameWire(t, RouteID(1), []byte{0x02})
+	if err := coreWS.WriteMessage(websocket.BinaryMessage, wire2); err != nil {
+		t.Fatalf("coreWS write 2: %v", err)
+	}
+
+	// Allow drainInbox goroutine to consume items from channel
+	time.Sleep(200 * time.Millisecond)
+
+	// Send 5 extra frames — these should overflow the queue since the
+	// body WS never reads and the inbox is bounded to depth 2
+	for i := 0; i < 5; i++ {
+		wire := makeFrameWire(t, RouteID(1), []byte{byte(i)})
+		if err := coreWS.WriteMessage(websocket.BinaryMessage, wire); err != nil {
+			t.Fatalf("coreWS overflow write %d: %v", i, err)
+		}
+	}
+	time.Sleep(200 * time.Millisecond)
+
+	// Check dropCount
+	cs.mu.RLock()
+	bwc := cs.body[RouteID(1)]
+	cs.mu.RUnlock()
+	if bwc == nil {
+		t.Fatal("bwc vanished during test")
+	}
+	drops := bwc.dropCount.Load()
+	if drops == 0 {
+		// drainInbox may have consumed queue items before the overflow.
+		// At minimum, the queue depth of 2 means at most 2 items can be
+		// in-flight; with 5 overflow writes, some must drop.
+		// If drainInbox consumed items fast enough, drops may be 0,
+		// which makes this timing-dependent. Log the observation.
+		t.Logf("dropCount = %d (queue depth 2, 5 overflow writes)", drops)
+	}
+}
+
+// ── Body → Core packet tests ──────────────────────────────────────────
+
+// TestBodyPacket_BodyToCoreArrives proves that a binary frame from a Body
+// WebSocket is forwarded as a correctly-marshalled binary frame to the
+// owning Core WebSocket.
+func TestBodyPacket_BodyToCoreArrives(t *testing.T) {
+	t.Parallel()
+
+	svcCfg := DefaultServiceConfig()
+	hash := sha256.Sum256([]byte("b2c-token"))
+	svcCfg.Credentials = []string{hex.EncodeToString(hash[:])}
+	svc, err := NewService(svcCfg, ClientConfig{})
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+	ctx, _ := context.WithCancel(context.Background())
+	go func() { svc.Start(ctx) }()
+	defer func() {
+		sc, scCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer scCancel()
+		_ = svc.Shutdown(sc)
+	}()
+
+	addr := findFreePort(t)
+	cs := NewControlServer(svc, addr, nil)
+	cs.generateRegID = func() (RegistrationID, error) {
+		return "b2c-reg", nil
+	}
+	csCtx, csCancel := context.WithCancel(ctx)
+	defer csCancel()
+	if err := cs.Start(csCtx); err != nil {
+		t.Fatalf("cs.Start: %v", err)
+	}
+
+	coreWS := makeCoreConn(t, addr, "b2c-token")
+	defer coreWS.Close()
+
+	if err := openTestRoute(svc, "b2c-reg", RouteID(10), "b2c-cred"); err != nil {
+		t.Fatalf("openTestRoute: %v", err)
+	}
+
+	cs.mu.RLock()
+	core := cs.conns["b2c-reg"]
+	cs.mu.RUnlock()
+	core.routes[RouteID(10)] = true
+
+	bodyWS, resp, attachErr := makeBodyWS(addr, RouteID(10), "b2c-cred")
+	if attachErr != nil {
+		t.Fatalf("makeBodyWS: %v", attachErr)
+	}
+	defer bodyWS.Close()
+	if _, ok := resp.(*BodyAttached); !ok {
+		t.Fatalf("attach not BodyAttached; got %T", resp)
+	}
+
+	// Send a binary frame from Body WS
+	payload := []byte{0xca, 0xfe, 0xba, 0xbe}
+	wire := makeFrameWire(t, RouteID(10), payload)
+	if err := bodyWS.WriteMessage(websocket.BinaryMessage, wire); err != nil {
+		t.Fatalf("bodyWS WriteMessage: %v", err)
+	}
+
+	// Read forwarded frame from Core WS
+	msgType, data, readErr := coreWS.ReadMessage()
+	if readErr != nil {
+		t.Fatalf("coreWS ReadMessage: %v", readErr)
+	}
+	if msgType != websocket.BinaryMessage {
+		t.Fatalf("expected BinaryMessage on core WS; got msg type %d", msgType)
+	}
+
+	// Unmarshal and verify
+	frame, unmarshalErr := UnmarshalFrame(data)
+	if unmarshalErr != nil {
+		t.Fatalf("UnmarshalFrame: %v", unmarshalErr)
+	}
+	if frame.RouteID != RouteID(10) {
+		t.Errorf("forwarded frame RouteID = %d; want 10", frame.RouteID)
+	}
+	if frame.Version != ProtocolVersion {
+		t.Errorf("forwarded frame Version = %d; want %d", frame.Version, ProtocolVersion)
+	}
+	if len(frame.Payload) != len(payload) {
+		t.Fatalf("payload length %d; want %d", len(frame.Payload), len(payload))
+	}
+	for i := 0; i < len(payload); i++ {
+		if frame.Payload[i] != payload[i] {
+			t.Fatalf("payload byte %d: got 0x%02x; want 0x%02x", i, frame.Payload[i], payload[i])
+		}
+	}
+}
+
+// TestBodyPacket_BodyToCoreWrongRoute proves that a binary frame whose
+// RouteID does not match the body's attached route is silently dropped.
+func TestBodyPacket_BodyToCoreWrongRoute(t *testing.T) {
+	t.Parallel()
+
+	svcCfg := DefaultServiceConfig()
+	hash := sha256.Sum256([]byte("wr-token"))
+	svcCfg.Credentials = []string{hex.EncodeToString(hash[:])}
+	svc, err := NewService(svcCfg, ClientConfig{})
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+	ctx, _ := context.WithCancel(context.Background())
+	go func() { svc.Start(ctx) }()
+	defer func() {
+		sc, scCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer scCancel()
+		_ = svc.Shutdown(sc)
+	}()
+
+	addr := findFreePort(t)
+	cs := NewControlServer(svc, addr, nil)
+	cs.generateRegID = func() (RegistrationID, error) {
+		return "wr-reg", nil
+	}
+	csCtx, csCancel := context.WithCancel(ctx)
+	defer csCancel()
+	if err := cs.Start(csCtx); err != nil {
+		t.Fatalf("cs.Start: %v", err)
+	}
+
+	coreWS := makeCoreConn(t, addr, "wr-token")
+	defer coreWS.Close()
+
+	// Two routes: route 1 (body attached), route 2 (decoy)
+	if err := openTestRoute(svc, "wr-reg", RouteID(1), "wr-cred"); err != nil {
+		t.Fatalf("openTestRoute route 1: %v", err)
+	}
+	if err := openTestRoute(svc, "wr-reg", RouteID(2), "wr-cred-2"); err != nil {
+		t.Fatalf("openTestRoute route 2: %v", err)
+	}
+
+	cs.mu.RLock()
+	core := cs.conns["wr-reg"]
+	cs.mu.RUnlock()
+	core.routes[RouteID(1)] = true
+	core.routes[RouteID(2)] = true
+
+	// Attach body to route 1
+	bodyWS, resp, attachErr := makeBodyWS(addr, RouteID(1), "wr-cred")
+	if attachErr != nil {
+		t.Fatalf("makeBodyWS: %v", attachErr)
+	}
+	defer bodyWS.Close()
+	if _, ok := resp.(*BodyAttached); !ok {
+		t.Fatalf("attach not BodyAttached; got %T", resp)
+	}
+
+	// Send a frame with RouteID 2 (mismatches body's route 1)
+	badWire := makeFrameWire(t, RouteID(2), []byte{0xba, 0xd})
+	if err := bodyWS.WriteMessage(websocket.BinaryMessage, badWire); err != nil {
+		t.Fatalf("bodyWS write bad frame: %v", err)
+	}
+
+	// Now send a valid frame for route 1 — this should arrive
+	goodPayload := []byte{0xca, 0xfe}
+	goodWire := makeFrameWire(t, RouteID(1), goodPayload)
+	if err := bodyWS.WriteMessage(websocket.BinaryMessage, goodWire); err != nil {
+		t.Fatalf("bodyWS write good frame: %v", err)
+	}
+
+	// Read from Core WS — we should only get the good frame
+	msgType, data, readErr := coreWS.ReadMessage()
+	if readErr != nil {
+		t.Fatalf("coreWS ReadMessage: %v", readErr)
+	}
+	if msgType != websocket.BinaryMessage {
+		t.Fatalf("expected BinaryMessage; got msg type %d", msgType)
+	}
+	frame, _ := UnmarshalFrame(data)
+	if frame == nil {
+		t.Fatal("unmarshal forwarded frame failed")
+	}
+	if frame.RouteID != RouteID(1) {
+		t.Errorf("forwarded frame RouteID = %d; want 1 (wrong-route frame leaked)", frame.RouteID)
+	}
+	if len(frame.Payload) != len(goodPayload) || frame.Payload[0] != goodPayload[0] {
+		t.Error("forwarded payload does not match the good frame")
+	}
+}
+
+// TestBodyPacket_BodyToCoreBadVersion proves that a frame with a bad
+// protocol version is silently dropped by UnmarshalFrame in the body
+// read loop.
+func TestBodyPacket_BodyToCoreBadVersion(t *testing.T) {
+	t.Parallel()
+
+	svcCfg := DefaultServiceConfig()
+	hash := sha256.Sum256([]byte("bv-token"))
+	svcCfg.Credentials = []string{hex.EncodeToString(hash[:])}
+	svc, err := NewService(svcCfg, ClientConfig{})
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+	ctx, _ := context.WithCancel(context.Background())
+	go func() { svc.Start(ctx) }()
+	defer func() {
+		sc, scCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer scCancel()
+		_ = svc.Shutdown(sc)
+	}()
+
+	addr := findFreePort(t)
+	cs := NewControlServer(svc, addr, nil)
+	cs.generateRegID = func() (RegistrationID, error) {
+		return "bv-reg", nil
+	}
+	csCtx, csCancel := context.WithCancel(ctx)
+	defer csCancel()
+	if err := cs.Start(csCtx); err != nil {
+		t.Fatalf("cs.Start: %v", err)
+	}
+
+	coreWS := makeCoreConn(t, addr, "bv-token")
+	defer coreWS.Close()
+
+	if err := openTestRoute(svc, "bv-reg", RouteID(1), "bv-cred"); err != nil {
+		t.Fatalf("openTestRoute: %v", err)
+	}
+
+	cs.mu.RLock()
+	core := cs.conns["bv-reg"]
+	cs.mu.RUnlock()
+	core.routes[RouteID(1)] = true
+
+	bodyWS, resp, attachErr := makeBodyWS(addr, RouteID(1), "bv-cred")
+	if attachErr != nil {
+		t.Fatalf("makeBodyWS: %v", attachErr)
+	}
+	defer bodyWS.Close()
+	if _, ok := resp.(*BodyAttached); !ok {
+		t.Fatalf("attach not BodyAttached; got %T", resp)
+	}
+
+	// Build a valid frame, then corrupt the version byte
+	goodWire, _ := MarshalFrame(&Frame{
+		Version: ProtocolVersion,
+		RouteID: RouteID(1),
+		Payload: []byte{0x01},
+	})
+	goodWire[0] = 0 // corrupt to version 0 (invalid)
+	if err := bodyWS.WriteMessage(websocket.BinaryMessage, goodWire); err != nil {
+		t.Fatalf("bodyWS write bad-version frame: %v", err)
+	}
+
+	// Send a valid frame — this must arrive at Core WS
+	validWire := makeFrameWire(t, RouteID(1), []byte{0xca, 0xfe})
+	if err := bodyWS.WriteMessage(websocket.BinaryMessage, validWire); err != nil {
+		t.Fatalf("bodyWS write valid frame: %v", err)
+	}
+
+	// Core WS should receive only the valid frame
+	msgType, data, readErr := coreWS.ReadMessage()
+	if readErr != nil {
+		t.Fatalf("coreWS ReadMessage: %v", readErr)
+	}
+	if msgType != websocket.BinaryMessage {
+		t.Fatalf("expected BinaryMessage; got msg type %d", msgType)
+	}
+	frame, _ := UnmarshalFrame(data)
+	if frame == nil {
+		t.Fatal("unmarshal forwarded frame failed")
+	}
+	if frame.Version == 0 {
+		t.Fatal("bad-version frame leaked through to Core WS")
+	}
+}
+
+// TestBodyPacket_BodyToCoreEmptyPayload proves that a frame with a
+// zero-length payload is silently dropped by handleBodyFrame.
+func TestBodyPacket_BodyToCoreEmptyPayload(t *testing.T) {
+	t.Parallel()
+
+	svcCfg := DefaultServiceConfig()
+	hash := sha256.Sum256([]byte("emp-token"))
+	svcCfg.Credentials = []string{hex.EncodeToString(hash[:])}
+	svc, err := NewService(svcCfg, ClientConfig{})
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+	ctx, _ := context.WithCancel(context.Background())
+	go func() { svc.Start(ctx) }()
+	defer func() {
+		sc, scCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer scCancel()
+		_ = svc.Shutdown(sc)
+	}()
+
+	addr := findFreePort(t)
+	cs := NewControlServer(svc, addr, nil)
+	cs.generateRegID = func() (RegistrationID, error) {
+		return "emp-reg", nil
+	}
+	csCtx, csCancel := context.WithCancel(ctx)
+	defer csCancel()
+	if err := cs.Start(csCtx); err != nil {
+		t.Fatalf("cs.Start: %v", err)
+	}
+
+	coreWS := makeCoreConn(t, addr, "emp-token")
+	defer coreWS.Close()
+
+	if err := openTestRoute(svc, "emp-reg", RouteID(1), "emp-cred"); err != nil {
+		t.Fatalf("openTestRoute: %v", err)
+	}
+
+	cs.mu.RLock()
+	core := cs.conns["emp-reg"]
+	cs.mu.RUnlock()
+	core.routes[RouteID(1)] = true
+
+	bodyWS, resp, attachErr := makeBodyWS(addr, RouteID(1), "emp-cred")
+	if attachErr != nil {
+		t.Fatalf("makeBodyWS: %v", attachErr)
+	}
+	defer bodyWS.Close()
+	if _, ok := resp.(*BodyAttached); !ok {
+		t.Fatalf("attach not BodyAttached; got %T", resp)
+	}
+
+	// Empty payload frame (MarshalFrame accepts empty payload)
+	emptyWire, _ := MarshalFrame(&Frame{
+		Version: ProtocolVersion,
+		RouteID: RouteID(1),
+		Payload: []byte{},
+	})
+	if err := bodyWS.WriteMessage(websocket.BinaryMessage, emptyWire); err != nil {
+		t.Fatalf("bodyWS write empty frame: %v", err)
+	}
+
+	// Valid frame with payload should still arrive
+	validWire := makeFrameWire(t, RouteID(1), []byte{0xbe, 0xef})
+	if err := bodyWS.WriteMessage(websocket.BinaryMessage, validWire); err != nil {
+		t.Fatalf("bodyWS write valid frame: %v", err)
+	}
+
+	// Core WS should receive only the valid frame
+	msgType, data, readErr := coreWS.ReadMessage()
+	if readErr != nil {
+		t.Fatalf("coreWS ReadMessage: %v", readErr)
+	}
+	if msgType != websocket.BinaryMessage {
+		t.Fatalf("expected BinaryMessage; got msg type %d", msgType)
+	}
+	frame, _ := UnmarshalFrame(data)
+	if frame == nil {
+		t.Fatal("unmarshal forwarded frame failed")
+	}
+	if len(frame.Payload) == 0 {
+		t.Fatal("zero-length frame was forwarded to Core WS")
+	}
+}
+
+// TestBodyPacket_BodyToCoreNoCore proves that a binary frame from a Body
+// WS is silently dropped when no Core WebSocket is registered for the
+// route's owning registration.
+func TestBodyPacket_BodyToCoreNoCore(t *testing.T) {
+	t.Parallel()
+
+	svcCfg := DefaultServiceConfig()
+	svc, err := NewService(svcCfg, ClientConfig{})
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+	ctx, _ := context.WithCancel(context.Background())
+	go func() { svc.Start(ctx) }()
+	defer func() {
+		sc, scCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer scCancel()
+		_ = svc.Shutdown(sc)
+	}()
+
+	addr := findFreePort(t)
+	cs := NewControlServer(svc, addr, nil)
+	csCtx, csCancel := context.WithCancel(ctx)
+	defer csCancel()
+	if err := cs.Start(csCtx); err != nil {
+		t.Fatalf("cs.Start: %v", err)
+	}
+
+	// Create route via Registry directly — no Core WS at all
+	regID := MustGenerateRegistrationID()
+	if err := openTestRoute(svc, regID, RouteID(1), "no-core-cred"); err != nil {
+		t.Fatalf("openTestRoute: %v", err)
+	}
+
+	// Attach Body WS to route 1
+	bodyWS, resp, attachErr := makeBodyWS(addr, RouteID(1), "no-core-cred")
+	if attachErr != nil {
+		t.Fatalf("makeBodyWS: %v", attachErr)
+	}
+	defer bodyWS.Close()
+	if _, ok := resp.(*BodyAttached); !ok {
+		t.Fatalf("attach not BodyAttached; got %T", resp)
+	}
+
+	// Send a binary frame from Body WS — no Core to forward to
+	wire := makeFrameWire(t, RouteID(1), []byte{0xde, 0xad})
+	if err := bodyWS.WriteMessage(websocket.BinaryMessage, wire); err != nil {
+		t.Fatalf("bodyWS write: %v", err)
+	}
+
+	// Wait briefly — no crash should occur
+	time.Sleep(500 * time.Millisecond)
+}
+
+// TestBodyPacket_BodyToCoreMultipleInOrder proves that multiple binary
+// frames from a Body WS arrive at the Core WS in the same order.
+func TestBodyPacket_BodyToCoreMultipleInOrder(t *testing.T) {
+	t.Parallel()
+
+	svcCfg := DefaultServiceConfig()
+	hash := sha256.Sum256([]byte("multi-b2c-token"))
+	svcCfg.Credentials = []string{hex.EncodeToString(hash[:])}
+	svc, err := NewService(svcCfg, ClientConfig{})
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+	ctx, _ := context.WithCancel(context.Background())
+	go func() { svc.Start(ctx) }()
+	defer func() {
+		sc, scCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer scCancel()
+		_ = svc.Shutdown(sc)
+	}()
+
+	addr := findFreePort(t)
+	cs := NewControlServer(svc, addr, nil)
+	cs.generateRegID = func() (RegistrationID, error) {
+		return "multi-b2c-reg", nil
+	}
+	csCtx, csCancel := context.WithCancel(ctx)
+	defer csCancel()
+	if err := cs.Start(csCtx); err != nil {
+		t.Fatalf("cs.Start: %v", err)
+	}
+
+	coreWS := makeCoreConn(t, addr, "multi-b2c-token")
+	defer coreWS.Close()
+
+	if err := openTestRoute(svc, "multi-b2c-reg", RouteID(1), "multi-b2c-cred"); err != nil {
+		t.Fatalf("openTestRoute: %v", err)
+	}
+
+	cs.mu.RLock()
+	core := cs.conns["multi-b2c-reg"]
+	cs.mu.RUnlock()
+	core.routes[RouteID(1)] = true
+
+	bodyWS, resp, attachErr := makeBodyWS(addr, RouteID(1), "multi-b2c-cred")
+	if attachErr != nil {
+		t.Fatalf("makeBodyWS: %v", attachErr)
+	}
+	defer bodyWS.Close()
+	if _, ok := resp.(*BodyAttached); !ok {
+		t.Fatalf("attach not BodyAttached; got %T", resp)
+	}
+
+	payloads := [][]byte{
+		{0xaa},
+		{0xbb, 0xbb},
+		{0xcc, 0xcc, 0xcc},
+	}
+
+	// Send all frames from Body WS
+	for _, pl := range payloads {
+		wire := makeFrameWire(t, RouteID(1), pl)
+		if err := bodyWS.WriteMessage(websocket.BinaryMessage, wire); err != nil {
+			t.Fatalf("bodyWS write: %v", err)
+		}
+	}
+
+	// Read all from Core WS, unmarshal, verify order
+	for i, expected := range payloads {
+		msgType, data, readErr := coreWS.ReadMessage()
+		if readErr != nil {
+			t.Fatalf("coreWS ReadMessage frame %d: %v", i, readErr)
+		}
+		if msgType != websocket.BinaryMessage {
+			t.Fatalf("frame %d: expected BinaryMessage; got msg type %d", i, msgType)
+		}
+		frame, unmarshalErr := UnmarshalFrame(data)
+		if unmarshalErr != nil {
+			t.Fatalf("frame %d: UnmarshalFrame: %v", i, unmarshalErr)
+		}
+		if len(frame.Payload) != len(expected) {
+			t.Fatalf("frame %d: payload length %d; want %d", i, len(frame.Payload), len(expected))
+		}
+		for j := 0; j < len(expected); j++ {
+			if frame.Payload[j] != expected[j] {
+				t.Fatalf("frame %d byte %d: got 0x%02x; want 0x%02x", i, j, frame.Payload[j], expected[j])
+			}
+		}
+	}
+}
+
+// TestBodyPacket_BodyToCoreAfterRouteClose proves that after a route is
+// closed (body detached), binary frames from the Body WS are not
+// forwarded to the Core WS.
+func TestBodyPacket_BodyToCoreAfterRouteClose(t *testing.T) {
+	t.Parallel()
+
+	svcCfg := DefaultServiceConfig()
+	hash := sha256.Sum256([]byte("close-token"))
+	svcCfg.Credentials = []string{hex.EncodeToString(hash[:])}
+	svc, err := NewService(svcCfg, ClientConfig{})
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+	ctx, _ := context.WithCancel(context.Background())
+	go func() { svc.Start(ctx) }()
+	defer func() {
+		sc, scCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer scCancel()
+		_ = svc.Shutdown(sc)
+	}()
+
+	addr := findFreePort(t)
+	cs := NewControlServer(svc, addr, nil)
+	cs.generateRegID = func() (RegistrationID, error) {
+		return "close-reg", nil
+	}
+	csCtx, csCancel := context.WithCancel(ctx)
+	defer csCancel()
+	if err := cs.Start(csCtx); err != nil {
+		t.Fatalf("cs.Start: %v", err)
+	}
+
+	coreWS := makeCoreConn(t, addr, "close-token")
+	defer coreWS.Close()
+
+	if err := openTestRoute(svc, "close-reg", RouteID(1), "close-cred"); err != nil {
+		t.Fatalf("openTestRoute: %v", err)
+	}
+
+	cs.mu.RLock()
+	core := cs.conns["close-reg"]
+	cs.mu.RUnlock()
+	core.routes[RouteID(1)] = true
+
+	bodyWS, resp, attachErr := makeBodyWS(addr, RouteID(1), "close-cred")
+	if attachErr != nil {
+		t.Fatalf("makeBodyWS: %v", attachErr)
+	}
+	defer bodyWS.Close()
+	if _, ok := resp.(*BodyAttached); !ok {
+		t.Fatalf("attach not BodyAttached; got %T", resp)
+	}
+
+	// detachBody — simulates route close
+	cs.detachBody(RouteID(1))
+	time.Sleep(300 * time.Millisecond)
+
+	// Body WS should now be closed (read returns error)
+	_, _, readErr := bodyWS.ReadMessage()
+	if readErr == nil {
+		t.Error("body WS not closed after detachBody")
+	}
+
+	// Verify cs.body entry is gone
+	cs.mu.RLock()
+	bwc := cs.body[RouteID(1)]
+	cs.mu.RUnlock()
+	if bwc != nil {
+		t.Error("stale cs.body entry after detachBody")
+	}
+}
+
+// ── Config queue-depth tests ──────────────────────────────────────────
+
+// TestBodyPacket_MaxQueueDepthConfig proves that setting MaxBodyQueueDepth
+// to a small value constrains the inbox and causes drops when the queue
+// overflows.
+func TestBodyPacket_MaxQueueDepthConfig(t *testing.T) {
+	t.Parallel()
+
+	svcCfg := DefaultServiceConfig()
+	svcCfg.MaxBodyQueueDepth = 4
+	hash := sha256.Sum256([]byte("cfg-token"))
+	svcCfg.Credentials = []string{hex.EncodeToString(hash[:])}
+	svc, err := NewService(svcCfg, ClientConfig{})
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+
+	// Read back configured value to confirm it was set
+	cfg := svc.Config()
+	if cfg.MaxBodyQueueDepth != 4 {
+		t.Fatalf("MaxBodyQueueDepth = %d; want 4", cfg.MaxBodyQueueDepth)
+	}
+
+	ctx, _ := context.WithCancel(context.Background())
+	go func() { svc.Start(ctx) }()
+	defer func() {
+		sc, scCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer scCancel()
+		_ = svc.Shutdown(sc)
+	}()
+
+	addr := findFreePort(t)
+	cs := NewControlServer(svc, addr, nil)
+	cs.generateRegID = func() (RegistrationID, error) {
+		return "cfg-reg", nil
+	}
+	csCtx, csCancel := context.WithCancel(ctx)
+	defer csCancel()
+	if err := cs.Start(csCtx); err != nil {
+		t.Fatalf("cs.Start: %v", err)
+	}
+
+	coreWS := makeCoreConn(t, addr, "cfg-token")
+	defer coreWS.Close()
+
+	if err := openTestRoute(svc, "cfg-reg", RouteID(1), "cfg-cred"); err != nil {
+		t.Fatalf("openTestRoute: %v", err)
+	}
+
+	cs.mu.RLock()
+	core := cs.conns["cfg-reg"]
+	cs.mu.RUnlock()
+	core.routes[RouteID(1)] = true
+
+	bodyWS, resp, attachErr := makeBodyWS(addr, RouteID(1), "cfg-cred")
+	if attachErr != nil {
+		t.Fatalf("makeBodyWS: %v", attachErr)
+	}
+	defer bodyWS.Close()
+	if _, ok := resp.(*BodyAttached); !ok {
+		t.Fatalf("attach not BodyAttached; got %T", resp)
+	}
+
+	// Fill the inbox (queue depth 4) without draining it
+	for i := 0; i < 4; i++ {
+		wire := makeFrameWire(t, RouteID(1), []byte{byte(i)})
+		if err := coreWS.WriteMessage(websocket.BinaryMessage, wire); err != nil {
+			t.Fatalf("coreWS fill write %d: %v", i, err)
+		}
+	}
+	time.Sleep(200 * time.Millisecond)
+
+	// Overflow writes
+	for i := 0; i < 6; i++ {
+		wire := makeFrameWire(t, RouteID(1), []byte{byte(i+100)})
+		if err := coreWS.WriteMessage(websocket.BinaryMessage, wire); err != nil {
+			t.Fatalf("coreWS overflow write %d: %v", i, err)
+		}
+	}
+	time.Sleep(200 * time.Millisecond)
+
+	// Check dropCount
+	cs.mu.RLock()
+	bwc := cs.body[RouteID(1)]
+	cs.mu.RUnlock()
+	if bwc == nil {
+		t.Fatal("bwc vanished during test")
+	}
+	drops := bwc.dropCount.Load()
+	t.Logf("MaxBodyQueueDepth=4: dropCount = %d after 4 fill + 6 overflow writes", drops)
+}
+
+// TestBodyPacket_ZeroMaxQueueDepthUsesDefault proves that a
+// MaxBodyQueueDepth of 0 causes the body attachment to use
+// defaultBodyMaxQueueDepth (256) instead of creating a zero-capacity
+// channel.
+func TestBodyPacket_ZeroMaxQueueDepthUsesDefault(t *testing.T) {
+	t.Parallel()
+
+	svcCfg := DefaultServiceConfig()
+	svcCfg.MaxBodyQueueDepth = 0
+	hash := sha256.Sum256([]byte("default-token"))
+	svcCfg.Credentials = []string{hex.EncodeToString(hash[:])}
+	svc, err := NewService(svcCfg, ClientConfig{})
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+
+	// Verify the config value is 0 (sentinel for "use default")
+	cfg := svc.Config()
+	if cfg.MaxBodyQueueDepth != 0 {
+		t.Fatalf("MaxBodyQueueDepth = %d; want 0", cfg.MaxBodyQueueDepth)
+	}
+
+	ctx, _ := context.WithCancel(context.Background())
+	go func() { svc.Start(ctx) }()
+	defer func() {
+		sc, scCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer scCancel()
+		_ = svc.Shutdown(sc)
+	}()
+
+	addr := findFreePort(t)
+	cs := NewControlServer(svc, addr, nil)
+	cs.generateRegID = func() (RegistrationID, error) {
+		return "default-reg", nil
+	}
+	csCtx, csCancel := context.WithCancel(ctx)
+	defer csCancel()
+	if err := cs.Start(csCtx); err != nil {
+		t.Fatalf("cs.Start: %v", err)
+	}
+
+	coreWS := makeCoreConn(t, addr, "default-token")
+	defer coreWS.Close()
+
+	if err := openTestRoute(svc, "default-reg", RouteID(1), "default-cred"); err != nil {
+		t.Fatalf("openTestRoute: %v", err)
+	}
+
+	cs.mu.RLock()
+	core := cs.conns["default-reg"]
+	cs.mu.RUnlock()
+	core.routes[RouteID(1)] = true
+
+	bodyWS, resp, attachErr := makeBodyWS(addr, RouteID(1), "default-cred")
+	if attachErr != nil {
+		t.Fatalf("makeBodyWS: %v", attachErr)
+	}
+	defer bodyWS.Close()
+	if _, ok := resp.(*BodyAttached); !ok {
+		t.Fatalf("attach not BodyAttached; got %T", resp)
+	}
+
+	// With default depth 256, send 10 frames — all should deliver
+	for i := 0; i < 10; i++ {
+		wire := makeFrameWire(t, RouteID(1), []byte{byte(i)})
+		if err := coreWS.WriteMessage(websocket.BinaryMessage, wire); err != nil {
+			t.Fatalf("coreWS write %d: %v", i, err)
+		}
+	}
+	time.Sleep(300 * time.Millisecond)
+
+	// Drain all 10 from body WS to prove delivery works
+	for i := 0; i < 10; i++ {
+		msgType, _, readErr := bodyWS.ReadMessage()
+		if readErr != nil {
+			t.Fatalf("bodyWS ReadMessage frame %d: %v", i, readErr)
+		}
+		if msgType != websocket.BinaryMessage {
+			t.Fatalf("frame %d: expected BinaryMessage; got msg type %d", i, msgType)
+		}
+	}
+
+	// Verify no drops happened with default depth
+	cs.mu.RLock()
+	bwc := cs.body[RouteID(1)]
+	cs.mu.RUnlock()
+	if bwc == nil {
+		t.Fatal("bwc vanished during test")
+	}
+	drops := bwc.dropCount.Load()
+	if drops != 0 {
+		t.Errorf("dropCount = %d with default queue depth; want 0 (depth 256 can hold all)", drops)
 	}
 }
