@@ -116,7 +116,7 @@ func NewControlServer(svc *Service, addr string, log *slog.Logger) *ControlServe
 	cs := &ControlServer{
 			svc:           svc,
 			addr:          addr,
-			log:           slog.Default().With("component", "relay.control_server"),
+			log:           log.With("component", "relay.control_server"),
 			conns:         make(map[RegistrationID]*coreWSConn),
 			body:          make(map[RouteID]*bodyWSConn),
 			generateRegID: func() (RegistrationID, error) { return GenerateRegistrationID() },
@@ -297,6 +297,7 @@ func (cs *ControlServer) handleWS(w http.ResponseWriter, r *http.Request) {
 			// on the same ports for the overlay path to recover.
 			for _, rid := range routes {
 				_ = cs.svc.UDP().Close(rid)
+				cs.detachBody(rid)
 			}
 			_ = wsConn.Close()
 		}()
@@ -429,6 +430,7 @@ func (cs *ControlServer) handleWS(w http.ResponseWriter, r *http.Request) {
 				_ = cs.svc.UDP().Close(m.RouteID)
 				_, _ = cs.svc.Registry().CloseRoute(regID, m.RouteID)
 				delete(core.routes, m.RouteID)
+				cs.detachBody(m.RouteID)
 
 				core.reply(&RouteClosed{
 					Type:    CmdRouteClosed,
@@ -456,6 +458,19 @@ func (cs *ControlServer) sendError(wsConn *websocket.Conn, routeID RouteID, code
 		Type: CmdError, Code: code,
 		Message: message, RouteID: routeID,
 	})
+}
+
+// detachBody closes and removes any Body WSS attachment for the given route.
+// Thread-safe against concurrent attach/replacement (the old body's deferred
+// cleanup checks pointer identity and will find nil or a different bwc).
+// Must NOT be called while holding cs.mu.
+func (cs *ControlServer) detachBody(routeID RouteID) {
+	cs.mu.Lock()
+	if bwc := cs.body[routeID]; bwc != nil {
+		delete(cs.body, routeID)
+		bwc.conn.Close()
+	}
+	cs.mu.Unlock()
 }
 
 // ── Body WSS Attachment ───────────────────────────────────────────────

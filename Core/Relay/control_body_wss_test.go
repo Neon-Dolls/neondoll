@@ -749,3 +749,314 @@ func TestBodyAttach_RouteRegistrationIsolation(t *testing.T) {
 		t.Errorf("route registration changed after body disconnect: before=%q after=%q", beforeRouteReg, afterDisconnectRouteReg)
 	}
 }
+
+// TestBodyAttach_RouteCloseRemovesAttachment proves that detachBody
+// (called by RouteClose handler) closes and removes the body attachment.
+func TestBodyAttach_RouteCloseRemovesAttachment(t *testing.T) {
+	t.Parallel()
+
+	svc, err := NewService(DefaultServiceConfig(), ClientConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	go func() { svc.Start(ctx) }()
+	defer func() {
+		sc, scCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer scCancel()
+		_ = svc.Shutdown(sc)
+	}()
+
+	addr := findFreePort(t)
+	cs := NewControlServer(svc, addr, nil)
+	csCtx, csCancel := context.WithCancel(ctx)
+	defer csCancel()
+	if err := cs.Start(csCtx); err != nil {
+		t.Fatalf("cs.Start: %v", err)
+	}
+
+	regID := MustGenerateRegistrationID()
+	if err := openTestRoute(svc, regID, RouteID(1), "test-cred"); err != nil {
+		t.Fatalf("openTestRoute: %v", err)
+	}
+
+	// Attach Body to Route 1
+	bodyWS, resp, err := makeBodyWS(addr, RouteID(1), "test-cred")
+	if err != nil {
+		t.Fatalf("makeBodyWS: %v", err)
+	}
+	defer bodyWS.Close()
+	if _, ok := resp.(*BodyAttached); !ok {
+		t.Fatalf("attach response not BodyAttached; got %T", resp)
+	}
+
+	// Verify attachment exists
+	cs.mu.RLock()
+	bwc := cs.body[RouteID(1)]
+	cs.mu.RUnlock()
+	if bwc == nil {
+		t.Fatal("route 1 has no body attachment after successful attach")
+	}
+
+	// RouteClose handler calls cs.detachBody — test that mechanism
+	cs.detachBody(RouteID(1))
+	time.Sleep(300 * time.Millisecond)
+
+	// Verify attachment removed from cs.body
+	cs.mu.RLock()
+	bwc = cs.body[RouteID(1)]
+	cs.mu.RUnlock()
+	if bwc != nil {
+		t.Error("route 1 has stale body attachment after detachBody")
+	}
+
+	// Verify body WS is closed (ReadMessage returns error)
+	_, _, readErr := bodyWS.ReadMessage()
+	if readErr == nil {
+		t.Error("body WS not closed after detachBody")
+	}
+}
+
+// TestBodyAttach_CoreTeardownRemovesAttachments proves that the Core
+// teardown loop (iterating collected route IDs and detaching each body)
+// removes all body attachments and leaves no stale entries.
+func TestBodyAttach_CoreTeardownRemovesAttachments(t *testing.T) {
+	t.Parallel()
+
+	svc, err := NewService(DefaultServiceConfig(), ClientConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	go func() { svc.Start(ctx) }()
+	defer func() {
+		sc, scCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer scCancel()
+		_ = svc.Shutdown(sc)
+	}()
+
+	addr := findFreePort(t)
+	cs := NewControlServer(svc, addr, nil)
+	csCtx, csCancel := context.WithCancel(ctx)
+	defer csCancel()
+	if err := cs.Start(csCtx); err != nil {
+		t.Fatalf("cs.Start: %v", err)
+	}
+
+	regID := MustGenerateRegistrationID()
+	if err := openTestRoute(svc, regID, RouteID(1), "cred-1"); err != nil {
+		t.Fatalf("openTestRoute route 1: %v", err)
+	}
+	if err := openTestRoute(svc, regID, RouteID(2), "cred-2"); err != nil {
+		t.Fatalf("openTestRoute route 2: %v", err)
+	}
+
+	// Attach bodies to both routes
+	bodyWS1, resp1, err := makeBodyWS(addr, RouteID(1), "cred-1")
+	if err != nil {
+		t.Fatalf("makeBodyWS route 1: %v", err)
+	}
+	defer bodyWS1.Close()
+	if _, ok := resp1.(*BodyAttached); !ok {
+		t.Fatalf("route 1 attach not BodyAttached; got %T", resp1)
+	}
+
+	bodyWS2, resp2, err := makeBodyWS(addr, RouteID(2), "cred-2")
+	if err != nil {
+		t.Fatalf("makeBodyWS route 2: %v", err)
+	}
+	defer bodyWS2.Close()
+	if _, ok := resp2.(*BodyAttached); !ok {
+		t.Fatalf("route 2 attach not BodyAttached; got %T", resp2)
+	}
+
+	// Simulate Core teardown: iterate collected route IDs, detach each
+	routeIDs := []RouteID{RouteID(1), RouteID(2)}
+	for _, rid := range routeIDs {
+		cs.detachBody(rid)
+	}
+	time.Sleep(300 * time.Millisecond)
+
+	// Both attachments removed from cs.body
+	cs.mu.RLock()
+	bwc1 := cs.body[RouteID(1)]
+	bwc2 := cs.body[RouteID(2)]
+	bodyLen := len(cs.body)
+	cs.mu.RUnlock()
+	if bwc1 != nil {
+		t.Error("route 1 has stale body attachment after teardown")
+	}
+	if bwc2 != nil {
+		t.Error("route 2 has stale body attachment after teardown")
+	}
+	if bodyLen != 0 {
+		t.Errorf("cs.body has %d entries after full teardown; want 0", bodyLen)
+	}
+
+	// Both WS connections closed
+	_, _, readErr1 := bodyWS1.ReadMessage()
+	if readErr1 == nil {
+		t.Error("body WS 1 not closed after teardown")
+	}
+	_, _, readErr2 := bodyWS2.ReadMessage()
+	if readErr2 == nil {
+		t.Error("body WS 2 not closed after teardown")
+	}
+}
+
+// TestBodyAttach_DetachLeavesOtherRoutesIntact proves that detaching one
+// route's body attachment leaves other routes' body attachments intact.
+func TestBodyAttach_DetachLeavesOtherRoutesIntact(t *testing.T) {
+	t.Parallel()
+
+	svc, err := NewService(DefaultServiceConfig(), ClientConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	go func() { svc.Start(ctx) }()
+	defer func() {
+		sc, scCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer scCancel()
+		_ = svc.Shutdown(sc)
+	}()
+
+	addr := findFreePort(t)
+	cs := NewControlServer(svc, addr, nil)
+	csCtx, csCancel := context.WithCancel(ctx)
+	defer csCancel()
+	if err := cs.Start(csCtx); err != nil {
+		t.Fatalf("cs.Start: %v", err)
+	}
+
+	regID := MustGenerateRegistrationID()
+	if err := openTestRoute(svc, regID, RouteID(1), "cred-A"); err != nil {
+		t.Fatalf("openTestRoute route 1: %v", err)
+	}
+	if err := openTestRoute(svc, regID, RouteID(2), "cred-B"); err != nil {
+		t.Fatalf("openTestRoute route 2: %v", err)
+	}
+
+	// Attach bodies to both routes
+	bodyWSA, respA, err := makeBodyWS(addr, RouteID(1), "cred-A")
+	if err != nil {
+		t.Fatalf("makeBodyWS route 1: %v", err)
+	}
+	defer bodyWSA.Close()
+	if _, ok := respA.(*BodyAttached); !ok {
+		t.Fatalf("route 1 attach not BodyAttached; got %T", respA)
+	}
+
+	bodyWSB, respB, err := makeBodyWS(addr, RouteID(2), "cred-B")
+	if err != nil {
+		t.Fatalf("makeBodyWS route 2: %v", err)
+	}
+	defer bodyWSB.Close()
+	if _, ok := respB.(*BodyAttached); !ok {
+		t.Fatalf("route 2 attach not BodyAttached; got %T", respB)
+	}
+
+	// Verify both attachments exist
+	cs.mu.RLock()
+	bwcA := cs.body[RouteID(1)]
+	bwcB := cs.body[RouteID(2)]
+	cs.mu.RUnlock()
+	if bwcA == nil {
+		t.Fatal("route 1 has no body attachment before detach")
+	}
+	if bwcB == nil {
+		t.Fatal("route 2 has no body attachment before detach")
+	}
+
+	// Detach ONLY Route A — simulating teardown of one route
+	cs.detachBody(RouteID(1))
+	time.Sleep(300 * time.Millisecond)
+
+	// Route A's body must be gone
+	cs.mu.RLock()
+	bwcA = cs.body[RouteID(1)]
+	cs.mu.RUnlock()
+	if bwcA != nil {
+		t.Error("route A has stale body attachment after its detachBody")
+	}
+
+	// Route B's body must remain
+	cs.mu.RLock()
+	bwcB = cs.body[RouteID(2)]
+	cs.mu.RUnlock()
+	if bwcB == nil {
+		t.Error("route B body attachment removed by route A's detachBody")
+	}
+}
+
+// TestBodyAttach_NoStaleEntryAfterDetach proves that detachBody leaves no
+// stale cs.body entry: the map entry is nil and the total count is zero
+// for a single-route setup.
+func TestBodyAttach_NoStaleEntryAfterDetach(t *testing.T) {
+	t.Parallel()
+
+	svc, err := NewService(DefaultServiceConfig(), ClientConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	go func() { svc.Start(ctx) }()
+	defer func() {
+		sc, scCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer scCancel()
+		_ = svc.Shutdown(sc)
+	}()
+
+	addr := findFreePort(t)
+	cs := NewControlServer(svc, addr, nil)
+	csCtx, csCancel := context.WithCancel(ctx)
+	defer csCancel()
+	if err := cs.Start(csCtx); err != nil {
+		t.Fatalf("cs.Start: %v", err)
+	}
+
+	regID := MustGenerateRegistrationID()
+	if err := openTestRoute(svc, regID, RouteID(1), "test-cred"); err != nil {
+		t.Fatalf("openTestRoute: %v", err)
+	}
+
+	// Attach Body
+	bodyWS, resp, err := makeBodyWS(addr, RouteID(1), "test-cred")
+	if err != nil {
+		t.Fatalf("makeBodyWS: %v", err)
+	}
+	defer bodyWS.Close()
+	if _, ok := resp.(*BodyAttached); !ok {
+		t.Fatalf("attach not BodyAttached; got %T", resp)
+	}
+
+	// Verify attachment exists
+	cs.mu.RLock()
+	bwc := cs.body[RouteID(1)]
+	cs.mu.RUnlock()
+	if bwc == nil {
+		t.Fatal("route 1 has no body attachment after attach")
+	}
+
+	// detachBody — what RouteClose and Core teardown call
+	cs.detachBody(RouteID(1))
+	time.Sleep(300 * time.Millisecond)
+
+	// No stale entry by key lookup
+	cs.mu.RLock()
+	bwc = cs.body[RouteID(1)]
+	bodyLen := len(cs.body)
+	cs.mu.RUnlock()
+	if bwc != nil {
+		t.Error("stale cs.body entry for route 1 after detachBody")
+	}
+	if bodyLen != 0 {
+		t.Errorf("cs.body has %d entries after detachBody; want 0", bodyLen)
+	}
+
+	// ReadMessage returns error (connection closed)
+	_, _, readErr := bodyWS.ReadMessage()
+	if readErr == nil {
+		t.Error("body WS not closed after detachBody")
+	}
+}
