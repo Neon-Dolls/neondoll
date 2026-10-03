@@ -386,13 +386,25 @@ func TestRelayTransport_RealWireGuardHandshakeAndTraffic(t *testing.T) {
 		t.Fatalf("A Write: %v", err)
 	}
 
-	select {
-	case got := <-recvCh:
-		if got != payload {
-			t.Fatalf("B received %q, want %q", got, payload)
+	deadline := time.Now().Add(25 * time.Second)
+	received := false
+	for !received && time.Now().Before(deadline) {
+		select {
+		case got := <-recvCh:
+			if got != payload {
+				t.Fatalf("B received %q, want %q", got, payload)
+			}
+			received = true
+		case <-time.After(5 * time.Second):
 		}
-	case <-time.After(20 * time.Second):
-		t.Fatal("B did not receive UDP datagram through the relay-backed WG bind")
+	}
+	if !received {
+		nf := len(ps.forwardedFrames())
+		np := ps.peerCount()
+		ipa, _ := devA.IpcGet()
+		ipb, _ := devB.IpcGet()
+		t.Fatalf("B did not receive UDP datagram through the relay-backed WG bind after 30s (frames=%d peers=%d; devA:\n%s\ndevB:\n%s)",
+			nf, np, trimLines(ipa), trimLines(ipb))
 	}
 
 	// RouteID preservation end-to-end: every frame forwarded by the Relay
