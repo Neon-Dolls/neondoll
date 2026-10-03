@@ -52,7 +52,7 @@ func startService(t *testing.T, creds []string) (*Service, context.Context, cont
 		t.Fatalf("NewService: %v", err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	go func() { svc.Start(ctx) }()
+	svc.Start(ctx)
 	return svc, ctx, cancel
 }
 

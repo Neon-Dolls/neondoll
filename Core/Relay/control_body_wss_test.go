@@ -137,7 +137,7 @@ func TestBodyAttach_ValidCredential(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx := context.Background()
-	go func() { svc.Start(ctx) }()
+	svc.Start(ctx)
 	defer func() {
 		sc, scCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer scCancel()
@@ -193,7 +193,7 @@ func TestBodyAttach_WrongCredential(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx := context.Background()
-	go func() { svc.Start(ctx) }()
+	svc.Start(ctx)
 	defer func() {
 		sc, scCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer scCancel()
@@ -243,7 +243,7 @@ func TestBodyAttach_EmptyCredential(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx := context.Background()
-	go func() { svc.Start(ctx) }()
+	svc.Start(ctx)
 	defer func() {
 		sc, scCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer scCancel()
@@ -294,7 +294,7 @@ func TestBodyAttach_UnknownRoute(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx := context.Background()
-	go func() { svc.Start(ctx) }()
+	svc.Start(ctx)
 	defer func() {
 		sc, scCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer scCancel()
@@ -341,7 +341,7 @@ func TestBodyAttach_RouteA_Cred_Cannot_Attach_RouteB(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx := context.Background()
-	go func() { svc.Start(ctx) }()
+	svc.Start(ctx)
 	defer func() {
 		sc, scCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer scCancel()
@@ -396,7 +396,7 @@ func TestBodyAttach_RouteA_Cannot_Affect_RouteB(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx := context.Background()
-	go func() { svc.Start(ctx) }()
+	svc.Start(ctx)
 	defer func() {
 		sc, scCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer scCancel()
@@ -453,7 +453,7 @@ func TestBodyAttach_FailedAuth_LeavesNoAttachment(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx := context.Background()
-	go func() { svc.Start(ctx) }()
+	svc.Start(ctx)
 	defer func() {
 		sc, scCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer scCancel()
@@ -498,7 +498,7 @@ func TestBodyAttach_DisconnectRemovesAttachment(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx := context.Background()
-	go func() { svc.Start(ctx) }()
+	svc.Start(ctx)
 	defer func() {
 		sc, scCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer scCancel()
@@ -567,7 +567,7 @@ func TestBodyAttach_Replacement(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx := context.Background()
-	go func() { svc.Start(ctx) }()
+	svc.Start(ctx)
 	defer func() {
 		sc, scCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer scCancel()
@@ -634,7 +634,7 @@ func TestBodyAttach_ReconnectRequiresAuth(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx := context.Background()
-	go func() { svc.Start(ctx) }()
+	svc.Start(ctx)
 	defer func() {
 		sc, scCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer scCancel()
@@ -695,7 +695,7 @@ func TestBodyAttach_RouteRegistrationIsolation(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx := context.Background()
-	go func() { svc.Start(ctx) }()
+	svc.Start(ctx)
 	defer func() {
 		sc, scCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer scCancel()
@@ -770,7 +770,7 @@ func TestBodyAttach_RouteCloseRemovesAttachment(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx := context.Background()
-	go func() { svc.Start(ctx) }()
+	svc.Start(ctx)
 	defer func() {
 		sc, scCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer scCancel()
@@ -838,7 +838,7 @@ func TestBodyAttach_CoreTeardownRemovesAttachments(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx := context.Background()
-	go func() { svc.Start(ctx) }()
+	svc.Start(ctx)
 	defer func() {
 		sc, scCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer scCancel()
@@ -891,7 +891,7 @@ func TestBodyAttach_CoreTeardownRemovesAttachments(t *testing.T) {
 	cs.mu.RLock()
 	bwc1 := cs.body[RouteID(1)]
 	bwc2 := cs.body[RouteID(2)]
-	bodyLen := bodyConnCount(cs)
+	bodyLen := len(cs.body)
 	cs.mu.RUnlock()
 	if bwc1 != nil {
 		t.Error("route 1 has stale body attachment after teardown")
@@ -924,7 +924,7 @@ func TestBodyAttach_DetachLeavesOtherRoutesIntact(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx := context.Background()
-	go func() { svc.Start(ctx) }()
+	svc.Start(ctx)
 	defer func() {
 		sc, scCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer scCancel()
@@ -1010,7 +1010,7 @@ func TestBodyAttach_NoStaleEntryAfterDetach(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx := context.Background()
-	go func() { svc.Start(ctx) }()
+	svc.Start(ctx)
 	defer func() {
 		sc, scCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer scCancel()
@@ -1055,7 +1055,7 @@ func TestBodyAttach_NoStaleEntryAfterDetach(t *testing.T) {
 	// No stale entry by key lookup
 	cs.mu.RLock()
 	bwc = cs.body[RouteID(1)]
-	bodyLen := bodyConnCount(cs)
+	bodyLen := len(cs.body)
 	cs.mu.RUnlock()
 	if bwc != nil {
 		t.Error("stale cs.body entry for route 1 after detachBody")
@@ -1160,7 +1160,7 @@ func TestBodyPacket_CoreToBodyArrives(t *testing.T) {
 		t.Fatalf("NewService: %v", err)
 	}
 	ctx, _ := context.WithCancel(context.Background())
-	go func() { svc.Start(ctx) }()
+	svc.Start(ctx)
 	defer func() {
 		sc, scCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer scCancel()
@@ -1245,7 +1245,7 @@ func TestBodyPacket_CoreToBodyMultipleInOrder(t *testing.T) {
 		t.Fatalf("NewService: %v", err)
 	}
 	ctx, _ := context.WithCancel(context.Background())
-	go func() { svc.Start(ctx) }()
+	svc.Start(ctx)
 	defer func() {
 		sc, scCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer scCancel()
@@ -1332,7 +1332,7 @@ func TestBodyPacket_CoreToBodyNoBodySilent(t *testing.T) {
 		t.Fatalf("NewService: %v", err)
 	}
 	ctx, _ := context.WithCancel(context.Background())
-	go func() { svc.Start(ctx) }()
+	svc.Start(ctx)
 	defer func() {
 		sc, scCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer scCancel()
@@ -1391,7 +1391,7 @@ func TestBodyPacket_CoreToBodyAfterDetach(t *testing.T) {
 		t.Fatalf("NewService: %v", err)
 	}
 	ctx, _ := context.WithCancel(context.Background())
-	go func() { svc.Start(ctx) }()
+	svc.Start(ctx)
 	defer func() {
 		sc, scCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer scCancel()
@@ -1458,9 +1458,9 @@ func TestBodyPacket_CoreToBodyAfterDetach(t *testing.T) {
 // channel is full, additional Core→Body frames are dropped and the
 // dropCount counter increments.
 //
-// Uses a MaxBodyQueueDepth of 2. The Body WS does not drain its inbox,
-// so after 2 enqueues the channel is full and subsequent frames are
-// counted as drops.
+// Uses a MaxBodyQueueDepth of 2. The drain goroutine is stopped via
+// context cancellation before any packets are sent, making the bounded
+// queue overflow deterministically verifiable.
 func TestBodyPacket_CoreToBodyQueueDrops(t *testing.T) {
 	t.Parallel()
 
@@ -1473,7 +1473,7 @@ func TestBodyPacket_CoreToBodyQueueDrops(t *testing.T) {
 		t.Fatalf("NewService: %v", err)
 	}
 	ctx, _ := context.WithCancel(context.Background())
-	go func() { svc.Start(ctx) }()
+	svc.Start(ctx)
 	defer func() {
 		sc, scCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer scCancel()
@@ -1503,7 +1503,7 @@ func TestBodyPacket_CoreToBodyQueueDrops(t *testing.T) {
 	cs.mu.RUnlock()
 	core.routes[RouteID(1)] = true
 
-	// Attach Body — but never read from it, so inbox fills
+	// Attach Body
 	bodyWS, resp, attachErr := makeBodyWS(addr, RouteID(1), "drop-cred")
 	if attachErr != nil {
 		t.Fatalf("makeBodyWS: %v", attachErr)
@@ -1513,45 +1513,40 @@ func TestBodyPacket_CoreToBodyQueueDrops(t *testing.T) {
 		t.Fatalf("attach not BodyAttached; got %T", resp)
 	}
 
-	// Fill inbox with 2 packets (queue depth = 2)
-	wire1 := makeFrameWire(t, RouteID(1), []byte{0x01})
-	if err := coreWS.WriteMessage(websocket.BinaryMessage, wire1); err != nil {
-		t.Fatalf("coreWS write 1: %v", err)
-	}
-	wire2 := makeFrameWire(t, RouteID(1), []byte{0x02})
-	if err := coreWS.WriteMessage(websocket.BinaryMessage, wire2); err != nil {
-		t.Fatalf("coreWS write 2: %v", err)
-	}
-
-	// Allow drainInbox goroutine to consume items from channel
-	time.Sleep(200 * time.Millisecond)
-
-	// Send 5 extra frames — these should overflow the queue since the
-	// body WS never reads and the inbox is bounded to depth 2
-	for i := 0; i < 5; i++ {
-		wire := makeFrameWire(t, RouteID(1), []byte{byte(i)})
-		if err := coreWS.WriteMessage(websocket.BinaryMessage, wire); err != nil {
-			t.Fatalf("coreWS overflow write %d: %v", i, err)
-		}
-	}
-	time.Sleep(200 * time.Millisecond)
-
-	// Check dropCount
+	// Stop the drain goroutine so the inbox channel stops emptying.
+	// The inbox is empty (no Core→Body packets sent yet), and the drain
+	// is blocked on receive; cancel immediately wakes the select and it
+	// exits. At most one item can be dequeued before the drain exits.
 	cs.mu.RLock()
 	bwc := cs.body[RouteID(1)]
 	cs.mu.RUnlock()
 	if bwc == nil {
-		t.Fatal("bwc vanished during test")
+		t.Fatal("bwc vanished after attach")
 	}
+	bwc.cancel()
+
+	// Send 10 packets. With queue depth 2 and the drain stopped, at most
+	// 2 items stay in the channel; at most 1 item may have been dequeued
+	// by the drain before it exited. Mathematically:
+	//   drops >= 10 - 2 - 1 = 7
+	for i := 0; i < 10; i++ {
+		wire := makeFrameWire(t, RouteID(1), []byte{byte(i)})
+		if err := coreWS.WriteMessage(websocket.BinaryMessage, wire); err != nil {
+			t.Fatalf("coreWS write %d: %v", i, err)
+		}
+	}
+
+	// Yield the scheduler so the server's read-loop goroutine processes
+	// all buffered 10 frames. Each frame selects {case bwc.inbox <- ...}
+	// which either enqueues (depth < 2) or hits default → dropCount + 1.
+	time.Sleep(50 * time.Millisecond)
+
+	// Backpressure proof: channel filled, overflow increments dropCount
 	drops := bwc.dropCount.Load()
-	if drops == 0 {
-		// drainInbox may have consumed queue items before the overflow.
-		// At minimum, the queue depth of 2 means at most 2 items can be
-		// in-flight; with 5 overflow writes, some must drop.
-		// If drainInbox consumed items fast enough, drops may be 0,
-		// which makes this timing-dependent. Log the observation.
-		t.Logf("dropCount = %d (queue depth 2, 5 overflow writes)", drops)
+	if drops < 7 {
+		t.Errorf("dropCount = %d after 10 writes (queue depth 2); want >= 7", drops)
 	}
+	t.Logf("dropCount = %d after 10 writes (queue depth 2)", drops)
 }
 
 // ── Body → Core packet tests ──────────────────────────────────────────
@@ -1570,7 +1565,7 @@ func TestBodyPacket_BodyToCoreArrives(t *testing.T) {
 		t.Fatalf("NewService: %v", err)
 	}
 	ctx, _ := context.WithCancel(context.Background())
-	go func() { svc.Start(ctx) }()
+	svc.Start(ctx)
 	defer func() {
 		sc, scCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer scCancel()
@@ -1659,7 +1654,7 @@ func TestBodyPacket_BodyToCoreWrongRoute(t *testing.T) {
 		t.Fatalf("NewService: %v", err)
 	}
 	ctx, _ := context.WithCancel(context.Background())
-	go func() { svc.Start(ctx) }()
+	svc.Start(ctx)
 	defer func() {
 		sc, scCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer scCancel()
@@ -1751,7 +1746,7 @@ func TestBodyPacket_BodyToCoreBadVersion(t *testing.T) {
 		t.Fatalf("NewService: %v", err)
 	}
 	ctx, _ := context.WithCancel(context.Background())
-	go func() { svc.Start(ctx) }()
+	svc.Start(ctx)
 	defer func() {
 		sc, scCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer scCancel()
@@ -1837,7 +1832,7 @@ func TestBodyPacket_BodyToCoreEmptyPayload(t *testing.T) {
 		t.Fatalf("NewService: %v", err)
 	}
 	ctx, _ := context.WithCancel(context.Background())
-	go func() { svc.Start(ctx) }()
+	svc.Start(ctx)
 	defer func() {
 		sc, scCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer scCancel()
@@ -1921,7 +1916,7 @@ func TestBodyPacket_BodyToCoreNoCore(t *testing.T) {
 		t.Fatalf("NewService: %v", err)
 	}
 	ctx, _ := context.WithCancel(context.Background())
-	go func() { svc.Start(ctx) }()
+	svc.Start(ctx)
 	defer func() {
 		sc, scCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer scCancel()
@@ -1975,7 +1970,7 @@ func TestBodyPacket_BodyToCoreMultipleInOrder(t *testing.T) {
 		t.Fatalf("NewService: %v", err)
 	}
 	ctx, _ := context.WithCancel(context.Background())
-	go func() { svc.Start(ctx) }()
+	svc.Start(ctx)
 	defer func() {
 		sc, scCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer scCancel()
@@ -2066,7 +2061,7 @@ func TestBodyPacket_BodyToCoreAfterRouteClose(t *testing.T) {
 		t.Fatalf("NewService: %v", err)
 	}
 	ctx, _ := context.WithCancel(context.Background())
-	go func() { svc.Start(ctx) }()
+	svc.Start(ctx)
 	defer func() {
 		sc, scCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer scCancel()
@@ -2148,7 +2143,7 @@ func TestBodyPacket_MaxQueueDepthConfig(t *testing.T) {
 	}
 
 	ctx, _ := context.WithCancel(context.Background())
-	go func() { svc.Start(ctx) }()
+	svc.Start(ctx)
 	defer func() {
 		sc, scCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer scCancel()
@@ -2187,33 +2182,34 @@ func TestBodyPacket_MaxQueueDepthConfig(t *testing.T) {
 		t.Fatalf("attach not BodyAttached; got %T", resp)
 	}
 
-	// Fill the inbox (queue depth 4) without draining it
-	for i := 0; i < 4; i++ {
-		wire := makeFrameWire(t, RouteID(1), []byte{byte(i)})
-		if err := coreWS.WriteMessage(websocket.BinaryMessage, wire); err != nil {
-			t.Fatalf("coreWS fill write %d: %v", i, err)
-		}
-	}
-	time.Sleep(200 * time.Millisecond)
-
-	// Overflow writes
-	for i := 0; i < 6; i++ {
-		wire := makeFrameWire(t, RouteID(1), []byte{byte(i+100)})
-		if err := coreWS.WriteMessage(websocket.BinaryMessage, wire); err != nil {
-			t.Fatalf("coreWS overflow write %d: %v", i, err)
-		}
-	}
-	time.Sleep(200 * time.Millisecond)
-
-	// Check dropCount
+	// Stop the drain goroutine so the inbox channel stops emptying.
 	cs.mu.RLock()
 	bwc := cs.body[RouteID(1)]
 	cs.mu.RUnlock()
 	if bwc == nil {
-		t.Fatal("bwc vanished during test")
+		t.Fatal("bwc vanished after attach")
 	}
+	bwc.cancel()
+
+	// Send 10 packets (capacity 4). With the drain stopped, at most 4
+	// items stay in the channel; at most 1 may have been dequeued before
+	// the drain exited. Mathematically: drops >= 10 - 4 - 1 = 5.
+	for i := 0; i < 10; i++ {
+		wire := makeFrameWire(t, RouteID(1), []byte{byte(i)})
+		if err := coreWS.WriteMessage(websocket.BinaryMessage, wire); err != nil {
+			t.Fatalf("coreWS write %d: %v", i, err)
+		}
+	}
+
+	// Yield the scheduler so the server's read-loop goroutine processes
+	// all buffered frames.
+	time.Sleep(50 * time.Millisecond)
+
 	drops := bwc.dropCount.Load()
-	t.Logf("MaxBodyQueueDepth=4: dropCount = %d after 4 fill + 6 overflow writes", drops)
+	if drops < 5 {
+		t.Errorf("dropCount = %d after 10 writes (depth 4); want >= 5", drops)
+	}
+	t.Logf("MaxBodyQueueDepth=4: dropCount = %d after 10 writes", drops)
 }
 
 // TestBodyPacket_ZeroMaxQueueDepthUsesDefault proves that a
@@ -2239,7 +2235,7 @@ func TestBodyPacket_ZeroMaxQueueDepthUsesDefault(t *testing.T) {
 	}
 
 	ctx, _ := context.WithCancel(context.Background())
-	go func() { svc.Start(ctx) }()
+	svc.Start(ctx)
 	defer func() {
 		sc, scCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer scCancel()

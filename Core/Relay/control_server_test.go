@@ -32,7 +32,7 @@ func TestControlServer_ValidCredential(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	go func() { svc.Start(ctx) }()
+	svc.Start(ctx)
 	defer func() {
 		sc, scCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer scCancel()
@@ -85,7 +85,7 @@ func TestControlServer_InvalidCredential(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	go func() { svc.Start(ctx) }()
+	svc.Start(ctx)
 	defer func() {
 		sc, scCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer scCancel()
@@ -141,7 +141,7 @@ func TestControlServer_EmptyToken(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	go func() { svc.Start(ctx) }()
+	svc.Start(ctx)
 	defer func() {
 		sc, scCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer scCancel()
@@ -193,7 +193,7 @@ func TestControlServer_NoVerifiers(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	go func() { svc.Start(ctx) }()
+	svc.Start(ctx)
 	defer func() {
 		sc, scCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer scCancel()
