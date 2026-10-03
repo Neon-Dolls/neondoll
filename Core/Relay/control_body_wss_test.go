@@ -1536,10 +1536,17 @@ func TestBodyPacket_CoreToBodyQueueDrops(t *testing.T) {
 		}
 	}
 
-	// Yield the scheduler so the server's read-loop goroutine processes
-	// all buffered 10 frames. Each frame selects {case bwc.inbox <- ...}
-	// which either enqueues (depth < 2) or hits default → dropCount + 1.
-	time.Sleep(50 * time.Millisecond)
+	// Wait deterministically for the server goroutine to process all
+	// inbound frames. Each enqueue attempt either fills the channel or
+	// hits the non-blocking default path, incrementing dropCount.
+	deadline := time.Now().Add(2 * time.Second)
+	expected := int64(7)
+	for time.Now().Before(deadline) {
+		if bwc.dropCount.Load() >= expected {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 
 	// Backpressure proof: channel filled, overflow increments dropCount
 	drops := bwc.dropCount.Load()
@@ -2201,9 +2208,16 @@ func TestBodyPacket_MaxQueueDepthConfig(t *testing.T) {
 		}
 	}
 
-	// Yield the scheduler so the server's read-loop goroutine processes
-	// all buffered frames.
-	time.Sleep(50 * time.Millisecond)
+	// Wait deterministically for the server goroutine to process all
+	// inbound frames.
+	deadline := time.Now().Add(2 * time.Second)
+	const expected int64 = 5
+	for time.Now().Before(deadline) {
+		if bwc.dropCount.Load() >= expected {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 
 	drops := bwc.dropCount.Load()
 	if drops < 5 {
