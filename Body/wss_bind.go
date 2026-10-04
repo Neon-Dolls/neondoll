@@ -106,6 +106,18 @@ type BodyWSSBind struct {
 	processed atomic.Int64
 }
 
+// NewWSSBind creates a BodyWSSBind for the given Relay /body endpoint.
+// relayAddr is the Relay's WSS address (e.g. "ws://host:port/"),
+// routeID identifies the open route to attach to, and credential
+// authenticates this bind against that route's stored credential.
+func NewWSSBind(relayAddr string, routeID relay.RouteID, credential string) *BodyWSSBind {
+	return &BodyWSSBind{
+		relayAddr:  relayAddr,
+		routeID:    routeID,
+		credential: credential,
+	}
+}
+
 // ── public: conn.Bind interface ───────────────────────────────────────────────
 
 // Open connects to the Relay /body WSS, authenticates the route, spawns the
