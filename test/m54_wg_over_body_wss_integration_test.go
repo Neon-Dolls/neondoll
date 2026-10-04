@@ -197,96 +197,73 @@ func TestBodyWSS_RealWireGuardOverBodyWSS(t *testing.T) {
 	cfg.ReadTimeout = 15 * time.Second
 	cfg.PingInterval = 5 * time.Second
 
-	t.Logf("---DIAG: Starting ControlClient at %v", time.Now())
 	client := relay.NewControlClient(cfg)
 	if err := client.Start(svcCtx); err != nil {
 		t.Fatalf("client.Start: %v", err)
 	}
-	t.Logf("---DIAG: ControlClient.Start done at %v", time.Now())
 	waitClientConnected(t, client, "core-client")
-	t.Logf("---DIAG: waitClientConnected done at %v", time.Now())
 
 	// ── 3. Open a route through the ControlClient ──
-	t.Logf("---DIAG: calling OpenRoute at %v", time.Now())
 	opened, openErr := client.OpenRoute(svcCtx, routeID, relay.RouteCredentials{Token: routeCred})
-	t.Logf("---DIAG: OpenRoute returned at %v", time.Now())
 	if openErr != nil {
 		t.Fatalf("OpenRoute(%d): %v", routeID, openErr)
 	}
 
 	// Get the regID that OWNS this route, then set its credentials.
-	t.Logf("---DIAG: RouteRegistration lookup at %v", time.Now())
 	regID, ok := svc.Registry().RouteRegistration(routeID)
 	if !ok {
 		t.Fatalf("RouteRegistration(%d): not found", routeID)
 	}
-	t.Logf("---DIAG: SetRouteCredentials at %v", time.Now())
 	if err := svc.Registry().SetRouteCredentials(regID, routeID, relay.RouteCredentials{Token: routeCred}); err != nil {
 		t.Fatalf("SetRouteCredentials: %v", err)
 	}
 
 	// Create RelayTransport for the Core WG device.
-	t.Logf("---DIAG: NewRelayTransport at %v", time.Now())
 	tr := relay.NewRelayTransport(client)
 	defer tr.Close()
-	t.Logf("---DIAG: tr.Open at %v", time.Now())
 	_, _, trOpenErr := tr.Open(0)
-	t.Logf("---DIAG: tr.Open done at %v", time.Now())
 	if trOpenErr != nil {
 		t.Fatalf("tr.Open: %v", trOpenErr)
 	}
-	t.Logf("---DIAG: tr.Open success at %v", time.Now())
 
 	_ = opened // RouteOpened details not needed for the proof
 
 	// ── 4. Body side: BodyWSSBind ──
+	// NOTE: do NOT call bind.Open(0) here.  The WG device's BindUpdate()
+	// (called from dev.Up()) will be the sole opener, avoiding a
+	// close+reconnect cycle that loses the first handshake initiations.
 	bind := body.NewWSSBind(relayAddr, routeID, routeCred)
 	defer bind.Close()
-	t.Logf("---DIAG: bind.Open at %v", time.Now())
-	_, _, bindOpenErr := bind.Open(0)
-	t.Logf("---DIAG: bind.Open done at %v", time.Now())
-	if bindOpenErr != nil {
-		t.Fatalf("BodyWSSBind.Open: %v", bindOpenErr)
-	}
-	t.Logf("---DIAG: bind.Open success at %v", time.Now())
 
 	// ── 5. Start WireGuard devices ──
-	// Each device gets its own overlay IP.  Allowed-ip 0.0.0.0/0 lets them
-	// reach each other.  Endpoint "relay:1" is parsed by ParseRelayEndpoint
-	// which maps RouteID 1 to the Core-side route.
+	// Each device gets its own overlay IP.  The allowed-ip is the peer's
+	// overlay prefix so WG routes traffic through the tunnel.
 	coreOverlay := netip.MustParseAddr("fd00::1")
 	bodyOverlay := netip.MustParseAddr("fd00::2")
 	endpoint := "relay:1"
 
-	coreDev, coreNet := startWgDevice(t, tr, coreKeys, coreOverlay, bodyKeys.pubHex, endpoint, "0.0.0.0/0")
-	bodyDev, bodyNet := startWgDevice(t, bind, bodyKeys, bodyOverlay, coreKeys.pubHex, endpoint, "0.0.0.0/0")
+	coreDev, coreNet := startWgDevice(t, tr, coreKeys, coreOverlay, bodyKeys.pubHex, endpoint, "fd00::2/128")
+	bodyDev, bodyNet := startWgDevice(t, bind, bodyKeys, bodyOverlay, coreKeys.pubHex, endpoint, "fd00::1/128")
 
 	// ── 6. Wait for WG handshake (observable readiness) ──
-	t.Logf("---DIAG: waiting for core handshake at %v", time.Now())
 	waitHandshake(t, coreDev, "Core WG device", 20*time.Second)
-	t.Logf("---DIAG: core handshake done at %v", time.Now())
 	waitHandshake(t, bodyDev, "Body WG device", 20*time.Second)
-	t.Logf("---DIAG: body handshake done at %v", time.Now())
 
 	// ── 7. Prove bidirectional encrypted overlay traffic ──
 	bodyListenPort := uint16(7)
 	bodyAddr := netip.AddrPortFrom(netip.MustParseAddr("fd00::2"), bodyListenPort)
-	t.Logf("---DIAG: about to ListenUDPAddrPort at %v", time.Now())
 	bodyListen, listenErr := bodyNet.ListenUDPAddrPort(bodyAddr)
 	if listenErr != nil {
 		t.Fatalf("bodyNet.ListenUDP: %v", listenErr)
 	}
-	t.Logf("---DIAG: bodyListen created at %v", time.Now())
 
 	// Core → Body
 	const payloadA = "hello from core over wg"
 	{
-		t.Logf("---DIAG: coreNet DialUDPAddrPort at %v", time.Now())
 		sender, dialErr := coreNet.DialUDPAddrPort(netip.AddrPort{}, bodyAddr)
 		if dialErr != nil {
 			t.Fatalf("coreNet.DialUDP: %v", dialErr)
 		}
-		t.Logf("---DIAG: dial succeeded at %v", time.Now())
 		n, writeErr := sender.Write([]byte(payloadA))
 		if writeErr != nil {
 			t.Fatalf("Core→Body write: %v", writeErr)
@@ -303,10 +280,24 @@ func TestBodyWSS_RealWireGuardOverBodyWSS(t *testing.T) {
 		}
 	}
 
-	// Body → Core (reply)
+	// Body → Core (reverse direction)
 	const payloadB = "hello from body over wg"
 	{
-		n, writeErr := bodyListen.Write([]byte(payloadB))
+		// Listen on Core's WG address for the return direction
+		coreListenAddr := netip.AddrPortFrom(netip.MustParseAddr("fd00::1"), bodyListenPort)
+		coreListen, listenErr2 := coreNet.ListenUDPAddrPort(coreListenAddr)
+		if listenErr2 != nil {
+			t.Fatalf("coreNet.ListenUDP: %v", listenErr2)
+		}
+
+		// Body → Core: dial from Body's netstack to Core's WG address.
+		// This uses the M4-proven pattern: one listener, one dialer,
+		// Write on dialer, ReadFrom on listener.
+		bodySender, dialErr := bodyNet.DialUDPAddrPort(netip.AddrPort{}, coreListenAddr)
+		if dialErr != nil {
+			t.Fatalf("bodyNet.DialUDP: %v", dialErr)
+		}
+		n, writeErr := bodySender.Write([]byte(payloadB))
 		if writeErr != nil {
 			t.Fatalf("Body→Core write: %v", writeErr)
 		}
@@ -314,14 +305,6 @@ func TestBodyWSS_RealWireGuardOverBodyWSS(t *testing.T) {
 			t.Fatalf("Body→Core wrote %d bytes (expected >0)", n)
 		}
 
-		// Core receives via the RelayTransport bind.  Use a separate
-		// dial from core to body and then read — the WG tunnel handles
-		// routing so read from coreNet.
-		coreListenAddr := netip.AddrPortFrom(netip.MustParseAddr("fd00::1"), bodyListenPort)
-		coreListen, listenErr2 := coreNet.ListenUDPAddrPort(coreListenAddr)
-		if listenErr2 != nil {
-			t.Fatalf("coreNet.ListenUDP: %v", listenErr2)
-		}
 		buf2 := make([]byte, 1500)
 		n, _, _ = coreListen.ReadFrom(buf2)
 		received2 := string(buf2[:n])
