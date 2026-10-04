@@ -122,14 +122,26 @@ func NewControlServer(svc *Service, addr string, log *slog.Logger) *ControlServe
 		log = slog.Default()
 	}
 	cs := &ControlServer{
-			svc:           svc,
-			addr:          addr,
-			log:           log.With("component", "relay.control_server"),
-			conns:         make(map[RegistrationID]*coreWSConn),
-			body:          make(map[RouteID]*bodyWSConn),
-			generateRegID: func() (RegistrationID, error) { return GenerateRegistrationID() },
+		svc:           svc,
+		addr:          addr,
+		log:           log.With("component", "relay.control_server"),
+		conns:         make(map[RegistrationID]*coreWSConn),
+		body:          make(map[RouteID]*bodyWSConn),
+		generateRegID: func() (RegistrationID, error) { return GenerateRegistrationID() },
 	}
 	return cs
+}
+
+// SetGenerateRegID overrides the RegistrationID generator used when a Core WS
+// connects. Pass nil to restore the default (crypto/rand).
+// This is essential for cross-package tests that need the Core WS's
+// registration ID to match a route owner's RegistrationID.
+func (cs *ControlServer) SetGenerateRegID(gen func() (RegistrationID, error)) {
+	if gen == nil {
+		cs.generateRegID = func() (RegistrationID, error) { return GenerateRegistrationID() }
+	} else {
+		cs.generateRegID = gen
+	}
 }
 
 // Start begins listening for Core WebSocket connections.
@@ -511,8 +523,16 @@ func (bw *bodyWSConn) drainInbox() {
 		case <-bw.ctx.Done():
 			return
 		case payload := <-bw.inbox:
+			frame, err := MarshalFrame(&Frame{
+				Version: ProtocolVersion,
+				RouteID: bw.routeID,
+				Payload: payload,
+			})
+			if err != nil {
+				continue
+			}
 			bw.writeMu.Lock()
-			_ = bw.conn.WriteMessage(websocket.BinaryMessage, payload)
+			_ = bw.conn.WriteMessage(websocket.BinaryMessage, frame)
 			bw.writeMu.Unlock()
 		}
 	}
