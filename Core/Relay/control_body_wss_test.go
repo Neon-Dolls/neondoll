@@ -1332,9 +1332,9 @@ func TestBodyPacket_CoreToBodyMultipleInOrder(t *testing.T) {
 	}
 }
 
-// TestBodyPacket_CoreToBodyNoBodySilent proves that a binary frame for a
-// route with no Body attachment is silently accepted by the read loop
-// (no crash, no error returned to the Core WS).
+// TestBodyPacket_CoreToBodyNoBodySilent proves that a Core→route frame
+// without a Body WSS attachment uses the UDP delivery path (UDP send
+// may fail silently — no crash on the read loop or Core WS).
 func TestBodyPacket_CoreToBodyNoBodySilent(t *testing.T) {
 	t.Parallel()
 
@@ -1376,7 +1376,7 @@ func TestBodyPacket_CoreToBodyNoBodySilent(t *testing.T) {
 	cs.mu.RUnlock()
 	core.routes[RouteID(1)] = true
 
-	// NO body attached — send binary frame anyway
+	// NO body attached — send binary frame; it goes to UDP (no crash).
 	wire := makeFrameWire(t, RouteID(1), []byte{0xca, 0xfe})
 	if err := coreWS.WriteMessage(websocket.BinaryMessage, wire); err != nil {
 		t.Fatalf("coreWS write: %v", err)
@@ -1387,8 +1387,13 @@ func TestBodyPacket_CoreToBodyNoBodySilent(t *testing.T) {
 	if err := coreWS.WriteMessage(websocket.BinaryMessage, wire2); err != nil {
 		t.Fatalf("coreWS second write: %v", err)
 	}
+	time.Sleep(100 * time.Millisecond)
 
-	// If we reach here, no crash occurred
+	// Both frames went to UDP (no body attached to consume them)
+	if cs.udpSendCount.Load() != 2 {
+		t.Fatalf("expected udpSendCount = 2 (UDP delivery of 2 frames), got %d",
+			cs.udpSendCount.Load())
+	}
 }
 
 // TestBodyPacket_CoreToBodyAfterDetach proves that after a Body WS
@@ -2332,5 +2337,363 @@ func TestBodyPacket_ZeroMaxQueueDepthUsesDefault(t *testing.T) {
 	drops := bwc.dropCount.Load()
 	if drops != 0 {
 		t.Errorf("dropCount = %d with default queue depth; want 0 (depth 256 can hold all)", drops)
+	}
+}
+
+// ── Remote attachment delivery path selection ─────────────────────────
+//
+// Core→route frames must be delivered exclusively through an
+// authenticated Body WSS attachment (when present) or through the
+// Relay UDP path (when no WSS exists). These tests verify that
+// the delivery path selection is mutually exclusive and that UDP
+// falls back correctly on WSS detachment.
+
+func TestBodyPacket_UDP_UsedWithoutWSS(t *testing.T) {
+	t.Parallel()
+
+	svcCfg := DefaultServiceConfig()
+	hash := sha256.Sum256([]byte("udp-nobody-token"))
+	svcCfg.Credentials = []string{hex.EncodeToString(hash[:])}
+	svc, err := NewService(svcCfg, ClientConfig{})
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+	ctx := context.Background()
+	svc.Start(ctx)
+	defer func() {
+		sc, scCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer scCancel()
+		_ = svc.Shutdown(sc)
+	}()
+
+	addr := findFreePort(t)
+	cs := NewControlServer(svc, addr, nil)
+	cs.generateRegID = func() (RegistrationID, error) {
+		return "udp-nobody-reg", nil
+	}
+	csCtx, csCancel := context.WithCancel(ctx)
+	defer csCancel()
+	if err := cs.Start(csCtx); err != nil {
+		t.Fatalf("cs.Start: %v", err)
+	}
+
+	coreWS := makeCoreConn(t, addr, "udp-nobody-token")
+	defer coreWS.Close()
+
+	if err := openTestRoute(svc, RegistrationID("udp-nobody-reg"), RouteID(1), "udp-nobody-token"); err != nil {
+		t.Fatalf("openTestRoute: %v", err)
+	}
+	time.Sleep(100 * time.Millisecond)
+
+	// Mark route as known to the Core WS.
+	cs.mu.RLock()
+	core := cs.conns["udp-nobody-reg"]
+	cs.mu.RUnlock()
+	if core == nil {
+		t.Fatal("core not in cs.conns after registration")
+	}
+	core.routes[RouteID(1)] = true
+
+	// Send a Core→route binary frame with no Body WSS attached.
+	wire := makeFrameWire(t, RouteID(1), []byte{1, 2, 3})
+	if err := coreWS.WriteMessage(websocket.BinaryMessage, wire); err != nil {
+		t.Fatalf("coreWS write: %v", err)
+	}
+	time.Sleep(100 * time.Millisecond)
+
+	// UDP must be selected as the delivery path.
+	if count := cs.udpSendCount.Load(); count != 1 {
+		t.Fatalf("expected udpSendCount = 1 (UDP delivery), got %d", count)
+	}
+}
+
+func TestBodyPacket_WSS_SuppressesUDP(t *testing.T) {
+	t.Parallel()
+
+	svcCfg := DefaultServiceConfig()
+	hash := sha256.Sum256([]byte("wss-no-udp-token"))
+	svcCfg.Credentials = []string{hex.EncodeToString(hash[:])}
+	svc, err := NewService(svcCfg, ClientConfig{})
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+	ctx := context.Background()
+	svc.Start(ctx)
+	defer func() {
+		sc, scCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer scCancel()
+		_ = svc.Shutdown(sc)
+	}()
+
+	addr := findFreePort(t)
+	cs := NewControlServer(svc, addr, nil)
+	cs.generateRegID = func() (RegistrationID, error) {
+		return "wss-no-udp-reg", nil
+	}
+	csCtx, csCancel := context.WithCancel(ctx)
+	defer csCancel()
+	if err := cs.Start(csCtx); err != nil {
+		t.Fatalf("cs.Start: %v", err)
+	}
+
+	coreWS := makeCoreConn(t, addr, "wss-no-udp-token")
+	defer coreWS.Close()
+
+	if err := openTestRoute(svc, RegistrationID("wss-no-udp-reg"), RouteID(1), "wss-no-udp-token"); err != nil {
+		t.Fatalf("openTestRoute: %v", err)
+	}
+	time.Sleep(100 * time.Millisecond)
+
+	// Attach a Body WSS to the route.
+	bodyWS, resp, attachErr := makeBodyWS(addr, RouteID(1), "wss-no-udp-token")
+	if attachErr != nil {
+		t.Fatalf("makeBodyWS: %v", attachErr)
+	}
+	defer bodyWS.Close()
+	if _, ok := resp.(*BodyAttached); !ok {
+		t.Fatalf("attach not BodyAttached; got %T", resp)
+	}
+	time.Sleep(100 * time.Millisecond)
+
+	// Mark route as known to the Core WS.
+	cs.mu.RLock()
+	core := cs.conns["wss-no-udp-reg"]
+	cs.mu.RUnlock()
+	if core == nil {
+		t.Fatal("core not in cs.conns after registration")
+	}
+	core.routes[RouteID(1)] = true
+
+	// Send a Core→route binary frame while WSS is attached.
+	payload := []byte{4, 5, 6}
+	wire := makeFrameWire(t, RouteID(1), payload)
+	if err := coreWS.WriteMessage(websocket.BinaryMessage, wire); err != nil {
+		t.Fatalf("coreWS write: %v", err)
+	}
+
+	// The frame must arrive at the Body WS (existing WSS delivery).
+	msgType, raw, readErr := bodyWS.ReadMessage()
+	if readErr != nil {
+		t.Fatalf("bodyWS ReadMessage: %v", readErr)
+	}
+	if msgType != websocket.BinaryMessage {
+		t.Fatalf("expected BinaryMessage; got msg type %d", msgType)
+	}
+	frame, unmarshalErr := UnmarshalFrame(raw)
+	if unmarshalErr != nil {
+		t.Fatalf("body frame unmarshal: %v", unmarshalErr)
+	}
+	if frame.RouteID != RouteID(1) {
+		t.Fatalf("body frame route %d; want RouteID(1)", frame.RouteID)
+	}
+	if len(frame.Payload) != len(payload) {
+		t.Fatalf("body frame payload length %d; want %d", len(frame.Payload), len(payload))
+	}
+	for i := 0; i < len(payload); i++ {
+		if frame.Payload[i] != payload[i] {
+			t.Fatalf("body frame payload mismatch at byte %d: got 0x%02x; want 0x%02x", i, frame.Payload[i], payload[i])
+		}
+	}
+
+	// UDP must NOT be used while a Body WSS is attached.
+	if count := cs.udpSendCount.Load(); count != 0 {
+		t.Fatalf("expected udpSendCount = 0 (WSS delivered; no UDP), got %d", count)
+	}
+}
+
+func TestBodyPacket_WSS_DetachRestoresUDP(t *testing.T) {
+	t.Parallel()
+
+	svcCfg := DefaultServiceConfig()
+	hash := sha256.Sum256([]byte("detach-udp-token"))
+	svcCfg.Credentials = []string{hex.EncodeToString(hash[:])}
+	svc, err := NewService(svcCfg, ClientConfig{})
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+	ctx := context.Background()
+	svc.Start(ctx)
+	defer func() {
+		sc, scCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer scCancel()
+		_ = svc.Shutdown(sc)
+	}()
+
+	addr := findFreePort(t)
+	cs := NewControlServer(svc, addr, nil)
+	cs.generateRegID = func() (RegistrationID, error) {
+		return "detach-udp-reg", nil
+	}
+	csCtx, csCancel := context.WithCancel(ctx)
+	defer csCancel()
+	if err := cs.Start(csCtx); err != nil {
+		t.Fatalf("cs.Start: %v", err)
+	}
+
+	coreWS := makeCoreConn(t, addr, "detach-udp-token")
+	defer coreWS.Close()
+
+	if err := openTestRoute(svc, RegistrationID("detach-udp-reg"), RouteID(1), "detach-udp-token"); err != nil {
+		t.Fatalf("openTestRoute: %v", err)
+	}
+	time.Sleep(100 * time.Millisecond)
+
+	// Mark route as known to the Core WS.
+	cs.mu.RLock()
+	core := cs.conns["detach-udp-reg"]
+	cs.mu.RUnlock()
+	if core == nil {
+		t.Fatal("core not in cs.conns after registration")
+	}
+	core.routes[RouteID(1)] = true
+
+	// Attach a Body WSS.
+	bodyWS, resp, attachErr := makeBodyWS(addr, RouteID(1), "detach-udp-token")
+	if attachErr != nil {
+		t.Fatalf("makeBodyWS: %v", attachErr)
+	}
+	defer bodyWS.Close()
+	if _, ok := resp.(*BodyAttached); !ok {
+		t.Fatalf("attach not BodyAttached; got %T", resp)
+	}
+	time.Sleep(100 * time.Millisecond)
+
+	// Send a frame while WSS is attached — must arrive at Body WS.
+	payload := []byte{7, 8, 9}
+	wire := makeFrameWire(t, RouteID(1), payload)
+	if err := coreWS.WriteMessage(websocket.BinaryMessage, wire); err != nil {
+		t.Fatalf("coreWS write (before detach): %v", err)
+	}
+	msgType, _, readErr := bodyWS.ReadMessage()
+	if readErr != nil {
+		t.Fatalf("bodyWS ReadMessage (before detach): %v", readErr)
+	}
+	if msgType != websocket.BinaryMessage {
+		t.Fatalf("expected BinaryMessage (before detach); got msg type %d", msgType)
+	}
+
+	// Detach the Body WSS.
+	cs.detachBody(RouteID(1))
+	time.Sleep(100 * time.Millisecond)
+
+	// Send another frame — must use UDP (no WSS attached now).
+	wire2 := makeFrameWire(t, RouteID(1), []byte{10, 11, 12})
+	if err := coreWS.WriteMessage(websocket.BinaryMessage, wire2); err != nil {
+		t.Fatalf("coreWS write (after detach): %v", err)
+	}
+	time.Sleep(100 * time.Millisecond)
+
+	// Verify UDP was used after detach.
+	if count := cs.udpSendCount.Load(); count != 1 {
+		t.Fatalf("expected udpSendCount = 1 (UDP after detach), got %d", count)
+	}
+}
+
+func TestBodyPacket_StaleReplacedAttachmentNoEffect(t *testing.T) {
+	t.Parallel()
+
+	svcCfg := DefaultServiceConfig()
+	hash := sha256.Sum256([]byte("stale-repl-token"))
+	svcCfg.Credentials = []string{hex.EncodeToString(hash[:])}
+	svc, err := NewService(svcCfg, ClientConfig{})
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+	ctx := context.Background()
+	svc.Start(ctx)
+	defer func() {
+		sc, scCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer scCancel()
+		_ = svc.Shutdown(sc)
+	}()
+
+	addr := findFreePort(t)
+	cs := NewControlServer(svc, addr, nil)
+	cs.generateRegID = func() (RegistrationID, error) {
+		return "stale-repl-reg", nil
+	}
+	csCtx, csCancel := context.WithCancel(ctx)
+	defer csCancel()
+	if err := cs.Start(csCtx); err != nil {
+		t.Fatalf("cs.Start: %v", err)
+	}
+
+	coreWS := makeCoreConn(t, addr, "stale-repl-token")
+	defer coreWS.Close()
+
+	if err := openTestRoute(svc, RegistrationID("stale-repl-reg"), RouteID(1), "stale-repl-token"); err != nil {
+		t.Fatalf("openTestRoute: %v", err)
+	}
+	time.Sleep(100 * time.Millisecond)
+
+	// Mark route as known to the Core WS.
+	cs.mu.RLock()
+	core := cs.conns["stale-repl-reg"]
+	cs.mu.RUnlock()
+	if core == nil {
+		t.Fatal("core not in cs.conns after registration")
+	}
+	core.routes[RouteID(1)] = true
+
+	// Attach Body A.
+	bodyA, resp, attachErr := makeBodyWS(addr, RouteID(1), "stale-repl-token")
+	if attachErr != nil {
+		t.Fatalf("makeBodyWS A: %v", attachErr)
+	}
+	if _, ok := resp.(*BodyAttached); !ok {
+		t.Fatalf("attach A not BodyAttached; got %T", resp)
+	}
+	// Do NOT defer-close bodyA — it gets closed by replacement.
+
+	// Attach Body B to the same route (replaces A).
+	bodyB, respB, attachBErr := makeBodyWS(addr, RouteID(1), "stale-repl-token")
+	if attachBErr != nil {
+		t.Fatalf("makeBodyWS B: %v", attachBErr)
+	}
+	defer bodyB.Close()
+	if _, ok := respB.(*BodyAttached); !ok {
+		t.Fatalf("attach B not BodyAttached; got %T", respB)
+	}
+	time.Sleep(100 * time.Millisecond)
+
+	// A's connection should be closed now (replaced by B).
+	if _, _, readErr := bodyA.ReadMessage(); readErr == nil {
+		t.Errorf("bodyA (stale) ReadMessage should have failed; got data")
+	}
+
+	// Send a Core→route frame.
+	payload := []byte{13, 14, 15}
+	wire := makeFrameWire(t, RouteID(1), payload)
+	if err := coreWS.WriteMessage(websocket.BinaryMessage, wire); err != nil {
+		t.Fatalf("coreWS write: %v", err)
+	}
+
+	// The frame must arrive at Body B (the active attachment).
+	msgType, raw, readErr := bodyB.ReadMessage()
+	if readErr != nil {
+		t.Fatalf("bodyB ReadMessage: %v", readErr)
+	}
+	if msgType != websocket.BinaryMessage {
+		t.Fatalf("bodyB expected BinaryMessage; got msg type %d", msgType)
+	}
+	frame, unmarshalErr := UnmarshalFrame(raw)
+	if unmarshalErr != nil {
+		t.Fatalf("bodyB frame unmarshal: %v", unmarshalErr)
+	}
+	if frame.RouteID != RouteID(1) {
+		t.Fatalf("bodyB frame route %d; want RouteID(1)", frame.RouteID)
+	}
+	if len(frame.Payload) != len(payload) {
+		t.Fatalf("bodyB frame payload length %d; want %d", len(frame.Payload), len(payload))
+	}
+	for i := 0; i < len(payload); i++ {
+		if frame.Payload[i] != payload[i] {
+			t.Fatalf("bodyB frame payload mismatch at byte %d: got 0x%02x; want 0x%02x", i, frame.Payload[i], payload[i])
+		}
+	}
+
+	// UDP must not be used (route is still WSS, via the new attachment).
+	if count := cs.udpSendCount.Load(); count != 0 {
+		t.Fatalf("expected udpSendCount = 0 (WSS via Body B; no UDP), got %d", count)
 	}
 }

@@ -50,6 +50,10 @@ type ControlServer struct {
 	// generateRegID creates RegistrationIDs. Default uses crypto/rand
 	// (GenerateRegistrationID). Overridable in tests to simulate failure.
 	generateRegID func() (RegistrationID, error)
+
+	// udpSendCount counts Core→route frames delivered via UDP. Test-only
+	// hook to verify selection between WSS and UDP delivery paths.
+	udpSendCount atomic.Int64
 }
 
 // coreWSConn tracks one Core's WebSocket connection and its routes.
@@ -128,6 +132,7 @@ func NewControlServer(svc *Service, addr string, log *slog.Logger) *ControlServe
 		conns:         make(map[RegistrationID]*coreWSConn),
 		body:          make(map[RouteID]*bodyWSConn),
 		generateRegID: func() (RegistrationID, error) { return GenerateRegistrationID() },
+		udpSendCount:  atomic.Int64{},
 	}
 	return cs
 }
@@ -321,7 +326,12 @@ func (cs *ControlServer) handleWS(w http.ResponseWriter, r *http.Request) {
 			_ = cs.svc.Registry().Keepalive(regID)
 
 			if msgType == websocket.BinaryMessage {
-				// Binary frame from Core → forward to UDP
+				// Binary frame from Core → forward to Body WSS or UDP.
+				// If an authenticated Body WSS attachment exists for this
+				// route, deliver through WSS only. Otherwise fall back to
+				// the Relay UDP path. This ensures no duplicate delivery
+				// and provides natural UDP fallback when a WSS attachment
+				// detaches or is replaced.
 				frame, err := UnmarshalFrame(raw)
 				if err != nil {
 					cs.log.Debug("control_server: unmarshal frame", "error", err)
@@ -331,17 +341,12 @@ func (cs *ControlServer) handleWS(w http.ResponseWriter, r *http.Request) {
 					cs.log.Debug("control_server: frame for unknown route", "route_id", frame.RouteID)
 					continue
 				}
-				if err := cs.svc.UDP().SendTo(frame.RouteID, frame.Payload); err != nil {
-					cs.log.Debug("control_server: sendto udp", "route_id", frame.RouteID, "error", err)
-				}
 
-				// Also enqueue for the Body WSS attachment, if any.
-				// Non-blocking send to a bounded channel; drops if full
-				// (backpressure without blocking other routes).
 				cs.mu.RLock()
 				bodyConn, hasBody := cs.body[frame.RouteID]
 				cs.mu.RUnlock()
 				if hasBody {
+					// WSS attached → deliver through WSS only (no UDP).
 					select {
 					case bodyConn.inbox <- frame.Payload:
 						// enqueued for body wss delivery
@@ -349,6 +354,12 @@ func (cs *ControlServer) handleWS(w http.ResponseWriter, r *http.Request) {
 						bodyConn.dropCount.Add(1)
 						cs.log.Debug("control_server: body wss queue full, dropping packet",
 							"route_id", frame.RouteID)
+					}
+				} else {
+					// No Body WSS → deliver through the existing Relay UDP path.
+					cs.udpSendCount.Add(1)
+					if err := cs.svc.UDP().SendTo(frame.RouteID, frame.Payload); err != nil {
+						cs.log.Debug("control_server: sendto udp", "route_id", frame.RouteID, "error", err)
 					}
 				}
 				continue
