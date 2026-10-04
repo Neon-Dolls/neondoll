@@ -60,6 +60,8 @@ type fakeRelay struct {
 	mu        sync.Mutex
 	connN     int
 	curWS     *websocket.Conn
+	ready     chan struct{}
+	readyOnce sync.Once
 	injectCh  chan []byte
 	captureCh chan []byte
 }
@@ -69,6 +71,7 @@ func newFakeRelay(t *testing.T, opts fakeRelayOpts) *fakeRelay {
 	r := &fakeRelay{
 		t:         t,
 		opts:      opts,
+		ready:     make(chan struct{}),
 		injectCh:  make(chan []byte, 256),
 		captureCh: make(chan []byte, 512),
 	}
@@ -89,6 +92,7 @@ func newFakeRelay(t *testing.T, opts fakeRelayOpts) *fakeRelay {
 			}
 		}
 	}()
+	t.Cleanup(func() { close(r.injectCh) })
 	return r
 }
 
@@ -145,6 +149,7 @@ func (r *fakeRelay) handler() http.HandlerFunc {
 		r.mu.Lock()
 		r.curWS = ws
 		r.mu.Unlock()
+		r.readyOnce.Do(func() { close(r.ready) })
 
 		if r.opts.afterAttached != nil && r.opts.afterAttached(ordinal, ws) {
 			return
@@ -203,6 +208,17 @@ func openTestBind(t *testing.T, r *fakeRelay, tune func(*BodyWSSBind)) (*BodyWSS
 		t.Fatalf("Open: %v", err)
 	}
 	t.Cleanup(func() { _ = bind.Close() })
+
+	// BodyAttached is written before the fake relay publishes curWS. Open can
+	// therefore return while the server handler is still between those two
+	// operations. Wait for the server-side attachment to be observable before
+	// tests inject packets; otherwise the injector can legitimately see nil
+	// and drop the first packet.
+	select {
+	case <-r.ready:
+	case <-time.After(2 * time.Second):
+		t.Fatal("fake relay did not publish authenticated body connection")
+	}
 	return bind, fns
 }
 
