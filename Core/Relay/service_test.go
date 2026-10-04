@@ -1222,7 +1222,10 @@ func TestRegistry_RouteCredentialsFromEntry_NotFound(t *testing.T) {
 // --- Service restart lifecycle ---
 
 func TestService_RestartLifecycle(t *testing.T) {
-	t.Parallel()
+	// This test samples the process-wide goroutine count, so it must not run
+	// in parallel with tests that intentionally own ControlServer/WebSocket
+	// goroutines. Parallel execution makes their legitimate goroutines look
+	// like leaks from this Service.
 	svc, err := NewService(DefaultServiceConfig(), ClientConfig{})
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
@@ -1267,10 +1270,19 @@ func TestService_RestartLifecycle(t *testing.T) {
 		t.Errorf("state after second Shutdown = %s; want stopped_clean", s)
 	}
 
-	// Check for goroutine leak (allow small baseline fluctuation)
-	time.Sleep(50 * time.Millisecond)
-	if delta := runtime.NumGoroutine() - goroutinesBefore; delta > 2 {
-		t.Errorf("possible goroutine leak: %d goroutines above baseline after restart cycle", delta)
+	// Shutdown waits for the Service liveness goroutine. Give runtime-owned
+	// cleanup goroutines a chance to quiesce without assuming a fixed sleep,
+	// then retain the original leak assertion against this isolated test.
+	deadline := time.Now().Add(time.Second)
+	for {
+		delta := runtime.NumGoroutine() - goroutinesBefore
+		if delta <= 2 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("possible goroutine leak: %d goroutines above baseline after restart cycle", delta)
+		}
+		runtime.Gosched()
 	}
 }
 
