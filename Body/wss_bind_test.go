@@ -10,6 +10,7 @@ import (
 	"net/netip"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -65,12 +66,30 @@ type fakeRelay struct {
 
 func newFakeRelay(t *testing.T, opts fakeRelayOpts) *fakeRelay {
 	t.Helper()
-	return &fakeRelay{
+	r := &fakeRelay{
 		t:         t,
 		opts:      opts,
 		injectCh:  make(chan []byte, 256),
 		captureCh: make(chan []byte, 512),
 	}
+	// Single global injector: server→client frames always go to the
+	// CURRENT live connection, so no stale per-handler injector can
+	// steal or drop a frame after a reconnect/re-open.  Dead-connection
+	// write errors are skipped (a reconnect installs a new curWS).
+	go func() {
+		for frame := range r.injectCh {
+			r.mu.Lock()
+			live := r.curWS
+			r.mu.Unlock()
+			if live == nil {
+				continue
+			}
+			if err := live.WriteMessage(websocket.BinaryMessage, frame); err != nil {
+				continue
+			}
+		}
+	}()
+	return r
 }
 
 // connections is the number of WebSocket connections accepted so far.
@@ -92,7 +111,6 @@ func (r *fakeRelay) handler() http.HandlerFunc {
 		r.mu.Lock()
 		r.connN++
 		ordinal := r.connN
-		r.curWS = ws
 		r.mu.Unlock()
 
 		// Wait for the BodyAttach handshake.
@@ -121,25 +139,16 @@ func (r *fakeRelay) handler() http.HandlerFunc {
 			return
 		}
 
+		// Publish the connection only after the auth response is written:
+		// the global injector writes to curWS, and gorilla forbids two
+		// concurrent writers on one socket.
+		r.mu.Lock()
+		r.curWS = ws
+		r.mu.Unlock()
+
 		if r.opts.afterAttached != nil && r.opts.afterAttached(ordinal, ws) {
 			return
 		}
-
-		// Server→client injector: deliver frames only on the CURRENT live
-		// connection, so a frame never reaches a stale websocket.
-		go func(cws *websocket.Conn) {
-			for frame := range r.injectCh {
-				r.mu.Lock()
-				live := r.curWS
-				r.mu.Unlock()
-				if live != cws {
-					continue
-				}
-				if err := cws.WriteMessage(websocket.BinaryMessage, frame); err != nil {
-					return
-				}
-			}
-		}(ws)
 
 		// Client→server capture loop.
 		for {
@@ -734,5 +743,206 @@ func TestBodyWSSBind_Concurrency(t *testing.T) {
 	// Idempotent under concurrency too.
 	if err := bind.Close(); err != nil {
 		t.Fatalf("second Close: %v", err)
+	}
+}
+
+func TestBodyWSSBind_OpenCloseReopen(t *testing.T) {
+	routeID := relay.RouteID(10)
+	r := newFakeRelay(t, fakeRelayOpts{routeID: routeID})
+	srv := httptest.NewServer(r.handler())
+	t.Cleanup(srv.Close)
+	addr := "ws" + strings.TrimPrefix(srv.URL, "http")
+
+	bind := &BodyWSSBind{
+		relayAddr:  addr,
+		routeID:    routeID,
+		credential: testCredential,
+	}
+
+	fns, _, err := bind.Open(0)
+	if err != nil {
+		t.Fatalf("first Open: %v", err)
+	}
+	oldWS := bindWS(bind)
+
+	// Double-Open while live must be rejected by the guard.
+	if _, _, err := bind.Open(0); err == nil {
+		t.Fatal("second Open while open should fail")
+	}
+
+	// First epoch carries traffic.
+	firstPayload := []byte("first-epoch")
+	if err := bind.Send([][]byte{firstPayload}, testEndpoint{}); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	select {
+	case raw := <-r.captureCh:
+		frame, unErr := relay.UnmarshalFrame(raw)
+		if unErr != nil {
+			t.Fatalf("unmarshal: %v", unErr)
+		}
+		if string(frame.Payload) != string(firstPayload) {
+			t.Fatalf("payload %q, want %q", frame.Payload, firstPayload)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("no frame captured during first epoch")
+	}
+
+	if err := bind.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	// Old epoch's receive func is unblocked and dead (net.ErrClosed), so
+	// it can never surface new traffic after the re-Open.
+	res, err := receiveWithTimeout(fns[0], 1*time.Second)
+	if err != nil {
+		t.Fatalf("old receive should unblock after Close: %v", err)
+	}
+	if res.n != 0 || !errors.Is(res.err, net.ErrClosed) {
+		t.Fatalf("old receive: n=%d err=%v, want 0 / net.ErrClosed", res.n, res.err)
+	}
+
+	// SAME bind Open()s again → fresh epoch, works normally.
+	fns2, _, err := bind.Open(0)
+	if err != nil {
+		t.Fatalf("re-Open: %v", err)
+	}
+	if oldWS == bindWS(bind) {
+		t.Fatal("re-Open reused the stale websocket")
+	}
+
+	secondPayload := []byte("second-epoch")
+	if err := bind.Send([][]byte{secondPayload}, testEndpoint{}); err != nil {
+		t.Fatalf("Send after re-Open: %v", err)
+	}
+	select {
+	case raw := <-r.captureCh:
+		frame, unErr := relay.UnmarshalFrame(raw)
+		if unErr != nil {
+			t.Fatalf("unmarshal: %v", unErr)
+		}
+		if string(frame.Payload) != string(secondPayload) {
+			t.Fatalf("payload %q, want %q", frame.Payload, secondPayload)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("no frame captured after re-Open")
+	}
+
+	recvPayload := []byte("second-epoch-recv")
+	r.injectCh <- makeFrameBytes(t, routeID, recvPayload)
+	recvRes, err := receiveWithTimeout(fns2[0], 2*time.Second)
+	if err != nil {
+		t.Fatalf("receive after re-Open: %v", err)
+	}
+	if recvRes.n != 1 || string(recvRes.data) != string(recvPayload) {
+		t.Fatalf("received n=%d data=%q, want %q", recvRes.n, recvRes.data, recvPayload)
+	}
+}
+
+func TestBodyWSSBind_ReopenAfterExhaustion(t *testing.T) {
+	routeID := relay.RouteID(10)
+
+	// Auth rejections come out of a budget.  Connection 1 is dropped (not
+	// rejected), reconnect attempts 2-4 are rejected, and a re-Open's
+	// connection (5) is accepted — proving the terminated bind can start
+	// a fresh epoch against the same relay.
+	var rejectBudget atomic.Int64
+	rejectBudget.Store(3)
+
+	r := newFakeRelay(t, fakeRelayOpts{
+		routeID: routeID,
+		afterAttached: func(ordinal int, ws *websocket.Conn) bool {
+			if ordinal == 1 {
+				_ = ws.Close() // unexpected loss after a healthy auth
+				return true
+			}
+			return false
+		},
+		// Connection 1 authenticates normally (then afterAttached drops
+		// it); connections 2-4 (the reconnect attempts) are rejected;
+		// once the budget is spent, the re-Open's connection (5) is
+		// accepted again — proving the same bind can start afresh after
+		// exhaustion.
+		rejectAuth: func(ordinal int) bool { return ordinal >= 2 && rejectBudget.Add(-1) >= 0 },
+	})
+	srv := httptest.NewServer(r.handler())
+	t.Cleanup(srv.Close)
+	addr := "ws" + strings.TrimPrefix(srv.URL, "http")
+
+	bind := &BodyWSSBind{
+		relayAddr:        addr,
+		routeID:          routeID,
+		credential:       testCredential,
+		reconnectTries:   3,
+		reconnectBackoff: 5 * time.Millisecond,
+	}
+	fns, _, err := bind.Open(0)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+
+	// Connection 1 drops and all 3 bounded reconnect attempts are
+	// rejected → transport terminates; Receive unblocks cleanly.
+	res, err := receiveWithTimeout(fns[0], 5*time.Second)
+	if err != nil {
+		t.Fatalf("Receive should unblock after reconnect exhaustion: %v", err)
+	}
+	if !errors.Is(res.err, ErrReconnectExhausted) {
+		t.Fatalf("Receive error %v, want ErrReconnectExhausted", res.err)
+	}
+	if got := r.connections(); got != 4 {
+		t.Fatalf("relay saw %d connections, want 4 (initial + 3 attempts)", got)
+	}
+	if !errors.Is(bind.Send([][]byte{[]byte("late")}, testEndpoint{}), ErrReconnectExhausted) {
+		t.Fatal("Send after exhaustion should fail with ErrReconnectExhausted")
+	}
+
+	// The SAME bind starts a fresh epoch and works again — Open must
+	// clear the terminal state left by the exhausted termination.
+	fns2, _, err := bind.Open(0)
+	if err != nil {
+		t.Fatalf("re-Open after exhaustion: %v", err)
+	}
+	if got := r.connections(); got != 5 {
+		t.Fatalf("relay saw %d connections after re-Open, want 5", got)
+	}
+
+	payload := []byte("post-exhaustion")
+	if err := bind.Send([][]byte{payload}, testEndpoint{}); err != nil {
+		t.Fatalf("Send after re-Open: %v", err)
+	}
+	select {
+	case raw := <-r.captureCh:
+		frame, unErr := relay.UnmarshalFrame(raw)
+		if unErr != nil {
+			t.Fatalf("unmarshal: %v", unErr)
+		}
+		if string(frame.Payload) != string(payload) {
+			t.Fatalf("payload %q, want %q", frame.Payload, payload)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("no frame captured after re-Open")
+	}
+
+	recvPayload := []byte("fresh-recv")
+	r.injectCh <- makeFrameBytes(t, routeID, recvPayload)
+	recvRes, err := receiveWithTimeout(fns2[0], 2*time.Second)
+	if err != nil {
+		t.Fatalf("receive after re-Open: %v", err)
+	}
+	if recvRes.n != 1 || string(recvRes.data) != string(recvPayload) {
+		t.Fatalf("received n=%d data=%q, want %q", recvRes.n, recvRes.data, recvPayload)
+	}
+
+	// Old epoch stays terminated: its receive func unblocks immediately
+	// with a terminal error rather than hanging or picking up the fresh
+	// epoch's traffic.  After the re-Open the shared terminal state is
+	// reset, so the stale func reports the generic epoch-over error
+	// (net.ErrClosed) — what matters is it never delivers a packet.
+	staleRes, err := receiveWithTimeout(fns[0], 1*time.Second)
+	if err != nil {
+		t.Fatalf("stale receive should unblock immediately: %v", err)
+	}
+	if staleRes.n != 0 || staleRes.err == nil {
+		t.Fatalf("stale receive: n=%d err=%v, want 0 packets + a terminal error", staleRes.n, staleRes.err)
 	}
 }

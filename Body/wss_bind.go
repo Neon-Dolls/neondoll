@@ -116,13 +116,21 @@ func (b *BodyWSSBind) Open(port uint16) ([]conn.ReceiveFunc, uint16, error) {
 		b.closeMu.Unlock()
 		return nil, 0, fmt.Errorf("body wss: bind already open")
 	}
-	// Tear down any previous epoch's lifecycle (normally already done by
-	// Close, but be defensive against double-Open).
+	// Fresh epoch: clear terminal state from a previous Close() or
+	// exhausted-reconnect termination so this Open can authenticate and
+	// run normally, then tear down the previous epoch's lifecycle
+	// (normally already done by Close, but be defensive against
+	// double-Open).  Always set ws=nil so a stale read-loop goroutine
+	// can never observe the old connection again; it exits via the
+	// b.ctx != ctx epoch check.
+	b.closed = false
+	b.terminalErr = nil
 	if b.cancel != nil {
 		b.cancel()
 	}
 	if b.ws != nil {
 		_ = b.ws.Close()
+		b.ws = nil
 	}
 	b.ctx, b.cancel = context.WithCancel(context.Background())
 	ctx := b.ctx
