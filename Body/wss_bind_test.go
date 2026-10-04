@@ -92,6 +92,7 @@ func newFakeRelay(t *testing.T, opts fakeRelayOpts) *fakeRelay {
 			}
 		}
 	}()
+	t.Cleanup(func() { close(r.injectCh) })
 	return r
 }
 
