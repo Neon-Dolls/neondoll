@@ -132,18 +132,6 @@ func NewControlServer(svc *Service, addr string, log *slog.Logger) *ControlServe
 	return cs
 }
 
-// SetGenerateRegID overrides the RegistrationID generator used when a Core WS
-// connects. Pass nil to restore the default (crypto/rand).
-// This is essential for cross-package tests that need the Core WS's
-// registration ID to match a route owner's RegistrationID.
-func (cs *ControlServer) SetGenerateRegID(gen func() (RegistrationID, error)) {
-	if gen == nil {
-		cs.generateRegID = func() (RegistrationID, error) { return GenerateRegistrationID() }
-	} else {
-		cs.generateRegID = gen
-	}
-}
-
 // Start begins listening for Core WebSocket connections.
 func (cs *ControlServer) Start(ctx context.Context) error {
 	mux := http.NewServeMux()
