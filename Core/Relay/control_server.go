@@ -122,12 +122,12 @@ func NewControlServer(svc *Service, addr string, log *slog.Logger) *ControlServe
 		log = slog.Default()
 	}
 	cs := &ControlServer{
-			svc:           svc,
-			addr:          addr,
-			log:           log.With("component", "relay.control_server"),
-			conns:         make(map[RegistrationID]*coreWSConn),
-			body:          make(map[RouteID]*bodyWSConn),
-			generateRegID: func() (RegistrationID, error) { return GenerateRegistrationID() },
+		svc:           svc,
+		addr:          addr,
+		log:           log.With("component", "relay.control_server"),
+		conns:         make(map[RegistrationID]*coreWSConn),
+		body:          make(map[RouteID]*bodyWSConn),
+		generateRegID: func() (RegistrationID, error) { return GenerateRegistrationID() },
 	}
 	return cs
 }
@@ -511,8 +511,16 @@ func (bw *bodyWSConn) drainInbox() {
 		case <-bw.ctx.Done():
 			return
 		case payload := <-bw.inbox:
+			frame, err := MarshalFrame(&Frame{
+				Version: ProtocolVersion,
+				RouteID: bw.routeID,
+				Payload: payload,
+			})
+			if err != nil {
+				continue
+			}
 			bw.writeMu.Lock()
-			_ = bw.conn.WriteMessage(websocket.BinaryMessage, payload)
+			_ = bw.conn.WriteMessage(websocket.BinaryMessage, frame)
 			bw.writeMu.Unlock()
 		}
 	}

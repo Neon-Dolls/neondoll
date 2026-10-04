@@ -1213,7 +1213,7 @@ func TestBodyPacket_CoreToBodyArrives(t *testing.T) {
 		t.Fatalf("coreWS WriteMessage: %v", err)
 	}
 
-	// Read from Body WS
+	// Read from Body WS — drainInbox frames the payload with MarshalFrame
 	msgType, data, readErr := bodyWS.ReadMessage()
 	if readErr != nil {
 		t.Fatalf("bodyWS ReadMessage: %v", readErr)
@@ -1221,12 +1221,19 @@ func TestBodyPacket_CoreToBodyArrives(t *testing.T) {
 	if msgType != websocket.BinaryMessage {
 		t.Fatalf("expected BinaryMessage on body WS; got msg type %d", msgType)
 	}
-	if len(data) != len(payload) {
-		t.Fatalf("payload length mismatch: body WS got %d bytes; want %d", len(data), len(payload))
+	frame, uerr := UnmarshalFrame(data)
+	if uerr != nil {
+		t.Fatalf("body WS data: UnmarshalFrame: %v", uerr)
+	}
+	if frame.RouteID != RouteID(42) {
+		t.Fatalf("frame RouteID %v; want 42", frame.RouteID)
+	}
+	if len(frame.Payload) != len(payload) {
+		t.Fatalf("payload length mismatch: body WS got %d bytes; want %d", len(frame.Payload), len(payload))
 	}
 	for i := 0; i < len(payload); i++ {
-		if data[i] != payload[i] {
-			t.Fatalf("payload mismatch at byte %d: got 0x%02x; want 0x%02x", i, data[i], payload[i])
+		if frame.Payload[i] != payload[i] {
+			t.Fatalf("payload mismatch at byte %d: got 0x%02x; want 0x%02x", i, frame.Payload[i], payload[i])
 		}
 	}
 }
@@ -1298,7 +1305,7 @@ func TestBodyPacket_CoreToBodyMultipleInOrder(t *testing.T) {
 		}
 	}
 
-	// Read all three from Body WS
+	// Read all three from Body WS — drainInbox frames with MarshalFrame
 	for i, expected := range payloads {
 		msgType, data, readErr := bodyWS.ReadMessage()
 		if readErr != nil {
@@ -1307,12 +1314,19 @@ func TestBodyPacket_CoreToBodyMultipleInOrder(t *testing.T) {
 		if msgType != websocket.BinaryMessage {
 			t.Fatalf("frame %d: expected BinaryMessage; got msg type %d", i, msgType)
 		}
-		if len(data) != len(expected) {
-			t.Fatalf("frame %d: payload length %d; want %d", i, len(data), len(expected))
+		frame, uerr := UnmarshalFrame(data)
+		if uerr != nil {
+			t.Fatalf("frame %d: UnmarshalFrame: %v", i, uerr)
+		}
+		if frame.RouteID != RouteID(1) {
+			t.Fatalf("frame %d: RouteID %v; want 1", i, frame.RouteID)
+		}
+		if len(frame.Payload) != len(expected) {
+			t.Fatalf("frame %d: payload length %d; want %d", i, len(frame.Payload), len(expected))
 		}
 		for j := 0; j < len(expected); j++ {
-			if data[j] != expected[j] {
-				t.Fatalf("frame %d byte %d: got 0x%02x; want 0x%02x", i, j, data[j], expected[j])
+			if frame.Payload[j] != expected[j] {
+				t.Fatalf("frame %d byte %d: got 0x%02x; want 0x%02x", i, j, frame.Payload[j], expected[j])
 			}
 		}
 	}
