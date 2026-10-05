@@ -346,8 +346,8 @@ func TestBodyPathSelect_WSSFallback(t *testing.T) {
 
 	// Start UDP forwarder: captureCh → Core UDP → injectCh
 	var (
-		wg          sync.WaitGroup
-		forwardCtx  context.Context
+		wg            sync.WaitGroup
+		forwardCtx    context.Context
 		forwardCancel context.CancelFunc
 	)
 	forwardCtx, forwardCancel = context.WithCancel(context.Background())
@@ -447,4 +447,59 @@ func TestBodyPathSelect_WSSFallback(t *testing.T) {
 	// Signal forwarder to stop, then wait for it
 	forwardCancel()
 	wg.Wait()
+}
+
+func TestBodyPathSelect_CancellationDuringAttemptPreventsSubsequentPaths(t *testing.T) {
+	bodyKeys := newTestKeypair(t)
+	coreKeys := newTestKeypair(t)
+
+	// All 3 paths configured.  Direct and RelayUDP will timeout;
+	// WSS should never be attempted if cancellation happens during Direct.
+	directEp := "127.0.0.1:1"
+	relayUDPEp := "127.0.0.1:2"
+	wssURL := "ws://127.0.0.1:1/wg"
+
+	cfg := pathSelectorConfigForTest(t,
+		bodyKeys, coreKeys,
+		directEp, relayUDPEp, wssURL, 0, "",
+	)
+	cfg.PerAttemptTimeout = 10 * time.Second
+
+	// Create a cancellable context
+	selCtx, selCancel := context.WithCancel(context.Background())
+	defer selCancel()
+
+	var (
+		wg     sync.WaitGroup
+		result PathSelectionResult
+	)
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		log := slog.New(slog.DiscardHandler)
+		result = SelectInitialPath(selCtx, cfg, log)
+	}()
+
+	// Give enough time for Direct's WaitHandshake to begin
+	time.Sleep(2 * time.Second)
+	selCancel()
+
+	// Wait for selection to complete
+	wg.Wait()
+
+	// Must be cancellation, NOT all-paths-failed — meaning
+	// subsequent paths (RelayUDP, WSS) were never attempted.
+	if result.Err == nil {
+		t.Fatal("expected cancellation, got success")
+	}
+	if !errors.Is(result.Err, ErrPathCancelled) {
+		t.Fatalf("want ErrPathCancelled, got %v", result.Err)
+	}
+	if result.Tunnel != nil {
+		t.Fatal("Tunnel should be nil when cancelled")
+	}
+	if result.Path != "" {
+		t.Fatalf("Path should be empty on cancellation, got %q", result.Path)
+	}
 }
