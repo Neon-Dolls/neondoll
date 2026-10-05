@@ -42,6 +42,13 @@ type BodyTunnelConfig struct {
 
 	// MTU for the WireGuard overlay. 0 = DefaultMTU (1280).
 	MTU int
+
+	// Bind is an optional conn.Bind providing the WireGuard transport. When nil
+	// (the default), a standard UDP bind is created automatically. When set, the
+	// provided bind is used directly, enabling alternative transports such as
+	// BodyWSSBind without changing the tunnel's WireGuard identity, keys, or
+	// overlay configuration.
+	Bind conn.Bind
 }
 
 // BodyTunnel manages a userspace WireGuard tunnel from the Body to Core.
@@ -89,7 +96,10 @@ func (bt *BodyTunnel) Start(ctx context.Context) error {
 	}
 
 	// WireGuard device bound to the userspace TUN.
-	bind := conn.NewDefaultBind()
+	bind := bt.cfg.Bind
+	if bind == nil {
+		bind = conn.NewDefaultBind()
+	}
 	l := device.NewLogger(device.LogLevelError, "body-wg: ")
 	dev := device.NewDevice(tunDev, bind, l)
 
