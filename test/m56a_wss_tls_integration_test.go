@@ -35,6 +35,7 @@ import (
 	"math/big"
 	"net"
 	"net/netip"
+	"sync"
 	"testing"
 	"time"
 
@@ -98,6 +99,7 @@ func generateSelfSignedCert(t *testing.T) tls.Certificate {
 type tlsProxy struct {
 	ln      net.Listener
 	backend string
+	mu      sync.Mutex // guards conns
 	conns   []net.Conn // tracked for cleanup — close() closes all
 }
 
@@ -109,7 +111,7 @@ func newTLSProxy(ctx context.Context, backend string, cert tls.Certificate) (*tl
 	if err != nil {
 		return nil, err
 	}
-	p := &tlsProxy{ln: ln, backend: backend}
+	p := &tlsProxy{ln: ln, backend: backend, mu: sync.Mutex{}, conns: []net.Conn{}}
 	go p.serve(ctx)
 	return p, nil
 }
@@ -123,7 +125,11 @@ func (p *tlsProxy) Addr() string {
 // the connection errors and exit naturally.
 func (p *tlsProxy) Close() {
 	p.ln.Close()
-	for _, c := range p.conns {
+	p.mu.Lock()
+	conns := p.conns
+	p.conns = []net.Conn{}
+	p.mu.Unlock()
+	for _, c := range conns {
 		c.Close()
 	}
 }
@@ -144,7 +150,9 @@ func (p *tlsProxy) serve(ctx context.Context) {
 // HTTP Upgrade request with no TLS wrapping.
 func (p *tlsProxy) handle(tlsConn net.Conn) {
 	defer tlsConn.Close()
+	p.mu.Lock()
 	p.conns = append(p.conns, tlsConn)
+	p.mu.Unlock()
 	backend, err := net.Dial("tcp", p.backend)
 	if err != nil {
 		return
@@ -152,17 +160,26 @@ func (p *tlsProxy) handle(tlsConn net.Conn) {
 	defer backend.Close()
 
 	// Bidirectional copy until both directions complete.
+	// When either direction completes, close both connections so the
+	// opposing io.Copy is unblocked.  Both goroutines must finish
+	// before handle returns.
 	done := make(chan struct{}, 2)
 	go func() {
 		io.Copy(backend, tlsConn)
+		tlsConn.Close()
+		backend.Close()
 		done <- struct{}{}
 	}()
 	go func() {
 		io.Copy(tlsConn, backend)
+		backend.Close()
+		tlsConn.Close()
 		done <- struct{}{}
 	}()
-	// Wait for BOTH copy goroutines to finish before returning.
-	// This ensures handle does not leave goroutines behind.
+	// Wait for both copy goroutines to finish.
+	// handle's defer tlsConn.Close() and defer backend.Close() run
+	// here, but the connections are already closed by whichever
+	// goroutine finished first — the defers are a safety net.
 	<-done
 	<-done
 }
@@ -302,10 +319,7 @@ func TestBodyWSS_RealWireGuardOverBodyWSS_TLS(t *testing.T) {
 		go func() {
 			buf := make([]byte, 1500)
 			n, _, rerr := bodyListen.ReadFrom(buf)
-			if rerr != nil {
-				t.Fatalf("Core→Body ReadFrom: %v", rerr)
-			}
-			if n > 0 {
+			if rerr == nil && n > 0 {
 				recvCh <- string(buf[:n])
 			}
 		}()
@@ -321,6 +335,7 @@ func TestBodyWSS_RealWireGuardOverBodyWSS_TLS(t *testing.T) {
 			case <-time.After(1 * time.Second):
 			}
 		}
+		bodyListen.Close()
 		if !gotPayload {
 			t.Fatalf("Core→Body: no data after WG write within 15s")
 		}
@@ -352,10 +367,7 @@ func TestBodyWSS_RealWireGuardOverBodyWSS_TLS(t *testing.T) {
 		go func() {
 			buf2 := make([]byte, 1500)
 			n, _, rerr := coreListen.ReadFrom(buf2)
-			if rerr != nil {
-				t.Fatalf("Body→Core ReadFrom: %v", rerr)
-			}
-			if n > 0 {
+			if rerr == nil && n > 0 {
 				recvCh2 <- string(buf2[:n])
 			}
 		}()
@@ -371,6 +383,7 @@ func TestBodyWSS_RealWireGuardOverBodyWSS_TLS(t *testing.T) {
 			case <-time.After(1 * time.Second):
 			}
 		}
+		coreListen.Close()
 		if !gotPayload {
 			t.Fatalf("Body→Core: no data after WG write within 15s")
 		}
