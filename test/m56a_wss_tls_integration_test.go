@@ -98,7 +98,7 @@ func generateSelfSignedCert(t *testing.T) tls.Certificate {
 type tlsProxy struct {
 	ln      net.Listener
 	backend string
-	conns   []net.Conn  // tracked for cleanup — close() closes all
+	conns   []net.Conn // tracked for cleanup — close() closes all
 }
 
 func newTLSProxy(ctx context.Context, backend string, cert tls.Certificate) (*tlsProxy, error) {
@@ -151,7 +151,7 @@ func (p *tlsProxy) handle(tlsConn net.Conn) {
 	}
 	defer backend.Close()
 
-	// Bidirectional copy until one side closes (WebSocket session ends).
+	// Bidirectional copy until both directions complete.
 	done := make(chan struct{}, 2)
 	go func() {
 		io.Copy(backend, tlsConn)
@@ -161,6 +161,9 @@ func (p *tlsProxy) handle(tlsConn net.Conn) {
 		io.Copy(tlsConn, backend)
 		done <- struct{}{}
 	}()
+	// Wait for BOTH copy goroutines to finish before returning.
+	// This ensures handle does not leave goroutines behind.
+	<-done
 	<-done
 }
 
@@ -299,7 +302,10 @@ func TestBodyWSS_RealWireGuardOverBodyWSS_TLS(t *testing.T) {
 		go func() {
 			buf := make([]byte, 1500)
 			n, _, rerr := bodyListen.ReadFrom(buf)
-			if n > 0 && rerr == nil {
+			if rerr != nil {
+				t.Fatalf("Core→Body ReadFrom: %v", rerr)
+			}
+			if n > 0 {
 				recvCh <- string(buf[:n])
 			}
 		}()
@@ -346,7 +352,10 @@ func TestBodyWSS_RealWireGuardOverBodyWSS_TLS(t *testing.T) {
 		go func() {
 			buf2 := make([]byte, 1500)
 			n, _, rerr := coreListen.ReadFrom(buf2)
-			if n > 0 && rerr == nil {
+			if rerr != nil {
+				t.Fatalf("Body→Core ReadFrom: %v", rerr)
+			}
+			if n > 0 {
 				recvCh2 <- string(buf2[:n])
 			}
 		}()
