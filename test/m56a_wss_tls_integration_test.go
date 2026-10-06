@@ -316,12 +316,14 @@ func TestBodyWSS_RealWireGuardOverBodyWSS_TLS(t *testing.T) {
 
 		// Core → Body: bounded WG overlay read with error checking
 		recvCh := make(chan string, 1)
+		recvDone := make(chan struct{}, 1)
 		go func() {
 			buf := make([]byte, 1500)
 			n, _, rerr := bodyListen.ReadFrom(buf)
 			if rerr == nil && n > 0 {
 				recvCh <- string(buf[:n])
 			}
+			recvDone <- struct{}{}
 		}()
 		deadline := time.Now().Add(15 * time.Second)
 		gotPayload := false
@@ -336,6 +338,7 @@ func TestBodyWSS_RealWireGuardOverBodyWSS_TLS(t *testing.T) {
 			}
 		}
 		bodyListen.Close()
+		<-recvDone // join: wait for read goroutine to actually exit
 		if !gotPayload {
 			t.Fatalf("Core→Body: no data after WG write within 15s")
 		}
@@ -364,12 +367,14 @@ func TestBodyWSS_RealWireGuardOverBodyWSS_TLS(t *testing.T) {
 
 		// Body→Core: bounded WG overlay read with error checking
 		recvCh2 := make(chan string, 1)
+		recvDone2 := make(chan struct{}, 1)
 		go func() {
 			buf2 := make([]byte, 1500)
 			n, _, rerr := coreListen.ReadFrom(buf2)
 			if rerr == nil && n > 0 {
 				recvCh2 <- string(buf2[:n])
 			}
+			recvDone2 <- struct{}{}
 		}()
 		deadline := time.Now().Add(15 * time.Second)
 		gotPayload := false
@@ -384,6 +389,7 @@ func TestBodyWSS_RealWireGuardOverBodyWSS_TLS(t *testing.T) {
 			}
 		}
 		coreListen.Close()
+		<-recvDone2 // join: wait for read goroutine to actually exit
 		if !gotPayload {
 			t.Fatalf("Body→Core: no data after WG write within 15s")
 		}
