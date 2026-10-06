@@ -3,6 +3,7 @@ package body
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -71,6 +72,11 @@ type BodyWSSBind struct {
 	reconnectTries   int
 	reconnectBackoff time.Duration
 	queueDepth       int
+
+	// tlsConfig is the TLS configuration for wss:// connections.
+	// When nil, the default system root CAs are used (set
+	// InsecureSkipVerify for self-signed certs in tests).
+	tlsConfig *tls.Config
 
 	// ws is the live WebSocket connection.  nil when disconnected or closed.
 	ws *websocket.Conn
@@ -291,6 +297,13 @@ func (b *BodyWSSBind) BatchSize() int {
 	return conn.IdealBatchSize
 }
 
+// SetTLSConfig sets TLS configuration for wss:// connections.
+// When non-nil, the dialer uses it for TLS client options
+// (e.g. InsecureSkipVerify for self-signed certs in tests).
+func (b *BodyWSSBind) SetTLSConfig(tc *tls.Config) {
+	b.tlsConfig = tc
+}
+
 // ── Internal helpers ──────────────────────────────────────────────────────────
 
 // dialAndAuth dials the Relay /body WSS endpoint and authenticates the route
@@ -303,9 +316,13 @@ func (b *BodyWSSBind) dialAndAuth() (*websocket.Conn, error) {
 		return nil, err
 	}
 
-	// Normalise address: accept bare "host:port" or full "ws://host:port".
+	// Normalise address: accept bare "host:port", "ws://host:port", or "wss://host:port".
 	addr := b.relayAddr
 	if strings.HasPrefix(addr, "ws://") {
+		if !strings.HasSuffix(addr, "/body") {
+			addr = addr + "/body"
+		}
+	} else if strings.HasPrefix(addr, "wss://") {
 		if !strings.HasSuffix(addr, "/body") {
 			addr = addr + "/body"
 		}
@@ -313,8 +330,12 @@ func (b *BodyWSSBind) dialAndAuth() (*websocket.Conn, error) {
 		addr = "ws://" + addr + "/body"
 	}
 
-	// Dial the WebSocket.
-	dialer := &websocket.Dialer{}
+	// Dial the WebSocket.  For wss:// URIs the Gorilla library handles TLS
+	// automatically; if a non-nil TLSConfig is set the dialer uses it
+	// (required for self-signed certs in tests).
+	dialer := &websocket.Dialer{
+		TLSClientConfig: b.tlsConfig,
+	}
 	ws, _, dialErr := dialer.Dial(addr, nil)
 	if dialErr != nil {
 		return nil, fmt.Errorf("body wss: dial: %w", dialErr)
