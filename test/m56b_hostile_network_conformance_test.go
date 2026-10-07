@@ -30,6 +30,7 @@ import (
 	"encoding/hex"
 	"log/slog"
 	"net/netip"
+	"strings"
 	"testing"
 	"time"
 
@@ -48,6 +49,7 @@ func TestM56b_HostileNetworkConformance(t *testing.T) {
 
 	coreOverlay := netip.MustParseAddr("fd00::11")
 	bodyOverlay := netip.MustParseAddr("fd00::22")
+	overlayPrefix := netip.MustParsePrefix("fd00::/112")
 
 	t.Log("1/6 Keypairs generated ✓")
 
@@ -125,7 +127,7 @@ func TestM56b_HostileNetworkConformance(t *testing.T) {
 	}
 
 	endpoint := relay.RelayEndpointString(routeID)
-	coreDev, coreNet := startWgDevice(t, tr, coreKeys, coreOverlay, bodyKeys.pubHex, endpoint, "fd00::22/128")
+	coreDev, coreNet := startWgDevice(t, tr, coreKeys, coreOverlay, bodyKeys.pubHex, endpoint, overlayPrefix.String())
 	t.Logf("4/6 Core WG device with RelayTransport at %s ✓", endpoint)
 
 	// ── 5. Body: production SelectInitialPath with hostile network config ───
@@ -140,7 +142,7 @@ func TestM56b_HostileNetworkConformance(t *testing.T) {
 		RouteCredential:    routeCred,
 		PerAttemptTimeout:  5 * time.Second,
 		OverlayAddress:     bodyOverlay,
-		OverlayPrefix:      netip.MustParsePrefix("fd00::22/128"),
+		OverlayPrefix: overlayPrefix,
 		TLSConfig:          &tls.Config{InsecureSkipVerify: true},
 	}
 
@@ -168,10 +170,33 @@ func TestM56b_HostileNetworkConformance(t *testing.T) {
 	// SelectInitialPath creates a new BodyTunnel for each attempt (see
 	// path_select.go lines 114, 138, 165), all from the same PathSelectorConfig
 	// fields.  cfg.PrivateKey and cfg.CorePublicKey are [32]byte value copies
-	// and are never modified.  The successful WG handshake (proved in step 8)
-	// further confirms that both sides agree on the keys, which is the
-	// definitive proof of identity.
-	t.Log("  Identity retained by construction ✓")
+	// and are never modified.  Here we confirm the exact private key from
+	// IpcGet matches what was generated for this test.
+	ipcOut, ipcErr := result.Tunnel.IpcGet()
+	if ipcErr != nil {
+		t.Fatalf("BodyTunnel.IpcGet: %v", ipcErr)
+	}
+	// IpcGet device section contains "private_key=<hex>" (WireGuard clamps
+	// the raw scalar on IpcSet; IpcGet returns the clamped version).
+	// Peer sections contain "public_key=<hex>" etc.
+	var foundPrivKey string
+	for _, line := range strings.Split(ipcOut, "\n") {
+		if strings.HasPrefix(line, "private_key=") {
+			foundPrivKey = strings.TrimSpace(strings.TrimPrefix(line, "private_key="))
+			break
+		}
+	}
+	if foundPrivKey == "" {
+		t.Fatalf("Body private key not found in IpcGet output:\n%s", ipcOut)
+	}
+	// WireGuard IpcSet clamps the X25519 scalar before storing (clears
+	// bits 0-2 of byte 0, clears bit 7 and sets bit 6 of byte 31).
+	// Apply the same clamping to bodyKeys.privHex for comparison.
+	expectedClamped := x25519ClampHex(t, bodyKeys.privHex)
+	if foundPrivKey != expectedClamped {
+		t.Fatalf("Body identity mismatch: after clamping, expected private_key=%q, got %q", expectedClamped, foundPrivKey)
+	}
+	t.Log("  Identity retained ✓")
 
 	// ── 8. Verify: Core WG handshake ────────────────────────────────────────
 	// (Body handshake already completed inside SelectInitialPath)
@@ -294,4 +319,19 @@ func TestM56b_HostileNetworkConformance(t *testing.T) {
 	t.Log("  ✓ Real WG handshake completed over WSS/TLS")
 	t.Log("  ✓ Bidirectional encrypted overlay traffic verified")
 	t.Log("  ✓ Body identity retained across all attempts")
+}
+
+// x25519ClampHex applies X25519 private-key clamping to a hex-encoded
+// 32-byte scalar and returns the clamped hex string.  WireGuard's IpcSet
+// clamps the scalar before storing; IpcGet returns the clamped version.
+func x25519ClampHex(t *testing.T, s string) string {
+	t.Helper()
+	b, err := hex.DecodeString(s)
+	if err != nil || len(b) != 32 {
+		t.Fatalf("x25519ClampHex: invalid key %q: err=%v len=%d", s, err, len(b))
+	}
+	b[0] &= 248        // clear bits 0,1,2
+	b[31] &= 127       // clear bit 7
+	b[31] |= 64        // set bit 6
+	return hex.EncodeToString(b)
 }
