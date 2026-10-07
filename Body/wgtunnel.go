@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net/netip"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.zx2c4.com/wireguard/conn"
@@ -55,12 +56,15 @@ type BodyTunnelConfig struct {
 // It provides the netstack.Net for local services that need to reach
 // the overlay (e.g., connecting to Doll Link on Core's WS listener).
 type BodyTunnel struct {
-	tun     tun.Device
-	net     *netstack.Net
-	dev     *device.Device
-	log     *slog.Logger
-	cfg     BodyTunnelConfig
-	started bool
+	mu       sync.Mutex
+	tun      tun.Device
+	net      *netstack.Net
+	dev      *device.Device
+	log      *slog.Logger
+	cfg      BodyTunnelConfig
+	started  bool
+	shutdown chan struct{}     // closed by Stop() to signal clean lifecycle shutdown
+	transportBroken bool       // set by BreakTransport() to simulate unexpected transport failure
 }
 
 // NewBodyTunnel creates a new Body-side WireGuard tunnel.
@@ -71,6 +75,7 @@ func NewBodyTunnel(cfg BodyTunnelConfig, log *slog.Logger) *BodyTunnel {
 	return &BodyTunnel{
 		cfg: cfg,
 		log: log.With("component", "body.wireguard"),
+		shutdown: make(chan struct{}),
 	}
 }
 
@@ -143,9 +148,12 @@ func (bt *BodyTunnel) Start(ctx context.Context) error {
 
 // Stop shuts down the WireGuard tunnel.
 func (bt *BodyTunnel) Stop() error {
+	bt.mu.Lock()
+	defer bt.mu.Unlock()
 	if !bt.started {
 		return nil
 	}
+	close(bt.shutdown) // signal clean lifecycle shutdown to observer
 	bt.dev.Close()
 	bt.started = false
 	bt.log.Info("body wireguard tunnel stopped")
@@ -190,6 +198,11 @@ func (bt *BodyTunnel) WaitHandshake(ctx context.Context, timeout time.Duration) 
 // handshakeComplete checks whether the WG handshake with Core has completed
 // by inspecting the IpcGet output.
 func (bt *BodyTunnel) handshakeComplete() (bool, error) {
+	bt.mu.Lock()
+	defer bt.mu.Unlock()
+	if !bt.started {
+		return false, nil
+	}
 	out, err := bt.dev.IpcGet()
 	if err != nil {
 		return false, fmt.Errorf("body-wg: ipc get: %w", err)
@@ -212,6 +225,11 @@ func (bt *BodyTunnel) handshakeComplete() (bool, error) {
 
 // IpcGet returns the WireGuard device's UAPI configuration as a string.
 func (bt *BodyTunnel) IpcGet() (string, error) {
+	bt.mu.Lock()
+	defer bt.mu.Unlock()
+	if bt.transportBroken {
+		return "", fmt.Errorf("body-wg: transport broken")
+	}
 	if !bt.started {
 		return "", fmt.Errorf("body-wg: tunnel not started")
 	}
@@ -220,4 +238,29 @@ func (bt *BodyTunnel) IpcGet() (string, error) {
 		return "", fmt.Errorf("body-wg: ipc get: %w", err)
 	}
 	return out, nil
+}
+
+// IpcSet sends a UAPI configuration string to the WireGuard device.
+func (bt *BodyTunnel) IpcSet(uapi string) error {
+	bt.mu.Lock()
+	defer bt.mu.Unlock()
+	if !bt.started {
+		return fmt.Errorf("body-wg: tunnel not started")
+	}
+	return bt.dev.IpcSet(uapi)
+}
+
+// BreakTransport forcefully closes the WireGuard device without signaling a
+// clean shutdown, simulating an unexpected transport failure (e.g., the
+// underlying Bind or socket dies unexpectedly). Does NOT close bt.shutdown,
+// so the loss observer distinguishes this from a normal Stop().
+func (bt *BodyTunnel) BreakTransport() {
+	bt.mu.Lock()
+	defer bt.mu.Unlock()
+	if bt.transportBroken {
+		return // already broken
+	}
+	bt.transportBroken = true
+	bt.dev.Close()
+	bt.started = false
 }
