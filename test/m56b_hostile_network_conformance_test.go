@@ -37,20 +37,6 @@ import (
 	relay "github.com/Neon-Dolls/neondoll/Core/Relay"
 )
 
-// hexToKey decodes a hex-encoded 32-byte key into a [32]byte array.
-func hexToKey(t *testing.T, s string) [32]byte {
-	b, err := hex.DecodeString(s)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(b) != 32 {
-		t.Fatalf("hex key length %d, want 32", len(b))
-	}
-	var k [32]byte
-	copy(k[:], b)
-	return k
-}
-
 func TestM56b_HostileNetworkConformance(t *testing.T) {
 	const routeID = relay.RouteID(42)
 	const token = "m56b-test-token"

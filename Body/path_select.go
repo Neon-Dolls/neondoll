@@ -51,8 +51,8 @@ type PathSelectorConfig struct {
 	// RouteCredential authenticates the relay route (for relay paths).
 	RouteCredential string
 
-	// TLSConfig optionally overrides the default TLS configuration for
-	// the relay WSS bind, e.g. to accept self-signed certificates.
+	// TLSConfig configures TLS for relay WSS (optional; nil means
+	// system trust store).
 	TLSConfig *tls.Config
 
 	// PerAttemptTimeout limits how long each path attempt waits for a
@@ -102,9 +102,12 @@ func SelectInitialPath(ctx context.Context, cfg PathSelectorConfig, log *slog.Lo
 
 	log.Info("path selection: starting", "timeout", timeout)
 
-	// Track which paths failed and why.
+	// Track which paths were actually attempted and why they failed.
+	directAttempted := false
 	var directErr error
+	relayUDPAttempted := false
 	var relayUDPErr error
+	wssAttempted := false
 	var wssErr error
 
 	// ── 1. Direct WG UDP ──────────────────────────────────────────────────────
@@ -114,6 +117,7 @@ func SelectInitialPath(ctx context.Context, cfg PathSelectorConfig, log *slog.Lo
 		tunnel := NewBodyTunnel(tunnelCfg, log)
 		if err := tunnel.Start(ctx); err != nil {
 			log.Warn("direct: start failed", "error", err)
+			directAttempted = true
 			directErr = err
 		} else if err := tunnel.WaitHandshake(ctx, timeout); err == nil {
 			log.Info("path selected: direct UDP")
@@ -122,6 +126,7 @@ func SelectInitialPath(ctx context.Context, cfg PathSelectorConfig, log *slog.Lo
 			log.Info("direct: handshake timeout, trying next",
 				"error", err)
 			tunnel.Stop()
+			directAttempted = true
 			directErr = err
 		}
 		// If the parent context was cancelled, stop selection immediately.
@@ -137,6 +142,7 @@ func SelectInitialPath(ctx context.Context, cfg PathSelectorConfig, log *slog.Lo
 		tunnel := NewBodyTunnel(tunnelCfg, log)
 		if err := tunnel.Start(ctx); err != nil {
 			log.Warn("relay-udp: start failed", "error", err)
+			relayUDPAttempted = true
 			relayUDPErr = err
 		} else if err := tunnel.WaitHandshake(ctx, timeout); err == nil {
 			log.Info("path selected: relay UDP")
@@ -145,6 +151,7 @@ func SelectInitialPath(ctx context.Context, cfg PathSelectorConfig, log *slog.Lo
 			log.Info("relay-udp: handshake timeout, trying next",
 				"error", err)
 			tunnel.Stop()
+			relayUDPAttempted = true
 			relayUDPErr = err
 		}
 		if cerr := ctx.Err(); cerr != nil {
@@ -164,6 +171,7 @@ func SelectInitialPath(ctx context.Context, cfg PathSelectorConfig, log *slog.Lo
 		tunnel := NewBodyTunnel(tunnelCfg, log)
 		if err := tunnel.Start(ctx); err != nil {
 			wssBind.Close()
+			wssAttempted = true
 			wssErr = err
 		} else {
 			hsErr := tunnel.WaitHandshake(ctx, timeout)
@@ -176,6 +184,7 @@ func SelectInitialPath(ctx context.Context, cfg PathSelectorConfig, log *slog.Lo
 			log.Info("relay-wss: handshake timeout", "error", hsErr)
 			tunnel.Stop()
 			wssBind.Close()
+			wssAttempted = true
 			wssErr = hsErr
 		}
 		if cerr := ctx.Err(); cerr != nil {
@@ -185,19 +194,19 @@ func SelectInitialPath(ctx context.Context, cfg PathSelectorConfig, log *slog.Lo
 
 	// ── All configured paths failed ──────────────────────────────────────────
 	var detail string
-	if directErr != nil {
+	if directAttempted {
 		if detail != "" {
 			detail += ", "
 		}
 		detail += fmt.Sprintf("direct (%v)", directErr)
 	}
-	if relayUDPErr != nil {
+	if relayUDPAttempted {
 		if detail != "" {
 			detail += ", "
 		}
 		detail += fmt.Sprintf("relay-udp (%v)", relayUDPErr)
 	}
-	if wssErr != nil {
+	if wssAttempted {
 		if detail != "" {
 			detail += ", "
 		}

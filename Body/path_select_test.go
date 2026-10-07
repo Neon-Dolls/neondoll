@@ -337,18 +337,12 @@ func TestBodyPathSelect_WSSFallback(t *testing.T) {
 	wssURL := "ws" + strings.TrimPrefix(srv.URL, "http")
 
 	// Timing monitor
-	done := make(chan struct{})
 	go func() {
 		for sec := 1; ; sec++ {
-			select {
-			case <-done:
-				return
-			case <-time.After(1 * time.Second):
-				t.Logf("TIMING: T+%ds elapsed", sec)
-			}
+			time.Sleep(1 * time.Second)
+			t.Logf("TIMING: T+%ds elapsed", sec)
 		}
 	}()
-	t.Cleanup(func() { close(done) })
 
 	// Start UDP forwarder: captureCh → Core UDP → injectCh
 	var (
