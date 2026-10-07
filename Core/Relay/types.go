@@ -22,14 +22,14 @@ type Frame struct {
 type ControlMessageType string
 
 const (
-	CmdRegister    ControlMessageType = "register"
-	CmdRegistered  ControlMessageType = "registered"
-	CmdRouteOpen   ControlMessageType = "route_open"
-	CmdRouteOpened ControlMessageType = "route_opened"
-	CmdRouteClose  ControlMessageType = "route_close"
-	CmdRouteClosed ControlMessageType = "route_closed"
-	CmdError       ControlMessageType = "error"
-	CmdBodyAttach  ControlMessageType = "attach"
+	CmdRegister     ControlMessageType = "register"
+	CmdRegistered   ControlMessageType = "registered"
+	CmdRouteOpen    ControlMessageType = "route_open"
+	CmdRouteOpened  ControlMessageType = "route_opened"
+	CmdRouteClose   ControlMessageType = "route_close"
+	CmdRouteClosed  ControlMessageType = "route_closed"
+	CmdError        ControlMessageType = "error"
+	CmdBodyAttach   ControlMessageType = "attach"
 	CmdBodyAttached ControlMessageType = "attached"
 )
 
