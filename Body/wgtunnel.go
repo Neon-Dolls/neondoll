@@ -209,3 +209,15 @@ func (bt *BodyTunnel) handshakeComplete() (bool, error) {
 	}
 	return false, nil
 }
+
+// IpcGet returns the WireGuard device's UAPI configuration as a string.
+func (bt *BodyTunnel) IpcGet() (string, error) {
+	if !bt.started {
+		return "", fmt.Errorf("body-wg: tunnel not started")
+	}
+	out, err := bt.dev.IpcGet()
+	if err != nil {
+		return "", fmt.Errorf("body-wg: ipc get: %w", err)
+	}
+	return out, nil
+}

@@ -3,6 +3,7 @@ package body
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -49,6 +50,10 @@ type PathSelectorConfig struct {
 
 	// RouteCredential authenticates the relay route (for relay paths).
 	RouteCredential string
+
+	// TLSConfig configures TLS for relay WSS (optional; nil means
+	// system trust store).
+	TLSConfig *tls.Config
 
 	// PerAttemptTimeout limits how long each path attempt waits for a
 	// WireGuard handshake.  Zero means 5 seconds.
@@ -158,6 +163,9 @@ func SelectInitialPath(ctx context.Context, cfg PathSelectorConfig, log *slog.Lo
 	if cfg.RelayWSSURL != "" {
 		log := log.With("attempt", "relay-wss")
 		wssBind := NewWSSBind(cfg.RelayWSSURL, cfg.RouteID, cfg.RouteCredential)
+		if cfg.TLSConfig != nil {
+			wssBind.SetTLSConfig(cfg.TLSConfig)
+		}
 		peerEndpoint := relay.RelayEndpointString(cfg.RouteID)
 		tunnelCfg := bodyTunnelConfigFromSelector(cfg, peerEndpoint, wssBind)
 		tunnel := NewBodyTunnel(tunnelCfg, log)
