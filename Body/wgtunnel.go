@@ -63,8 +63,7 @@ type BodyTunnel struct {
 	log      *slog.Logger
 	cfg      BodyTunnelConfig
 	started  bool
-	shutdown chan struct{}     // closed by Stop() to signal clean lifecycle shutdown
-	transportBroken bool       // set by BreakTransport() to simulate unexpected transport failure
+	shutdown chan struct{} // closed by Stop() to signal clean lifecycle shutdown
 }
 
 // NewBodyTunnel creates a new Body-side WireGuard tunnel.
@@ -227,9 +226,6 @@ func (bt *BodyTunnel) handshakeComplete() (bool, error) {
 func (bt *BodyTunnel) IpcGet() (string, error) {
 	bt.mu.Lock()
 	defer bt.mu.Unlock()
-	if bt.transportBroken {
-		return "", fmt.Errorf("body-wg: transport broken")
-	}
 	if !bt.started {
 		return "", fmt.Errorf("body-wg: tunnel not started")
 	}
@@ -250,17 +246,17 @@ func (bt *BodyTunnel) IpcSet(uapi string) error {
 	return bt.dev.IpcSet(uapi)
 }
 
-// BreakTransport forcefully closes the WireGuard device without signaling a
-// clean shutdown, simulating an unexpected transport failure (e.g., the
-// underlying Bind or socket dies unexpectedly). Does NOT close bt.shutdown,
-// so the loss observer distinguishes this from a normal Stop().
-func (bt *BodyTunnel) BreakTransport() {
+// CloseTransport closes the WireGuard device and marks the tunnel as
+// stopped without signaling clean lifecycle shutdown. This represents an
+// unexpected transport failure (e.g., the Bind/socket died). Unlike Stop(),
+// CloseTransport() does NOT close bt.shutdown, so the loss observer correctly
+// distinguishes transport failure from normal lifecycle shutdown.
+func (bt *BodyTunnel) CloseTransport() {
 	bt.mu.Lock()
 	defer bt.mu.Unlock()
-	if bt.transportBroken {
-		return // already broken
+	if !bt.started {
+		return
 	}
-	bt.transportBroken = true
 	bt.dev.Close()
 	bt.started = false
 }

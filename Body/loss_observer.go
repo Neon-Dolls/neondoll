@@ -127,8 +127,8 @@ func extractLastHandshakeNano(ipcOut string) (int64, error) {
 	return sec*1_000_000_000 + nsec, nil
 }
 
-// observerState holds the running state of a LossObserver goroutine.
-type observerState struct {
+// LossObserverHandle holds the running state of a LossObserver goroutine.
+type LossObserverHandle struct {
 	Cancel context.CancelFunc
 	Done   chan struct{}
 }
@@ -154,7 +154,7 @@ func StartLossObserver(
 	cfg LossObserverConfig,
 	onLoss chan PathLossEvent,
 	log *slog.Logger,
-) (*observerState, error) {
+) (*LossObserverHandle, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
@@ -182,8 +182,6 @@ func StartLossObserver(
 		ticker := time.NewTicker(cfg.PollInterval)
 		defer ticker.Stop()
 
-		var transportFailed bool
-
 		for {
 			select {
 			case <-ctx.Done():
@@ -196,27 +194,25 @@ func StartLossObserver(
 			case <-ticker.C:
 				ipcOut, ipcErr := bt.IpcGet()
 				if ipcErr != nil {
-					if !transportFailed {
-						transportFailed = true
-						// Distinguish clean shutdown from real transport failure.
-						// When bt.Stop() closes the tunnel, IpcGet returns
-						// "tunnel not started" — this is a lifecycle event,
-						// not a failure.
-						if strings.HasPrefix(fmt.Sprintf("%v", ipcErr), "body-wg: tunnel not started") {
-							return // clean shutdown, no event
-						}
-						select {
-						case <-bt.shutdown:
-							// Race: Stop() happened between IpcGet and this select.
-							return
-						case onLoss <- PathLossEvent{
-							Reason: TransportFailure,
-							At:     time.Now(),
-							Detail: fmt.Sprintf("IpcGet: %v", ipcErr),
-						}:
-						case <-ctx.Done():
-							return
-						}
+					// Distinguish clean shutdown from real transport failure.
+					// After Stop(): bt.shutdown is closed AND bt.started = false,
+					// so IpcGet returns "tunnel not started". After CloseTransport():
+					// bt.shutdown is NOT closed, but bt.started = false, so IpcGet
+					// also returns "tunnel not started". We cannot tell by the error
+					// string alone — check bt.shutdown directly.
+					select {
+					case <-bt.shutdown:
+						return // clean lifecycle shutdown
+					default:
+					}
+					// bt.shutdown is not closed — this is a real transport failure.
+					select {
+					case onLoss <- PathLossEvent{
+						Reason: TransportFailure,
+						At:     time.Now(),
+						Detail: fmt.Sprintf("IpcGet: %v", ipcErr),
+					}:
+					case <-ctx.Done():
 					}
 					return
 				}
@@ -254,5 +250,5 @@ func StartLossObserver(
 		}
 	}()
 
-	return &observerState{Cancel: cancel, Done: done}, nil
+	return &LossObserverHandle{Cancel: cancel, Done: done}, nil
 }

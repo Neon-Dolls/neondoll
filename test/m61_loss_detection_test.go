@@ -321,10 +321,10 @@ func TestLossObserver_CleanTeardown(t *testing.T) {
 // TestLossObserver_DetectsTransportFailure kills the BodyTunnel's underlying
 // transport and expects the observer to send a TransportFailure event.
 //
-// We simulate transport death via bt.BreakTransport() which closes the
+// We simulate transport death via bt.CloseTransport() which closes the
 // BodyTunnel's internal WG device without signaling clean lifecycle shutdown,
 // making IpcGet fail. bt.Stop() must NOT cause TransportFailure — only
-// BreakTransport() should.
+// CloseTransport() should.
 func TestLossObserver_DetectsTransportFailure(t *testing.T) {
 	bt, _, _ := startBodyWgTopology(t)
 
@@ -343,8 +343,8 @@ func TestLossObserver_DetectsTransportFailure(t *testing.T) {
 		t.Fatal("StartLossObserver returned nil handle")
 	}
 
-	// Kill the BodyTunnel's transport via BreakTransport (not Stop).
-	bt.BreakTransport()
+	// Kill the BodyTunnel's transport via CloseTransport (not Stop).
+	bt.CloseTransport()
 
 	timeout := time.NewTimer(5 * time.Second)
 	defer timeout.Stop()
