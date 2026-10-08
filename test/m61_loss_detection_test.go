@@ -5,7 +5,6 @@
 // Proves that the LossObserver correctly detects path loss on an established
 // BodyTunnel, covering:
 //   - WGLivenessLost: peer disappears, handshake goes stale.
-//   - TransportFailure: the tunnel itself dies (IpcGet fails).
 //   - CleanTeardown: cancelling the observer context does NOT emit a loss event.
 //   - RejectsNoHandshake: StartLossObserver fails if no handshake is recorded.
 //
@@ -315,47 +314,6 @@ func TestLossObserver_CleanTeardown(t *testing.T) {
 		t.Log("OK: observer terminated without emitting loss event")
 	case <-timeout.C:
 		t.Fatalf("observer did not terminate within %v", timeout)
-	}
-}
-
-// TestLossObserver_DetectsTransportFailure kills the BodyTunnel's underlying
-// transport and expects the observer to send a TransportFailure event.
-//
-// We simulate transport death via bt.CloseTransport() which closes the
-// BodyTunnel's internal WG device without signaling clean lifecycle shutdown,
-// making IpcGet fail. bt.Stop() must NOT cause TransportFailure — only
-// CloseTransport() should.
-func TestLossObserver_DetectsTransportFailure(t *testing.T) {
-	bt, _, _ := startBodyWgTopology(t)
-
-	onLoss := make(chan body.PathLossEvent, 1)
-	obsCtx, obsCancel := context.WithCancel(context.Background())
-	t.Cleanup(func() { obsCancel() })
-
-	obsHandle, err := body.StartLossObserver(bt, obsCtx, body.LossObserverConfig{
-		WGLivenessTimeout: 30 * time.Second, // long — won't fire
-		PollInterval:      500 * time.Millisecond,
-	}, onLoss, nil)
-	if err != nil {
-		t.Fatalf("StartLossObserver: %v", err)
-	}
-	if obsHandle == nil {
-		t.Fatal("StartLossObserver returned nil handle")
-	}
-
-	// Kill the BodyTunnel's transport via CloseTransport (not Stop).
-	bt.CloseTransport()
-
-	timeout := time.NewTimer(5 * time.Second)
-	defer timeout.Stop()
-	select {
-	case ev := <-onLoss:
-		if ev.Reason != body.TransportFailure {
-			t.Fatalf("expected TransportFailure, got %s", ev.Reason)
-		}
-		t.Logf("OK: detected TransportFailure")
-	case <-timeout.C:
-		t.Fatal("timed out waiting for TransportFailure event")
 	}
 }
 

@@ -246,17 +246,4 @@ func (bt *BodyTunnel) IpcSet(uapi string) error {
 	return bt.dev.IpcSet(uapi)
 }
 
-// CloseTransport closes the WireGuard device and marks the tunnel as
-// stopped without signaling clean lifecycle shutdown. This represents an
-// unexpected transport failure (e.g., the Bind/socket died). Unlike Stop(),
-// CloseTransport() does NOT close bt.shutdown, so the loss observer correctly
-// distinguishes transport failure from normal lifecycle shutdown.
-func (bt *BodyTunnel) CloseTransport() {
-	bt.mu.Lock()
-	defer bt.mu.Unlock()
-	if !bt.started {
-		return
-	}
-	bt.dev.Close()
-	bt.started = false
-}
+

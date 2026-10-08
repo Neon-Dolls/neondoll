@@ -140,7 +140,6 @@ type LossObserverHandle struct {
 // The observer runs until:
 //   - ctx is cancelled → clean exit (no event sent)
 //   - the BodyTunnel is cleanly stopped via bt.Stop() → clean exit (no event sent)
-//   - IpcGet fails unexpectedly (TransportFailure) → PathLossEvent sent, then exits
 //   - the last WireGuard handshake exceeds WGLivenessTimeout and the peer is
 //     completely unreachable → WGLivenessLost event sent, then exits
 //   - IpcGet succeeds but handshake-time parsing fails → logs the error and retries
@@ -194,27 +193,13 @@ func StartLossObserver(
 			case <-ticker.C:
 				ipcOut, ipcErr := bt.IpcGet()
 				if ipcErr != nil {
-					// Distinguish clean shutdown from real transport failure.
-					// After Stop(): bt.shutdown is closed AND bt.started = false,
-					// so IpcGet returns "tunnel not started". After CloseTransport():
-					// bt.shutdown is NOT closed, but bt.started = false, so IpcGet
-					// also returns "tunnel not started". We cannot tell by the error
-					// string alone — check bt.shutdown directly.
-					select {
-					case <-bt.shutdown:
-						return // clean lifecycle shutdown
-					default:
-					}
-					// bt.shutdown is not closed — this is a real transport failure.
-					select {
-					case onLoss <- PathLossEvent{
-						Reason: TransportFailure,
-						At:     time.Now(),
-						Detail: fmt.Sprintf("IpcGet: %v", ipcErr),
-					}:
-					case <-ctx.Done():
-					}
-					return
+					// IpcGet should not fail from a running WG device (the device
+					// reads from memory state). If it does, this could indicate a
+					// transport failure — but since no independent production signal
+					// exists in M6.1 to classify it, log and continue. M6.2+ may add
+					// the Bind error wiring to produce this signal.
+					log.Warn("loss-observer: IpcGet failed, retrying", "err", ipcErr)
+					continue
 				}
 
 				handshakeNano, parseErr := extractLastHandshakeNano(ipcOut)
