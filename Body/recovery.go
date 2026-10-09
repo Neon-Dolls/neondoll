@@ -1,52 +1,58 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 package body
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 )
 
-// RecoverPath attempts to establish a new path after the current one is lost.
+// RecoverPath stops the active tunnel and runs the M5 path selector to find
+// the next viable path, tagging the attempt with a recovery generation.
 //
-// It stops the old tunnel, then reuses SelectInitialPath (the M5 path selector)
-// to find the next viable path in priority order (direct → relay-udp → relay-wss).
-// The WG identity (private key, public key), overlay address, prefix, and peer
-// configuration from cfg are preserved — no re-pairing occurs.
+// The epoch argument provides generation-based ownership so that only the
+// current recovery cycle may commit a candidate as active.  Superseded
+// attempts (those whose generation no longer matches the epoch) clean up
+// their candidate and return an error.
 //
-// Integration with M6.1 (Active Path-Loss Detection):
-// The caller should invoke RecoverPath when it receives a WGLivenessLost event
-// from a LossObserver. The observer's onLoss callback is the integration point:
-//
-//	func() {
-//	    result := RecoverPath(ctx, currentTunnel, cfg, log)
-//	    currentTunnel = result.Tunnel
-//	}
-//
-// This ensures exactly one active authoritative path at all times: the old
-// tunnel is stopped before the new path is selected.
-//
-// Bounded recovery guarantees:
-//   - Old tunnel and its bind are fully retired before selection begins.
-//   - If all candidate paths fail, an error is returned and the system has
-//     no active path — the caller must decide how to proceed.
-//   - Context cancellation is honoured and returns immediately.
-//
-// No M6.3 epochs, stale-attempt protection, background probing,
-// preferred-path return, or migration is implemented here.
-func RecoverPath(ctx context.Context, oldTunnel *BodyTunnel, cfg PathSelectorConfig, log *slog.Logger) PathSelectionResult {
-	log.Info("recovering path after loss",
-		"direct", cfg.DirectEndpoint,
-		"relay-udp", cfg.RelayWGUDPEndpoint,
-		"relay-wss", cfg.RelayWSSURL,
-	)
-
-	// Retire the old tunnel first — must succeed to preserve
-	// the one-authoritative-path invariant.
-	if err := oldTunnel.Stop(); err != nil {
+// Identity, pairing, membership, and credentials are preserved without
+// re-pairing.  Background probing, preferred-path return, and migration
+// are M6.4+ scope and are NOT covered here.
+func RecoverPath(
+	ctx context.Context,
+	oldTunnel *BodyTunnel,
+	cfg PathSelectorConfig,
+	log *slog.Logger,
+	epoch *RecoveryEpoch,
+) PathSelectionResult {
+	gen := epoch.NextGen()
+	if gen == 0 {
 		return PathSelectionResult{
-			Err: fmt.Errorf("recover path: old tunnel teardown failed: %w", err),
+			Err: errors.New("body: recover path: recovery epoch shut down"),
 		}
 	}
 
-	return SelectInitialPath(ctx, cfg, log)
+	if err := oldTunnel.Stop(); err != nil {
+		return PathSelectionResult{
+			Err: fmt.Errorf("body: recover path: stop old tunnel: %w", err),
+		}
+	}
+
+	result := SelectInitialPath(ctx, cfg, log)
+	if result.Err != nil {
+		return result
+	}
+
+	if !epoch.TryCommit(gen, result.Tunnel) {
+		// Our generation is stale — another recovery started and
+		// already committed its tunnel.  Clean up our candidate.
+		result.Tunnel.Stop()
+		result.BoundBind.Close()
+		return PathSelectionResult{
+			Err: errors.New("body: recover path: superseded by newer recovery attempt"),
+		}
+	}
+
+	return result
 }
