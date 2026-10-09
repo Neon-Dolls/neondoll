@@ -609,11 +609,16 @@ func TestRecoverPath_ToWSS(t *testing.T) {
 	// ── Kill direct path ──
 	coreDevA.Close()
 
-	// ── RecoverPath → WSS ──
+	// ── RecoverPath → Direct (dead) → Relay UDP (unavailable) → WSS ──
 	recCtx, recCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer recCancel()
 
-	recResult := body.RecoverPath(recCtx, initialResult.Tunnel, cfg, logger)
+	// Configure an unavailable Relay UDP endpoint so the selector
+	// actually tries all three paths: direct → relay-udp → relay-wss.
+	recCfg := cfg
+	recCfg.RelayWGUDPEndpoint = "127.0.0.1:1"
+
+	recResult := body.RecoverPath(recCtx, initialResult.Tunnel, recCfg, logger)
 	if recResult.Err != nil {
 		t.Fatalf("RecoverPath: %v", recResult.Err)
 	}

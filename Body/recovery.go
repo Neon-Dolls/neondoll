@@ -2,6 +2,7 @@ package body
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 )
 
@@ -39,12 +40,12 @@ func RecoverPath(ctx context.Context, oldTunnel *BodyTunnel, cfg PathSelectorCon
 		"relay-wss", cfg.RelayWSSURL,
 	)
 
-	// Retire the old tunnel first, so the new path doesn't conflict.
+	// Retire the old tunnel first — must succeed to preserve
+	// the one-authoritative-path invariant.
 	if err := oldTunnel.Stop(); err != nil {
-		// The old path is already considered dead (that's why recovery was
-		// triggered).  Log the error and continue — the old bind is defunct.
-		log.Warn("old tunnel stop returned error, continuing recovery",
-			"error", err)
+		return PathSelectionResult{
+			Err: fmt.Errorf("recover path: old tunnel teardown failed: %w", err),
+		}
 	}
 
 	return SelectInitialPath(ctx, cfg, log)
