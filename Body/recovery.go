@@ -5,41 +5,47 @@ import (
 	"log/slog"
 )
 
-// RecoverPath replaces a lost active path by closing the old tunnel and
-// re-running bounded M5 path selection (SelectInitialPath) with the same
-// identity configuration.
+// RecoverPath attempts to establish a new path after the current one is lost.
 //
-// The old tunnel is fully stopped — device, bind, and all goroutines —
-// before selection begins, guaranteeing exactly one active authoritative
-// path at all times.
+// It stops the old tunnel, then reuses SelectInitialPath (the M5 path selector)
+// to find the next viable path in priority order (direct → relay-udp → relay-wss).
+// The WG identity (private key, public key), overlay address, prefix, and peer
+// configuration from cfg are preserved — no re-pairing occurs.
 //
-// All identity is preserved because PathSelectorConfig is read-only:
-// the same PrivateKey, CorePublicKey, OverlayAddress, and credentials
-// are passed directly to SelectInitialPath. No re-pairing occurs.
+// Integration with M6.1 (Active Path-Loss Detection):
+// The caller should invoke RecoverPath when it receives a WGLivenessLost event
+// from a LossObserver. The observer's onLoss callback is the integration point:
 //
-// Returns the same shape as SelectInitialPath: a PathSelectionResult with
-// Tunnel/Path/BoundBind on success, or an error via Err when all candidate
-// paths are exhausted or ctx is cancelled.
-func RecoverPath(
-	ctx context.Context,
-	oldTunnel *BodyTunnel,
-	cfg PathSelectorConfig,
-	log *slog.Logger,
-) PathSelectionResult {
-	if log == nil {
-		log = slog.Default()
-	}
-
-	log.Info("recovering from path loss: stopping old tunnel")
-
-	// Retire the old active path — this closes the WG device and its bind.
-	oldTunnel.Stop()
-
-	log.Info("re-running bounded path selection with preserved identity",
+//	func() {
+//	    result := RecoverPath(ctx, currentTunnel, cfg, log)
+//	    currentTunnel = result.Tunnel
+//	}
+//
+// This ensures exactly one active authoritative path at all times: the old
+// tunnel is stopped before the new path is selected.
+//
+// Bounded recovery guarantees:
+//   - Old tunnel and its bind are fully retired before selection begins.
+//   - If all candidate paths fail, an error is returned and the system has
+//     no active path — the caller must decide how to proceed.
+//   - Context cancellation is honoured and returns immediately.
+//
+// No M6.3 epochs, stale-attempt protection, background probing,
+// preferred-path return, or migration is implemented here.
+func RecoverPath(ctx context.Context, oldTunnel *BodyTunnel, cfg PathSelectorConfig, log *slog.Logger) PathSelectionResult {
+	log.Info("recovering path after loss",
 		"direct", cfg.DirectEndpoint,
 		"relay-udp", cfg.RelayWGUDPEndpoint,
 		"relay-wss", cfg.RelayWSSURL,
 	)
+
+	// Retire the old tunnel first, so the new path doesn't conflict.
+	if err := oldTunnel.Stop(); err != nil {
+		// The old path is already considered dead (that's why recovery was
+		// triggered).  Log the error and continue — the old bind is defunct.
+		log.Warn("old tunnel stop returned error, continuing recovery",
+			"error", err)
+	}
 
 	return SelectInitialPath(ctx, cfg, log)
 }
