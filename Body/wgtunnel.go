@@ -154,6 +154,9 @@ func (bt *BodyTunnel) Stop() error {
 	}
 	close(bt.shutdown) // signal clean lifecycle shutdown to observer
 	bt.dev.Close()
+	if err := bt.dev.BindClose(); err != nil {
+		return fmt.Errorf("body tunnel stop: bind close: %w", err)
+	}
 	bt.started = false
 	bt.log.Info("body wireguard tunnel stopped")
 	return nil
