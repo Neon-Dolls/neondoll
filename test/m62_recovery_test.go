@@ -451,7 +451,7 @@ func TestRecoverPath_DirectToRelayUDP(t *testing.T) {
 	recCtx, recCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer recCancel()
 
-	epoch := body.NewRecoveryEpoch()
+	epoch := body.NewRecoveryEpoch(nil)
 	recResult := body.RecoverPath(recCtx, initialResult.Tunnel, cfg, logger, epoch)
 	if recResult.Err != nil {
 		t.Fatalf("RecoverPath: %v", recResult.Err)
@@ -619,7 +619,7 @@ func TestRecoverPath_ToWSS(t *testing.T) {
 	recCfg := cfg
 	recCfg.RelayWGUDPEndpoint = "127.0.0.1:1"
 
-	epoch := body.NewRecoveryEpoch()
+	epoch := body.NewRecoveryEpoch(nil)
 	recResult := body.RecoverPath(recCtx, initialResult.Tunnel, recCfg, logger, epoch)
 	if recResult.Err != nil {
 		t.Fatalf("RecoverPath: %v", recResult.Err)
@@ -705,7 +705,7 @@ func TestRecoverPath_PreservesIdentity(t *testing.T) {
 	// We use a trick: stop the old tunnel, then prove identity on a separate
 	// recovery invocation. But the test actually tests that RecoverPath
 	// reuses the same private key, so we stop the tunnel, kill the device.
-	epoch := body.NewRecoveryEpoch()
+	epoch := body.NewRecoveryEpoch(nil)
 	recResult := body.RecoverPath(recCtx, initialResult.Tunnel, cfg, logger, epoch)
 	if recResult.Err != nil {
 		t.Fatalf("RecoverPath: %v", recResult.Err)
@@ -772,7 +772,7 @@ func TestRecoverPath_AllPathsFail(t *testing.T) {
 	recCtx, recCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer recCancel()
 
-	recResult := body.RecoverPath(recCtx, initialResult.Tunnel, recCfg, logger, body.NewRecoveryEpoch())
+	recResult := body.RecoverPath(recCtx, initialResult.Tunnel, recCfg, logger, body.NewRecoveryEpoch(nil))
 	if recResult.Err == nil {
 		t.Fatal("expected an error when all paths fail during recovery")
 	}
@@ -822,7 +822,7 @@ func TestRecoverPath_Cancellation(t *testing.T) {
 	recCtx, recCancel := context.WithCancel(context.Background())
 	recCancel()
 
-	recResult := body.RecoverPath(recCtx, initialResult.Tunnel, cfg, logger, body.NewRecoveryEpoch())
+	recResult := body.RecoverPath(recCtx, initialResult.Tunnel, cfg, logger, body.NewRecoveryEpoch(nil))
 	if recResult.Err == nil {
 		t.Fatal("expected an error when recovery context is cancelled")
 	}
@@ -874,7 +874,7 @@ func TestRecoverPath_StopIdempotent(t *testing.T) {
 	defer recCancel()
 
 	// RecoverPath should handle the already-stopped tunnel gracefully
-	recResult := body.RecoverPath(recCtx, initialResult.Tunnel, cfg, logger, body.NewRecoveryEpoch())
+	recResult := body.RecoverPath(recCtx, initialResult.Tunnel, cfg, logger, body.NewRecoveryEpoch(nil))
 	if recResult.Err != nil {
 		t.Fatalf("RecoverPath after Stop: %v", recResult.Err)
 	}

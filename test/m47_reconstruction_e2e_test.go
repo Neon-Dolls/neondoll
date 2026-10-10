@@ -62,13 +62,13 @@ func TestM47_ReconstructionE2E(t *testing.T) {
 	waitConnected(t, tp, true, 20*time.Second)
 	// Route 1 must return on the SAME endpoint the Body already uses.
 	waitRouteOpen(t, ctx, tp, tp.relaySvc, relay.RouteID(1), tp.routeEndpoint, 15*time.Second)
+	// RoutesRestored is incremented asynchronously on the control client
+	// when it processes the RouteOpened message — wait for it.
+	waitRestoredRoutes(t, ctx, tp, 1, 15*time.Second)
 
 	m1 := tp.ctrlClient.Metrics()
 	if m1.Reconnects <= m0.Reconnects {
 		t.Fatalf("Reconnects did not increase: before=%d after=%d", m0.Reconnects, m1.Reconnects)
-	}
-	if m1.RoutesRestored < 1 {
-		t.Fatalf("RoutesRestored = %d, want >= 1", m1.RoutesRestored)
 	}
 	t.Logf("After reconstruction: reconnects=%d routes_restored=%d connected=%v",
 		m1.Reconnects, m1.RoutesRestored, tp.ctrlClient.IsConnected())

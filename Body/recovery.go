@@ -53,6 +53,9 @@ func RecoverPath(
 	// 3. Select a new path.
 	result := SelectInitialPath(ctx, cfg, log)
 	if result.Err != nil {
+		// SelectInitialPath failed.  Release the pending-recovery marker
+		// so a subsequent loss callback can start a fresh recovery.
+		epoch.TryCancel(gen)
 		return result
 	}
 
