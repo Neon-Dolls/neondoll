@@ -11,6 +11,10 @@ import "sync"
 // decision?"  Superseded attempts discover staleness and close their
 // candidate tunnels.
 //
+// Cleanup (stop, close) is unconditional — epoch authority gates ONLY
+// whether a candidate may become the active tunnel.  A stale attempt
+// may always release its own resources.
+//
 // There is NO cancel/coordination machinery — the epoch is purely about
 // commit ownership.  In-flight SelectInitialPath calls complete normally
 // and discover staleness only when they attempt to commit.
@@ -31,14 +35,31 @@ func NewRecoveryEpoch() *RecoveryEpoch {
 // NextGen reserves and returns the next generation number.  The previous
 // generation is implicitly stale: any attempt that holds the old number
 // will fail TryCommit.  Returns 0 when the epoch is permanently shut down.
-//
-// The OLD tunnel must be stopped by the caller BEFORE calling NextGen, so
-// that any loss callbacks fire before the epoch advances.  This prevents
-// stale callbacks from racing with a newer generation.
 func (e *RecoveryEpoch) NextGen() uint64 {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if e.closed {
+		return 0
+	}
+	e.gen++
+	e.committed = false
+	return e.gen
+}
+
+// NextGenForTunnel atomically checks that oldTunnel is still the epoch's
+// active tunnel AND advances the generation.  This prevents stale loss
+// callbacks (for a tunnel that was already replaced) from bumping the
+// generation or triggering a spurious recovery.
+//
+// Returns 0 and does NOT advance when the epoch is closed OR when a
+// newer tunnel has already been committed (the loss is stale).
+func (e *RecoveryEpoch) NextGenForTunnel(oldTunnel *BodyTunnel) uint64 {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.closed {
+		return 0
+	}
+	if e.active != nil && e.active != oldTunnel {
 		return 0
 	}
 	e.gen++
@@ -51,8 +72,8 @@ func (e *RecoveryEpoch) NextGen() uint64 {
 // not already committed (single-commit guarantee).  When false, the caller
 // must close candidate — it belongs to a superseded or duplicate attempt.
 //
-// The previous generation's tunnel must already be stopped by the caller
-// of RecoverPath, so TryCommit does NOT stop any tunnel.
+// TryCommit does NOT stop tunnels — the caller of RecoverPath already
+// stopped the old tunnel unconditionally before calling TryCommit.
 func (e *RecoveryEpoch) TryCommit(gen uint64, candidate *BodyTunnel) bool {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -80,8 +101,10 @@ func (e *RecoveryEpoch) Active() *BodyTunnel {
 	return e.active
 }
 
-// Shutdown permanently invalidates all generations and closes the active
-// tunnel.
+// Shutdown permanently closes the epoch.  Active tunnels are stopped.
+// After Shutdown, NextGenForTunnel and TryCommit return failure, so
+// in-flight recovery attempts discover closure through their normal
+// stale-cleanup path.
 func (e *RecoveryEpoch) Shutdown() {
 	e.mu.Lock()
 	defer e.mu.Unlock()

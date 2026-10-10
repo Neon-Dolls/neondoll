@@ -9,10 +9,12 @@
 // Scenarios:
 //   - RecoverPath integrates with RecoveryEpoch (commit ownership)
 //   - Cancellation prevents tunnel creation in superseded attempts
-//   - Shutdown during recovery invalidates outstanding attempts
+//   - Epoch shutdown during recovery invalidates in-flight attempts
 //   - Concurrent recovery: slow path attempt is superseded by fast path
 //   - Repeated sequential recovery succeeds
-//   - Late success from a superseded attempt and loss-after-replacement
+//   - Gen isolation: old tunnel loss notification cannot supersede newer
+//   - Stale loss callback after successful replacement is rejected
+//   - Stale attempts always clean up their candidate resources
 
 package integration
 
@@ -84,7 +86,7 @@ func TestRecoverPath_WithEpoch(t *testing.T) {
 	}
 
 	// Further NextGen/TryCommit should reference the new active tunnel
-	// RecoverPath called NextGen() which returned 1, so gen 1 is current
+	// RecoverPath called NextGenForTunnel which returned 1, so gen 1 is current
 	if !epoch.IsCurrent(1) {
 		t.Fatal("expected generation 1 to be current after first recovery")
 	}
@@ -133,7 +135,8 @@ func TestRecoverPath_EpochCancelled(t *testing.T) {
 		t.Fatal("expected error from cancelled RecoverPath")
 	}
 
-	// Epoch should be at generation 0 (NextGen was called but TryCommit was not attempted)
+	// No tunnel was committed — active remains nil.
+	// (NextGenForTunnel advanced the gen, but TryCommit was never reached.)
 	active := epoch.Active()
 	if active != nil {
 		t.Fatal("epoch.Active() should be nil after cancelled recovery")
@@ -142,9 +145,10 @@ func TestRecoverPath_EpochCancelled(t *testing.T) {
 
 // ── Test 3: Epoch shutdown during in-flight recovery ──
 // Starts a recovery attempt in a background goroutine, waits for it to
-// call NextGen (detected by epoch gen advancing from 0), then shuts down
-// the epoch while SelectInitialPath is still in-flight.
-func TestRecoverPath_EpochShutdownDuringRecovery(t *testing.T) {
+// advance the epoch generation (NextGenForTunnel), then shuts down the
+// epoch while SelectInitialPath is still in-flight.  The recovery attempt
+// discovers closure via TryCommit and cleans up its candidate tunnel.
+func TestRecoverPath_ShutdownDuringRecovery(t *testing.T) {
 	bodyKeys := newTestKeypair(t)
 	coreKeys := newTestKeypair(t)
 	logger := testLogger(t)
@@ -179,8 +183,8 @@ func TestRecoverPath_EpochShutdownDuringRecovery(t *testing.T) {
 	wg.Add(1)
 
 	// Start recovery in a background goroutine.  It will:
-	//   1. Stop the old tunnel (fast)
-	//   2. Call NextGen (gen advances: 0 → 1)
+	//   1. Call NextGenForTunnel (gen advances: 0 → 1)
+	//   2. Stop the old tunnel (fast)
 	//   3. Enter SelectInitialPath with the real endpoint (takes ~200ms+)
 	go func() {
 		defer wg.Done()
@@ -189,8 +193,8 @@ func TestRecoverPath_EpochShutdownDuringRecovery(t *testing.T) {
 		result = body.RecoverPath(recCtx, initialResult.Tunnel, cfg, logger, epoch)
 	}()
 
-	// Wait for the background RecoverPath to call NextGen (gen > 0).
-	// This tells us it has passed Step 2 and is now inside Step 3.
+	// Wait for the background RecoverPath to advance the gen (gen > 0).
+	// This tells us it has passed Step 1 and is now inside Step 3.
 	for i := 0; i < 100 && epoch.IsCurrent(0); i++ {
 		time.Sleep(1 * time.Millisecond)
 	}
@@ -211,11 +215,12 @@ func TestRecoverPath_EpochShutdownDuringRecovery(t *testing.T) {
 
 // ── Test 4: Concurrent recovery — late candidate rejected as stale ──
 // Two goroutines call RecoverPath with the same real endpoint.  The first
-// (slow) attempt calls NextGen (gen=1) and enters SelectInitialPath.  The
-// second (fast) attempt starts after gen advanced, creating gen=2.  The
-// first attempt's candidate arrives with stale gen=1 and is rejected by
-// TryCommit, testing the stale-attempt safety path with real resources.
-func TestRecoverPath_LateSuccess(t *testing.T) {
+// (slow) attempt advances the gen (1) and enters SelectInitialPath.  The
+// second (fast) attempt starts after gen advanced, creating gen 2.  The
+// first attempt's candidate arrives with stale gen 1 and is rejected by
+// TryCommit.  The stale attempt's cleanup (Stop + Close) runs, and the
+// fast attempt's tunnel becomes the epoch's active tunnel.
+func TestRecoverPath_OverlappingRecoveries(t *testing.T) {
 	bodyKeys := newTestKeypair(t)
 	coreKeys := newTestKeypair(t)
 	logger := testLogger(t)
@@ -251,8 +256,8 @@ func TestRecoverPath_LateSuccess(t *testing.T) {
 	)
 	wg.Add(2)
 
-	// Slow attempt starts first — calls NextGen (gen: 0 → 1),
-	// then enters SelectInitialPath with the real endpoint.
+	// Slow attempt starts first — advances gen (0 → 1) then enters
+	// SelectInitialPath with the real endpoint.
 	go func() {
 		defer wg.Done()
 		ctxSlow, cancelSlow := context.WithTimeout(context.Background(), 20*time.Second)
@@ -260,13 +265,13 @@ func TestRecoverPath_LateSuccess(t *testing.T) {
 		resultSlow = body.RecoverPath(ctxSlow, initialResult.Tunnel, cfg, logger, epoch)
 	}()
 
-	// Wait for the slow attempt to call NextGen (gen advances from 0).
+	// Wait for the slow attempt to advance the gen (gen > 0).
 	for i := 0; i < 100 && epoch.IsCurrent(0); i++ {
 		time.Sleep(1 * time.Millisecond)
 	}
 
-	// Fast attempt starts second — its NextGen creates gen=2, making
-	// gen=1 stale before the slow attempt can commit.
+	// Fast attempt starts second — its NextGenForTunnel creates gen 2, making
+	// gen 1 stale before the slow attempt can commit.
 	go func() {
 		defer wg.Done()
 		ctxFast, cancelFast := context.WithTimeout(context.Background(), 20*time.Second)
@@ -276,7 +281,7 @@ func TestRecoverPath_LateSuccess(t *testing.T) {
 
 	wg.Wait()
 
-	// The fast attempt (gen=2) should have committed.
+	// The fast attempt (gen 2) should have committed.
 	active := epoch.Active()
 	if active == nil {
 		t.Fatal("epoch.Active() is nil after concurrent recovery")
@@ -285,15 +290,17 @@ func TestRecoverPath_LateSuccess(t *testing.T) {
 	waitHandshake(t, coreDev, "Core device (active recovery)", 10*time.Second)
 
 	if resultFast.Err != nil {
-		t.Errorf("fast recovery (gen=2) should have succeeded: %v", resultFast.Err)
+		t.Errorf("fast recovery (gen 2) should have succeeded: %v", resultFast.Err)
 	} else if resultFast.Tunnel != active {
 		t.Error("fast recovery's tunnel should be the epoch's active tunnel")
 	}
 
-	// The slow attempt (gen=1) should have been rejected by TryCommit
-	// because gen=1 != epoch's current gen=2.
+	// The slow attempt (gen 1) should have been rejected by TryCommit
+	// because gen 1 != epoch's current gen 2.  Its stale-cleanup code
+	// ran (Stop + Close on the candidate) — this verifies that resource
+	// release is always permitted regardless of epoch ownership.
 	if resultSlow.Err == nil {
-		t.Errorf("slow recovery (gen=1) should have been rejected as stale")
+		t.Errorf("slow recovery (gen 1) should have been rejected as stale")
 	}
 }
 
@@ -356,9 +363,10 @@ func TestRecoverPath_RepeatedRecovery(t *testing.T) {
 	}
 }
 
-// ── Test 6: Old tunnel loss-after-replacement via epoch ──
-// This tests the isolation: after a recovery, the epoch can reject stale
-// callbacks for the old tunnel's generation.
+// ── Test 6: Gen isolation — old tunnel cannot supersede newer ──
+// After two sequential recoveries, the epoch still correctly reports
+// that the old generation is no longer current and that its active
+// tunnel belongs to the latest recovery.
 
 func TestRecoverPath_LossAfterReplacement(t *testing.T) {
 	bodyKeys := newTestKeypair(t)
@@ -410,8 +418,7 @@ func TestRecoverPath_LossAfterReplacement(t *testing.T) {
 	t.Cleanup(func() { result2.Tunnel.Stop() })
 	waitHandshake(t, coreDev, "Core device (recovery 2)", 10*time.Second)
 
-	// Now simulate "stale loss" — the tunnel from gen 1 is no longer current.
-	// The epoch should reject gen 1 as stale.
+	// Gen 1 is stale after recovery 2 committed gen 2.
 	if epoch.IsCurrent(1) {
 		t.Fatal("gen 1 should not be current after recovery 2")
 	}
@@ -420,5 +427,77 @@ func TestRecoverPath_LossAfterReplacement(t *testing.T) {
 	}
 	if epoch.Active() != result2.Tunnel {
 		t.Fatal("epoch's active tunnel should be from recovery 2")
+	}
+}
+
+// ── Test 7: Stale loss callback after successful replacement ──
+// After a recovery commits a new tunnel, a stale loss notification for
+// the old tunnel reaches RecoverPath.  NextGenForTunnel must reject it
+// (the old tunnel no longer matches epoch.Active()) WITHOUT advancing
+// the generation, ensuring the healthy tunnel is not superseded.
+func TestRecoverPath_StaleLossCallback(t *testing.T) {
+	bodyKeys := newTestKeypair(t)
+	coreKeys := newTestKeypair(t)
+
+	logger := testLogger(t)
+
+	coreDev, corePort := startCoreUDPDevice(t, coreKeys, bodyKeys.pubHex)
+
+	cfg := body.PathSelectorConfig{
+		PrivateKey:         hexToKey(t, bodyKeys.privHex),
+		CorePublicKey:      hexToPublicKey(t, coreKeys.pubHex),
+		OverlayAddress:     bodyOverlay,
+		OverlayPrefix:      netip.MustParsePrefix("fd00::/64"),
+		DirectEndpoint:     fmt.Sprintf("127.0.0.1:%d", corePort),
+		RelayWGUDPEndpoint: "",
+		RelayWSSURL:        "",
+		PerAttemptTimeout:  5 * time.Second,
+	}
+
+	selCtx, selCancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer selCancel()
+	initialResult := body.SelectInitialPath(selCtx, cfg, logger)
+	if initialResult.Err != nil {
+		t.Fatalf("SelectInitialPath: %v", initialResult.Err)
+	}
+	t.Cleanup(func() { initialResult.Tunnel.Stop() })
+	waitHandshake(t, coreDev, "Core device", 10*time.Second)
+
+	epoch := body.NewRecoveryEpoch()
+
+	// Recovery commits a new active tunnel (gen 1).
+	recCtx, recCancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer recCancel()
+	recoveryResult := body.RecoverPath(recCtx, initialResult.Tunnel, cfg, logger, epoch)
+	if recoveryResult.Err != nil {
+		t.Fatalf("RecoverPath: %v", recoveryResult.Err)
+	}
+	t.Cleanup(func() { recoveryResult.Tunnel.Stop() })
+	waitHandshake(t, coreDev, "Core device (recovery)", 10*time.Second)
+
+	// Verify gen 1 is current after first recovery.
+	genAfterRecovery := uint64(1)
+	if !epoch.IsCurrent(genAfterRecovery) {
+		t.Fatal("expected gen 1 after first recovery")
+	}
+
+	// Now simulate a stale loss callback: RecoverPath is called with the
+	// OLD tunnel (initialResult.Tunnel).  NextGenForTunnel sees that
+	// epoch.Active() points to the NEW tunnel and rejects the call.
+	staleResult := body.RecoverPath(
+		recCtx,              // stale context (no cancellation needed — rejected early)
+		initialResult.Tunnel, // the OLD tunnel, no longer the epoch's active tunnel
+		cfg, logger, epoch,
+	)
+	if staleResult.Err == nil {
+		t.Fatal("stale loss callback should have been rejected")
+	}
+
+	// The epoch must be unchanged: same gen, same active tunnel.
+	if !epoch.IsCurrent(genAfterRecovery) {
+		t.Fatal("gen must not advance from a stale loss callback")
+	}
+	if epoch.Active() != recoveryResult.Tunnel {
+		t.Fatal("epoch's active tunnel must remain the newer tunnel")
 	}
 }
