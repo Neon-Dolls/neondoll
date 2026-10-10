@@ -140,14 +140,14 @@ func TestRecoverPath_EpochCancelled(t *testing.T) {
 	}
 }
 
-// ── Test 3: Shutdown during recovery ──
-
+// ── Test 3: Epoch shutdown during in-flight recovery ──
+// Starts a recovery attempt in a background goroutine, waits for it to
+// call NextGen (detected by epoch gen advancing from 0), then shuts down
+// the epoch while SelectInitialPath is still in-flight.
 func TestRecoverPath_EpochShutdownDuringRecovery(t *testing.T) {
 	bodyKeys := newTestKeypair(t)
 	coreKeys := newTestKeypair(t)
-
 	logger := testLogger(t)
-
 	coreDev, corePort := startCoreUDPDevice(t, coreKeys, bodyKeys.pubHex)
 
 	cfg := body.PathSelectorConfig{
@@ -172,44 +172,68 @@ func TestRecoverPath_EpochShutdownDuringRecovery(t *testing.T) {
 
 	epoch := body.NewRecoveryEpoch()
 
-	// Shut down the epoch before attempting recovery
+	var (
+		result body.PathSelectionResult
+		wg     sync.WaitGroup
+	)
+	wg.Add(1)
+
+	// Start recovery in a background goroutine.  It will:
+	//   1. Stop the old tunnel (fast)
+	//   2. Call NextGen (gen advances: 0 → 1)
+	//   3. Enter SelectInitialPath with the real endpoint (takes ~200ms+)
+	go func() {
+		defer wg.Done()
+		recCtx, recCancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer recCancel()
+		result = body.RecoverPath(recCtx, initialResult.Tunnel, cfg, logger, epoch)
+	}()
+
+	// Wait for the background RecoverPath to call NextGen (gen > 0).
+	// This tells us it has passed Step 2 and is now inside Step 3.
+	for i := 0; i < 100 && epoch.IsCurrent(0); i++ {
+		time.Sleep(1 * time.Millisecond)
+	}
+
+	// Shut down the epoch while recovery is in-flight inside SelectInitialPath.
 	epoch.Shutdown()
 
-	recCtx, recCancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer recCancel()
-	result := body.RecoverPath(recCtx, initialResult.Tunnel, cfg, logger, epoch)
+	wg.Wait()
+
+	// Recovery must have been rejected by the shut-down epoch.
 	if result.Err == nil {
-		t.Fatal("expected error when recovering with shut-down epoch")
+		t.Fatal("expected error when epoch shut down during recovery")
+	}
+	if epoch.Active() != nil {
+		t.Fatal("epoch.Active() should be nil after shutdown")
 	}
 }
 
-// ── Test 4: Concurrent recovery — slow path superseded by fast ──
-// Two goroutines call RecoverPath with the same epoch. The slow attempt
-// (dead endpoint, times out) fails. The fast attempt (real endpoint) succeeds.
-// The epoch's active tunnel must be from the fast attempt.
-
+// ── Test 4: Concurrent recovery — late candidate rejected as stale ──
+// Two goroutines call RecoverPath with the same real endpoint.  The first
+// (slow) attempt calls NextGen (gen=1) and enters SelectInitialPath.  The
+// second (fast) attempt starts after gen advanced, creating gen=2.  The
+// first attempt's candidate arrives with stale gen=1 and is rejected by
+// TryCommit, testing the stale-attempt safety path with real resources.
 func TestRecoverPath_LateSuccess(t *testing.T) {
 	bodyKeys := newTestKeypair(t)
-	coreKeysA := newTestKeypair(t)
-
+	coreKeys := newTestKeypair(t)
 	logger := testLogger(t)
+	coreDev, corePort := startCoreUDPDevice(t, coreKeys, bodyKeys.pubHex)
 
-	coreDevA, corePortA := startCoreUDPDevice(t, coreKeysA, bodyKeys.pubHex)
-
-	epoch := body.NewRecoveryEpoch()
-
+	// Both attempts share the same real endpoint config.
+	// No dead endpoints — both SelectInitialPath calls can succeed.
 	cfg := body.PathSelectorConfig{
 		PrivateKey:         hexToKey(t, bodyKeys.privHex),
-		CorePublicKey:      hexToPublicKey(t, coreKeysA.pubHex),
+		CorePublicKey:      hexToPublicKey(t, coreKeys.pubHex),
 		OverlayAddress:     bodyOverlay,
 		OverlayPrefix:      netip.MustParsePrefix("fd00::/64"),
-		DirectEndpoint:     fmt.Sprintf("127.0.0.1:%d", corePortA),
+		DirectEndpoint:     fmt.Sprintf("127.0.0.1:%d", corePort),
 		RelayWGUDPEndpoint: "",
 		RelayWSSURL:        "",
-		PerAttemptTimeout:  5 * time.Second,
+		PerAttemptTimeout:  10 * time.Second,
 	}
 
-	// Initial path
 	selCtx, selCancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer selCancel()
 	initialResult := body.SelectInitialPath(selCtx, cfg, logger)
@@ -217,81 +241,59 @@ func TestRecoverPath_LateSuccess(t *testing.T) {
 		t.Fatalf("SelectInitialPath: %v", initialResult.Err)
 	}
 	t.Cleanup(func() { initialResult.Tunnel.Stop() })
-	waitHandshake(t, coreDevA, "Core device A", 10*time.Second)
+	waitHandshake(t, coreDev, "Core device", 10*time.Second)
 
-	// Set up two recovery configs:
-	// cfgSlow — tries dead endpoint (timeout 1s), no relay → fails
-	// cfgFast — tries real endpoint (timeout 10s) → succeeds
-	cfgSlow := body.PathSelectorConfig{
-		PrivateKey:         hexToKey(t, bodyKeys.privHex),
-		CorePublicKey:      hexToPublicKey(t, coreKeysA.pubHex),
-		OverlayAddress:     bodyOverlay,
-		OverlayPrefix:      netip.MustParsePrefix("fd00::/64"),
-		DirectEndpoint:     "127.0.0.1:1", // dead — handshake will time out
-		RelayWGUDPEndpoint: "",
-		RelayWSSURL:        "",
-		PerAttemptTimeout:  1 * time.Second,
-	}
-	cfgFast := body.PathSelectorConfig{
-		PrivateKey:         hexToKey(t, bodyKeys.privHex),
-		CorePublicKey:      hexToPublicKey(t, coreKeysA.pubHex),
-		OverlayAddress:     bodyOverlay,
-		OverlayPrefix:      netip.MustParsePrefix("fd00::/64"),
-		DirectEndpoint:     fmt.Sprintf("127.0.0.1:%d", corePortA),
-		RelayWGUDPEndpoint: "",
-		RelayWSSURL:        "",
-		PerAttemptTimeout:  10 * time.Second,
-	}
+	epoch := body.NewRecoveryEpoch()
 
 	var (
 		resultSlow, resultFast body.PathSelectionResult
 		wg                     sync.WaitGroup
 	)
-
 	wg.Add(2)
 
-	// Slow attempt starts first
+	// Slow attempt starts first — calls NextGen (gen: 0 → 1),
+	// then enters SelectInitialPath with the real endpoint.
 	go func() {
 		defer wg.Done()
 		ctxSlow, cancelSlow := context.WithTimeout(context.Background(), 20*time.Second)
 		defer cancelSlow()
-		resultSlow = body.RecoverPath(ctxSlow, initialResult.Tunnel, cfgSlow, logger, epoch)
+		resultSlow = body.RecoverPath(ctxSlow, initialResult.Tunnel, cfg, logger, epoch)
 	}()
 
-	// Let the slow recovery get through NextGen and start SelectInitialPath
-	time.Sleep(100 * time.Millisecond)
+	// Wait for the slow attempt to call NextGen (gen advances from 0).
+	for i := 0; i < 100 && epoch.IsCurrent(0); i++ {
+		time.Sleep(1 * time.Millisecond)
+	}
 
-	// Fast attempt starts second — its NextGen creates a newer generation
+	// Fast attempt starts second — its NextGen creates gen=2, making
+	// gen=1 stale before the slow attempt can commit.
 	go func() {
 		defer wg.Done()
 		ctxFast, cancelFast := context.WithTimeout(context.Background(), 20*time.Second)
 		defer cancelFast()
-		resultFast = body.RecoverPath(ctxFast, initialResult.Tunnel, cfgFast, logger, epoch)
+		resultFast = body.RecoverPath(ctxFast, initialResult.Tunnel, cfg, logger, epoch)
 	}()
 
 	wg.Wait()
 
-	// Fast recovery should have succeeded
-	if resultFast.Err != nil {
-		t.Errorf("fast recovery failed: %v", resultFast.Err)
-	}
-	if resultFast.Tunnel != nil {
-		t.Cleanup(func() { resultFast.Tunnel.Stop() })
-	}
-	waitHandshake(t, coreDevA, "Core device (fast recovery)", 10*time.Second)
-
-	// Slow recovery should have failed (dead endpoint times out)
-	if resultSlow.Err == nil {
-		t.Error("expected slow recovery to fail (dead endpoint)")
-	}
-
-	// The epoch's active tunnel should be from the fast recovery
+	// The fast attempt (gen=2) should have committed.
 	active := epoch.Active()
 	if active == nil {
 		t.Fatal("epoch.Active() is nil after concurrent recovery")
 	}
-	if resultFast.Tunnel != nil && active != resultFast.Tunnel {
-		t.Fatal("epoch's active tunnel is not from the winning fast recovery")
+	t.Cleanup(func() { active.Stop() })
+	waitHandshake(t, coreDev, "Core device (active recovery)", 10*time.Second)
+
+	if resultFast.Err != nil {
+		t.Errorf("fast recovery (gen=2) should have succeeded: %v", resultFast.Err)
+	} else if resultFast.Tunnel != active {
+		t.Error("fast recovery's tunnel should be the epoch's active tunnel")
+	}
+
+	// The slow attempt (gen=1) should have been rejected by TryCommit
+	// because gen=1 != epoch's current gen=2.
+	if resultSlow.Err == nil {
+		t.Errorf("slow recovery (gen=1) should have been rejected as stale")
 	}
 }
 

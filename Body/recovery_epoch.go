@@ -11,19 +11,15 @@ import "sync"
 // decision?"  Superseded attempts discover staleness and close their
 // candidate tunnels.
 //
-// Stale loss callbacks (transport failure notifications for a tunnel that
-// is no longer the active path) are rejected by checking IsCurrent.  The
-// caller checks the generation of the tunnel's owning epoch rather than
-// acting on every loss event.
-//
 // There is NO cancel/coordination machinery — the epoch is purely about
 // commit ownership.  In-flight SelectInitialPath calls complete normally
 // and discover staleness only when they attempt to commit.
 type RecoveryEpoch struct {
-	mu     sync.Mutex
-	gen    uint64      // current authoritative generation
-	active *BodyTunnel // tunnel committed for this generation (may be nil)
-	closed bool
+	mu        sync.Mutex
+	gen       uint64      // current authoritative generation
+	active    *BodyTunnel // tunnel committed for this generation (may be nil)
+	committed bool        // gen has been committed exactly once
+	closed    bool
 }
 
 // NewRecoveryEpoch returns an initialised epoch with generation 0 and no
@@ -35,6 +31,10 @@ func NewRecoveryEpoch() *RecoveryEpoch {
 // NextGen reserves and returns the next generation number.  The previous
 // generation is implicitly stale: any attempt that holds the old number
 // will fail TryCommit.  Returns 0 when the epoch is permanently shut down.
+//
+// The OLD tunnel must be stopped by the caller BEFORE calling NextGen, so
+// that any loss callbacks fire before the epoch advances.  This prevents
+// stale callbacks from racing with a newer generation.
 func (e *RecoveryEpoch) NextGen() uint64 {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -42,24 +42,25 @@ func (e *RecoveryEpoch) NextGen() uint64 {
 		return 0
 	}
 	e.gen++
+	e.committed = false
 	return e.gen
 }
 
 // TryCommit attempts to set candidate as the active tunnel for gen.
-// Returns true if gen is still the authoritative generation (commit
-// accepted).  When false, the caller must close candidate — it belongs
-// to a superseded attempt.
+// Returns true if gen is still the authoritative generation AND gen has
+// not already committed (single-commit guarantee).  When false, the caller
+// must close candidate — it belongs to a superseded or duplicate attempt.
+//
+// The previous generation's tunnel must already be stopped by the caller
+// of RecoverPath, so TryCommit does NOT stop any tunnel.
 func (e *RecoveryEpoch) TryCommit(gen uint64, candidate *BodyTunnel) bool {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if e.closed || gen != e.gen {
+	if e.closed || gen != e.gen || e.committed {
 		return false
 	}
-	// Close the previous active tunnel if any.
-	if e.active != nil {
-		e.active.Stop()
-	}
 	e.active = candidate
+	e.committed = true
 	return true
 }
 
