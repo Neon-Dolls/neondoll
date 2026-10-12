@@ -813,3 +813,17 @@ func waitRouteOpen(t *testing.T, ctx context.Context, tp *m46Topology, svc *rela
 	})
 	t.Logf("Route %d restored: state=open endpoint=%s", id, wantEndpoint)
 }
+
+// waitRestoredRoutes polls until RoutesRestored >= minRoutes or the context
+// expires.  This is needed because RoutesRestored is incremented
+// asynchronously on the control client when it processes RouteOpened
+// — the server-side route registry (checked by waitRouteOpen) may
+// indicate the route is open before the counter is updated.
+func waitRestoredRoutes(t *testing.T, ctx context.Context, tp *m46Topology, minRoutes int, timeout time.Duration) {
+	t.Helper()
+	what := fmt.Sprintf("RoutesRestored >= %d", minRoutes)
+	waitCondition(t, what, timeout, func() bool {
+		return tp.ctrlClient.RoutesRestored.Load() >= int64(minRoutes)
+	})
+	t.Logf("RoutesRestored=%d (wanted >=%d)", tp.ctrlClient.RoutesRestored.Load(), minRoutes)
+}

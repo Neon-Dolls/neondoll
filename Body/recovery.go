@@ -1,52 +1,76 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 package body
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 )
 
-// RecoverPath attempts to establish a new path after the current one is lost.
+// RecoverPath replaces the active tunnel with a freshly selected path,
+// using epoch-based generation ownership so that only the current
+// recovery cycle may commit a candidate as active.
 //
-// It stops the old tunnel, then reuses SelectInitialPath (the M5 path selector)
-// to find the next viable path in priority order (direct → relay-udp → relay-wss).
-// The WG identity (private key, public key), overlay address, prefix, and peer
-// configuration from cfg are preserved — no re-pairing occurs.
+// Ownership check (via NextGenForTunnel) runs atomically with generation
+// advancement, preventing a stale loss callback (for an already-replaced
+// tunnel) from bumping the epoch and invalidating a healthy recovery.
 //
-// Integration with M6.1 (Active Path-Loss Detection):
-// The caller should invoke RecoverPath when it receives a WGLivenessLost event
-// from a LossObserver. The observer's onLoss callback is the integration point:
+// The old tunnel is stopped AFTER the genen claim, not before.  Neither
+// epoch state nor tunnel liveness gate resource cleanup — a stale attempt
+// may always release its own candidate.
 //
-//	func() {
-//	    result := RecoverPath(ctx, currentTunnel, cfg, log)
-//	    currentTunnel = result.Tunnel
-//	}
+// Superseded attempts clean up their candidate and return an error.
 //
-// This ensures exactly one active authoritative path at all times: the old
-// tunnel is stopped before the new path is selected.
-//
-// Bounded recovery guarantees:
-//   - Old tunnel and its bind are fully retired before selection begins.
-//   - If all candidate paths fail, an error is returned and the system has
-//     no active path — the caller must decide how to proceed.
-//   - Context cancellation is honoured and returns immediately.
-//
-// No M6.3 epochs, stale-attempt protection, background probing,
-// preferred-path return, or migration is implemented here.
-func RecoverPath(ctx context.Context, oldTunnel *BodyTunnel, cfg PathSelectorConfig, log *slog.Logger) PathSelectionResult {
-	log.Info("recovering path after loss",
-		"direct", cfg.DirectEndpoint,
-		"relay-udp", cfg.RelayWGUDPEndpoint,
-		"relay-wss", cfg.RelayWSSURL,
-	)
-
-	// Retire the old tunnel first — must succeed to preserve
-	// the one-authoritative-path invariant.
-	if err := oldTunnel.Stop(); err != nil {
+// Identity, pairing, membership, and credentials are preserved without
+// re-pairing.  Background probing, preferred-path return, and migration
+// are M6.4+ scope and are NOT covered here.
+func RecoverPath(
+	ctx context.Context,
+	oldTunnel *BodyTunnel,
+	cfg PathSelectorConfig,
+	log *slog.Logger,
+	epoch *RecoveryEpoch,
+) PathSelectionResult {
+	// 1. Reserve a generation.  NextGenForTunnel atomically checks that
+	//    oldTunnel is still the epoch's active tunnel, rejecting stale
+	//    loss callbacks without advancing the epoch.
+	gen := epoch.NextGenForTunnel(oldTunnel)
+	if gen == 0 {
 		return PathSelectionResult{
-			Err: fmt.Errorf("recover path: old tunnel teardown failed: %w", err),
+			Err: errors.New("body: recover path: epoch closed or superseded"),
 		}
 	}
 
-	return SelectInitialPath(ctx, cfg, log)
+	// 2. Stop the old tunnel unconditionally.  Resource cleanup is always
+	//    permitted — epoch authority gates commit, not resource release.
+	if err := oldTunnel.Stop(); err != nil {
+		return PathSelectionResult{
+			Err: fmt.Errorf("body: recover path: stop old tunnel: %w", err),
+		}
+	}
+
+	// 3. Select a new path.
+	result := SelectInitialPath(ctx, cfg, log)
+	if result.Err != nil {
+		// SelectInitialPath failed.  Release the pending-recovery marker
+		// so a subsequent loss callback can start a fresh recovery.
+		epoch.TryCancel(gen)
+		return result
+	}
+
+	// 4. Commit.  If stale, close candidate.
+	if !epoch.TryCommit(gen, result.Tunnel) {
+		// Our generation is stale — another recovery started and
+		// already committed its tunnel.  Clean up our candidate.
+		result.Tunnel.Stop()
+		if result.BoundBind != nil {
+			result.BoundBind.Close()
+		}
+		return PathSelectionResult{
+			Err: errors.New("body: recover path: superseded by newer recovery attempt"),
+		}
+	}
+
+	return result
 }
