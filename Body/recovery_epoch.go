@@ -91,8 +91,10 @@ func (e *RecoveryEpoch) NextGenForTunnel(oldTunnel *BodyTunnel) uint64 {
 // Returns true if gen is still the authoritative generation AND gen has
 // not already committed (single-commit guarantee).  When false, the caller
 // must close candidate — it belongs to a superseded or duplicate attempt.
-// In either case, the in-flight recovery marker is cleared so that a fresh
-// loss notification can start a new recovery.
+// Only the current generation may clear the in-flight recovery marker: a
+// stale generation's rejected commit must not disturb the marker owned by
+// a newer, still-pending recovery, or duplicate loss callbacks could
+// advance generations concurrently.
 //
 // TryCommit does NOT stop tunnels — the caller of RecoverPath already
 // owns that responsibility.  If the caller decides to abandon recovery
@@ -101,7 +103,12 @@ func (e *RecoveryEpoch) TryCommit(gen uint64, candidate *BodyTunnel) bool {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if e.closed || gen != e.gen || e.committed {
-		e.pendingRecovery = nil
+		// The marker is cleared only when gen is still the current
+		// generation (closure or single-commit rejection).  A stale gen
+		// must leave the newer recovery's pending marker untouched.
+		if gen == e.gen {
+			e.pendingRecovery = nil
+		}
 		return false
 	}
 	e.active = candidate

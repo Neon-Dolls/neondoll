@@ -196,10 +196,63 @@ func TestRecoveryEpoch_NextGenForTunnel_AfterFailedCommit(t *testing.T) {
 		t.Fatal("TryCommit should fail — gen is stale")
 	}
 
-	// After failed commit, pendingRecovery is cleared.
+	// A stale generation's rejected commit must NOT release the in-flight
+	// recovery marker: it belongs to the current generation now.  A
+	// duplicate claim for the same tunnel is still rejected.
+	if g := e.NextGenForTunnel(tun); g != 0 {
+		t.Fatalf("duplicate claim after stale failed commit should still be rejected, got %d", g)
+	}
+
+	// Only the current generation can release the pending marker.
+	e.TryCancel(e.gen)
+
 	g2 := e.NextGenForTunnel(tun)
 	if g2 == 0 || g2 <= g1 {
-		t.Fatalf("new claim after failed commit should advance gen, got %d (old=%d)", g2, g1)
+		t.Fatalf("new claim after current-gen TryCancel should advance gen, got %d (old=%d)", g2, g1)
+	}
+}
+
+// TestRecoveryEpoch_NextGenForTunnel_StaleCommitKeepsNewerPending is the
+// regression test for M6.3: a stale generation's rejected TryCommit must
+// not clear the pendingRecovery marker owned by a newer, still-pending
+// recovery.  Otherwise a duplicate loss callback could start a second
+// recovery for the same tunnel while the first is still in-flight.
+func TestRecoveryEpoch_NextGenForTunnel_StaleCommitKeepsNewerPending(t *testing.T) {
+	t.Parallel()
+	e := NewRecoveryEpoch(nil)
+	tun := NewBodyTunnel(BodyTunnelConfig{}, nil)
+
+	// 1. Start recovery generation 1.
+	g1 := e.NextGenForTunnel(tun)
+	if g1 == 0 {
+		t.Fatal("first NextGenForTunnel should succeed")
+	}
+
+	// 2. Supersede it with generation 2: gen 1 abandons recovery and a
+	//    fresh loss callback claims the next generation for the tunnel.
+	e.TryCancel(g1)
+	g2 := e.NextGenForTunnel(tun)
+	if g2 == 0 || g2 <= g1 {
+		t.Fatalf("superseding claim should advance gen, got %d (old=%d)", g2, g1)
+	}
+
+	// 3. A late commit from generation 1 arrives after the supersede —
+	//    it must be rejected as stale.
+	candidate := NewBodyTunnel(BodyTunnelConfig{}, nil)
+	if e.TryCommit(g1, candidate) {
+		t.Fatal("stale TryCommit should be rejected")
+	}
+
+	// 4. Generation 2's pendingRecovery state remains intact: a duplicate
+	//    loss callback for the tunnel is still rejected.
+	if g := e.NextGenForTunnel(tun); g != 0 {
+		t.Fatalf("stale commit cleared newer pendingRecovery: duplicate claim got %d, want 0", g)
+	}
+
+	// And generation 2 can still commit normally.
+	candidate2 := NewBodyTunnel(BodyTunnelConfig{}, nil)
+	if !e.TryCommit(g2, candidate2) {
+		t.Fatal("current generation TryCommit should succeed")
 	}
 }
 
