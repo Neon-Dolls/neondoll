@@ -191,52 +191,49 @@ func TestReachProbe_Timeout(t *testing.T) {
 
 func TestNewProbeScheduler(t *testing.T) {
 	cfg := DefaultProbeSchedulerConfig()
-	s := NewProbeScheduler(cfg, 0)
+	epoch := NewRecoveryEpoch(nil)
+	s := NewProbeScheduler(cfg, epoch)
 	if s == nil {
 		t.Fatal("NewProbeScheduler returned nil")
 	}
-	if s.RecoveryEpoch != 0 {
-		t.Fatalf("expected epoch 0, got %d", s.RecoveryEpoch)
-	}
 }
 
-func TestShouldProbe_InitiallyTrue(t *testing.T) {
+func TestTryAcquireSlot_InitiallyTrue(t *testing.T) {
 	s := NewProbeScheduler(ProbeSchedulerConfig{
 		MinInterval:    time.Hour,
 		MaxBackoff:     time.Hour,
 		MaxAttempts:    10,
 		InitialBackoff: time.Minute,
-	}, 0)
-	if !s.ShouldProbe(time.Now()) {
-		t.Fatal("ShouldProbe should be true for a fresh scheduler")
+	}, NewRecoveryEpoch(nil))
+	if !s.TryAcquireSlot(time.Now()) {
+		t.Fatal("TryAcquireSlot should be true for a fresh scheduler")
 	}
 }
 
-func TestShouldProbe_MinInterval(t *testing.T) {
+func TestTryAcquireSlot_MinInterval(t *testing.T) {
 	s := NewProbeScheduler(ProbeSchedulerConfig{
 		MinInterval:    50 * time.Millisecond,
 		MaxBackoff:     time.Hour,
 		MaxAttempts:    10,
-		InitialBackoff: time.Minute,
-	}, 0)
+		InitialBackoff: 10 * time.Millisecond,
+	}, NewRecoveryEpoch(nil))
 
 	// First probe allowed.
 	now := time.Now()
-	if !s.ShouldProbe(now) {
-		t.Fatal("ShouldProbe should be true initially")
+	if !s.TryAcquireSlot(now) {
+		t.Fatal("TryAcquireSlot should be true initially")
 	}
 
-	s.RecordResult(false) // sets lastProbe = time.Now()
-
-	// Immediately after — ShouldProbe should be false.
-	if s.ShouldProbe(time.Now()) {
-		t.Fatal("ShouldProbe should be false right after probing")
+	// Immediately after — TryAcquireSlot should be false (both MinInterval and
+	// backoff are 10ms — but the elapsed time is ~0 so both block it).
+	if s.TryAcquireSlot(time.Now()) {
+		t.Fatal("TryAcquireSlot should be false right after probing")
 	}
 
-	// After MinInterval passes — ShouldProbe should be true again.
+	// After MinInterval AND backoff pass — should allow probing again.
 	time.Sleep(60 * time.Millisecond)
-	if !s.ShouldProbe(time.Now()) {
-		t.Fatal("ShouldProbe should be true after MinInterval")
+	if !s.TryAcquireSlot(time.Now()) {
+		t.Fatal("TryAcquireSlot should be true after MinInterval and backoff")
 	}
 }
 
@@ -246,7 +243,7 @@ func TestBackoff_GrowsOnFailure(t *testing.T) {
 		MaxBackoff:     time.Hour,
 		MaxAttempts:    10,
 		InitialBackoff: 10 * time.Millisecond,
-	}, 0)
+	}, NewRecoveryEpoch(nil))
 
 	s.RecordResult(false) // backoff → 10ms
 	s.RecordResult(false) // backoff → 20ms
@@ -255,8 +252,8 @@ func TestBackoff_GrowsOnFailure(t *testing.T) {
 	// Wait for backoff to expire plus MinInterval.
 	time.Sleep(50 * time.Millisecond)
 
-	if !s.ShouldProbe(time.Now()) {
-		t.Fatal("ShouldProbe should be true after waiting for backoff")
+	if !s.TryAcquireSlot(time.Now()) {
+		t.Fatal("TryAcquireSlot should be true after waiting for backoff")
 	}
 }
 
@@ -266,7 +263,7 @@ func TestBackoff_CappedAtMaxBackoff(t *testing.T) {
 		MaxBackoff:     15 * time.Millisecond,
 		MaxAttempts:    100,
 		InitialBackoff: 5 * time.Millisecond,
-	}, 0)
+	}, NewRecoveryEpoch(nil))
 
 	// Fail many times — backoff should cap at 15ms.
 	for i := 0; i < 10; i++ {
@@ -277,8 +274,8 @@ func TestBackoff_CappedAtMaxBackoff(t *testing.T) {
 	// Wait well past MaxBackoff.
 	time.Sleep(20 * time.Millisecond)
 
-	if !s.ShouldProbe(time.Now()) {
-		t.Fatal("ShouldProbe should be true after waiting for capped backoff")
+	if !s.TryAcquireSlot(time.Now()) {
+		t.Fatal("TryAcquireSlot should be true after waiting for capped backoff")
 	}
 }
 
@@ -288,15 +285,15 @@ func TestMaxAttempts_Exhaustion(t *testing.T) {
 		MaxBackoff:     10 * time.Millisecond,
 		MaxAttempts:    3,
 		InitialBackoff: time.Nanosecond,
-	}, 0)
+	}, NewRecoveryEpoch(nil))
 
 	s.RecordResult(false) // attempt 1
 	s.RecordResult(false) // attempt 2
 	s.RecordResult(false) // attempt 3 — exceeds MaxAttempts
 
 	time.Sleep(1 * time.Millisecond) // ample time past any backoff
-	if s.ShouldProbe(time.Now()) {
-		t.Fatal("ShouldProbe should be false after MaxAttempts exhaustion")
+	if s.TryAcquireSlot(time.Now()) {
+		t.Fatal("TryAcquireSlot should be false after MaxAttempts exhaustion")
 	}
 }
 
@@ -306,7 +303,7 @@ func TestRecordResult_ResetsBackoff(t *testing.T) {
 		MaxBackoff:     time.Hour,
 		MaxAttempts:    3,
 		InitialBackoff: 50 * time.Millisecond,
-	}, 0)
+	}, NewRecoveryEpoch(nil))
 
 	s.RecordResult(false) // attempt 1 — backoff 50ms
 	s.RecordResult(false) // attempt 2 — backoff 100ms
@@ -314,8 +311,8 @@ func TestRecordResult_ResetsBackoff(t *testing.T) {
 
 	time.Sleep(1 * time.Millisecond) // well past MinInterval
 
-	if !s.ShouldProbe(time.Now()) {
-		t.Fatal("ShouldProbe should be true after success resets state")
+	if !s.TryAcquireSlot(time.Now()) {
+		t.Fatal("TryAcquireSlot should be true after success resets state")
 	}
 }
 
@@ -325,19 +322,19 @@ func TestRecordResult_SuccessResetsMaxAttempts(t *testing.T) {
 		MaxBackoff:     time.Hour,
 		MaxAttempts:    2,
 		InitialBackoff: time.Nanosecond,
-	}, 0)
+	}, NewRecoveryEpoch(nil))
 
 	// Exhaust max attempts.
 	s.RecordResult(false) // attempt 1
 	s.RecordResult(false) // attempt 2 — MaxAttempts exhausted
-	if s.ShouldProbe(time.Now()) {
-		t.Fatal("ShouldProbe should be false after exhaustion")
+	if s.TryAcquireSlot(time.Now()) {
+		t.Fatal("TryAcquireSlot should be false after exhaustion")
 	}
 
 	// Success should reset the attempt counter.
 	s.RecordResult(true)
-	if !s.ShouldProbe(time.Now()) {
-		t.Fatal("ShouldProbe should be true after success resets attempts")
+	if !s.TryAcquireSlot(time.Now()) {
+		t.Fatal("TryAcquireSlot should be true after success resets attempts")
 	}
 }
 
@@ -347,72 +344,70 @@ func TestRecordCancelled_ResetsAndEnforcesMinInterval(t *testing.T) {
 		MaxBackoff:     time.Hour,
 		MaxAttempts:    10,
 		InitialBackoff: time.Minute,
-	}, 0)
+	}, NewRecoveryEpoch(nil))
 
 	// Should be probeable initially.
-	if !s.ShouldProbe(time.Now()) {
-		t.Fatal("ShouldProbe should be true initially")
+	if !s.TryAcquireSlot(time.Now()) {
+		t.Fatal("TryAcquireSlot should be true initially")
 	}
 
 	s.RecordCancelled()
 
-	// Immediately after cancellation — ShouldProbe should be false due to
+	// Immediately after cancellation — TryAcquireSlot should be false due to
 	// MinInterval enforcement (RecordCancelled updates lastProbe).
-	if s.ShouldProbe(time.Now()) {
-		t.Fatal("ShouldProbe should be false right after RecordCancelled (MinInterval)")
+	if s.TryAcquireSlot(time.Now()) {
+		t.Fatal("TryAcquireSlot should be false right after RecordCancelled (MinInterval)")
 	}
 
 	// After MinInterval passes — should allow probing again.
 	time.Sleep(60 * time.Millisecond)
-	if !s.ShouldProbe(time.Now()) {
-		t.Fatal("ShouldProbe should be true after MinInterval")
+	if !s.TryAcquireSlot(time.Now()) {
+		t.Fatal("TryAcquireSlot should be true after MinInterval")
 	}
 }
 
 func TestStale_DetectsEpochChange(t *testing.T) {
+	epoch := NewRecoveryEpoch(nil)
 	s := NewProbeScheduler(ProbeSchedulerConfig{
 		MinInterval:    time.Hour,
 		MaxBackoff:     time.Hour,
 		MaxAttempts:    10,
 		InitialBackoff: time.Minute,
-	}, 0)
+	}, epoch)
 
-	// Stale returns true when the given epoch doesn't match the scheduler's
-// current epoch.
-	s.Stale(1) // 1 != 0 → true
-
+	// epoch begins at generation 0.
 	if s.Stale(0) {
-		t.Fatal("Stale(0) should be false (current epoch 0 matches)")
+		t.Fatal("Stale(0) should be false (gen 0 is current)")
 	}
 	if !s.Stale(1) {
-		t.Fatal("Stale(1) should be true (epoch 1 != current epoch 0)")
+		t.Fatal("Stale(1) should be true (gen 1 is not current)")
 	}
 }
 
-func TestResetEpoch(t *testing.T) {
+func TestEpochAdvance(t *testing.T) {
+	epoch := NewRecoveryEpoch(nil)
 	s := NewProbeScheduler(ProbeSchedulerConfig{
 		MinInterval:    time.Hour,
 		MaxBackoff:     time.Hour,
 		MaxAttempts:    10,
 		InitialBackoff: time.Minute,
-	}, 0)
+	}, epoch)
 
-	s.ResetEpoch(5)
-		if s.RecoveryEpoch != 5 {
-			t.Fatalf("expected epoch 5, got %d", s.RecoveryEpoch)
-		}
-		if !s.Stale(4) {
-			t.Fatal("Stale(4) should be true (epoch 4 != current epoch 5)")
-		}
-		if s.Stale(5) {
-			t.Fatal("Stale(5) should be false (epoch 5 matches current epoch)")
-		}
+	// Advance the epoch — old generations become stale.
+	epoch.NextGen() // 0 → 1
+
+	if !s.Stale(0) {
+		t.Fatal("Stale(0) should be true after epoch advance")
+	}
+	if s.Stale(1) {
+		t.Fatal("Stale(1) should be false (current generation)")
+	}
 }
 
 func TestElapsed(t *testing.T) {
 	s := NewProbeScheduler(ProbeSchedulerConfig{
 		MinInterval: time.Hour,
-	}, 0)
+	}, NewRecoveryEpoch(nil))
 
 	if s.Elapsed(time.Now()) != 0 {
 		t.Fatal("Elapsed should be zero before any probe")

@@ -67,7 +67,6 @@ func ReachProbe(ctx context.Context, cfg ReachProbeConfig) ReachProbeResult {
 	if err != nil {
 		return ReachProbeResult{Error: fmt.Errorf("reach probe: dial %s: %w", cfg.Target, err), Duration: time.Since(start)}
 	}
-	defer conn.Close()
 
 	// Deadline for the entire exchange — honour whichever is shorter:
 	// the caller's context deadline or the per-probe Timeout.
@@ -77,27 +76,53 @@ func ReachProbe(ctx context.Context, cfg ReachProbeConfig) ReachProbeResult {
 	}
 	_ = conn.SetDeadline(deadline)
 
-	nonce := make([]byte, 8)
-	if _, err := rand.Read(nonce); err != nil {
-		return ReachProbeResult{Error: fmt.Errorf("reach probe: nonce: %w", err), Duration: time.Since(start)}
+	type exchangeResult struct {
+		reachable bool
+		err       error
 	}
 
-	req := encodeProbeRequest(cfg.RouteID, nonce, cfg.Credential)
-	if _, err := conn.Write(req); err != nil {
-		return ReachProbeResult{Error: fmt.Errorf("reach probe: write: %w", err), Duration: time.Since(start)}
-	}
+	resultCh := make(chan exchangeResult, 1)
 
-	resp := make([]byte, 52)
-	n, err := conn.Read(resp)
-	if err != nil {
-		return ReachProbeResult{Error: fmt.Errorf("reach probe: read: %w", err), Duration: time.Since(start)}
-	}
+	go func() {
+		defer conn.Close()
 
-	if err := verifyProbeResponse(resp[:n], cfg.RouteID, nonce, cfg.Credential); err != nil {
-		return ReachProbeResult{Error: fmt.Errorf("reach probe: verify: %w", err), Duration: time.Since(start)}
-	}
+		nonce := make([]byte, 8)
+		if _, err := rand.Read(nonce); err != nil {
+			resultCh <- exchangeResult{err: fmt.Errorf("reach probe: nonce: %w", err)}
+			return
+		}
 
-	return ReachProbeResult{Reachable: true, Duration: time.Since(start)}
+		req := encodeProbeRequest(cfg.RouteID, nonce, cfg.Credential)
+		if _, err := conn.Write(req); err != nil {
+			resultCh <- exchangeResult{err: fmt.Errorf("reach probe: write: %w", err)}
+			return
+		}
+
+		resp := make([]byte, 52)
+		n, err := conn.Read(resp)
+		if err != nil {
+			resultCh <- exchangeResult{err: fmt.Errorf("reach probe: read: %w", err)}
+			return
+		}
+
+		if err := verifyProbeResponse(resp[:n], cfg.RouteID, nonce, cfg.Credential); err != nil {
+			resultCh <- exchangeResult{err: fmt.Errorf("reach probe: verify: %w", err)}
+			return
+		}
+
+		resultCh <- exchangeResult{reachable: true}
+	}()
+
+	select {
+	case res := <-resultCh:
+		if res.err != nil {
+			return ReachProbeResult{Error: res.err, Duration: time.Since(start)}
+		}
+		return ReachProbeResult{Reachable: res.reachable, Duration: time.Since(start)}
+	case <-ctx.Done():
+		conn.Close()
+		return ReachProbeResult{Error: fmt.Errorf("reach probe: cancelled: %w", ctx.Err()), Duration: time.Since(start)}
+	}
 }
 
 func encodeProbeRequest(routeID uint64, nonce []byte, credential string) []byte {
@@ -145,13 +170,17 @@ func computeProbeHMAC(magic string, routeID uint64, nonce []byte, credential str
 // ProbeScheduler bounds the frequency of probe cycles and provides
 // exponential backoff on failure.  It is safe for concurrent use.
 type ProbeScheduler struct {
-	Config     ProbeSchedulerConfig
-	RecoveryEpoch int // epoch at construction time for stale-result rejection
+	Config ProbeSchedulerConfig
 
-	mu          sync.Mutex
-	lastProbe   time.Time
-	backoff     time.Duration
-	attempts    int
+	// epoch is the authoritative RecoveryEpoch lifecycle owner.  Stale()
+	// checks results against this epoch rather than maintaining a separate
+	// generation counter that could drift.
+	epoch *RecoveryEpoch
+
+	mu        sync.Mutex
+	lastProbe time.Time
+	backoff   time.Duration
+	attempts  int
 }
 
 // ProbeSchedulerConfig configures probe scheduling behaviour.
@@ -182,7 +211,9 @@ func DefaultProbeSchedulerConfig() ProbeSchedulerConfig {
 }
 
 // NewProbeScheduler creates a scheduler with the given config and epoch.
-func NewProbeScheduler(cfg ProbeSchedulerConfig, epoch int) *ProbeScheduler {
+// The epoch pointer must be non-nil; it is the authoritative RecoveryEpoch
+// lifecycle owner used by Stale() for stale-result rejection.
+func NewProbeScheduler(cfg ProbeSchedulerConfig, epoch *RecoveryEpoch) *ProbeScheduler {
 	if cfg.MinInterval <= 0 {
 		cfg.MinInterval = 30 * time.Second
 	}
@@ -193,15 +224,19 @@ func NewProbeScheduler(cfg ProbeSchedulerConfig, epoch int) *ProbeScheduler {
 		cfg.InitialBackoff = 5 * time.Second
 	}
 	return &ProbeScheduler{
-		Config:        cfg,
-		RecoveryEpoch: epoch,
-		backoff:       cfg.InitialBackoff,
+		Config:  cfg,
+		epoch:   epoch,
+		backoff: cfg.InitialBackoff,
 	}
 }
 
-// ShouldProbe reports whether a new probe cycle is permitted.  If false,
-// the caller should wait and check again before probing.
-func (s *ProbeScheduler) ShouldProbe(now time.Time) bool {
+// TryAcquireSlot atomically checks whether a new probe cycle is permitted
+// AND reserves the slot if so.  Unlike the old ShouldProbe (which was
+// read-only), concurrent callers cannot both observe a true result and
+// start overlapping cycles — one of them will find the slot taken.
+//
+// The check honours: MinInterval, exponential backoff, and MaxAttempts.
+func (s *ProbeScheduler) TryAcquireSlot(now time.Time) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -210,11 +245,18 @@ func (s *ProbeScheduler) ShouldProbe(now time.Time) bool {
 		return false
 	}
 
+	// Enforce exponential backoff.
+	if !s.lastProbe.IsZero() && now.Sub(s.lastProbe) < s.backoff {
+		return false
+	}
+
 	// Enforce max attempts.
 	if s.Config.MaxAttempts > 0 && s.attempts >= s.Config.MaxAttempts {
 		return false
 	}
 
+	// Reserve the slot.
+	s.lastProbe = now
 	return true
 }
 
@@ -249,7 +291,7 @@ func (s *ProbeScheduler) RecordResult(reachable bool) {
 
 	if reachable {
 		// Successful probe resets backoff and attempts.
-		s.backoff = s.Config.InitialBackoff
+		s.backoff = 0
 		s.attempts = 0
 	} else {
 		s.attempts++
@@ -260,15 +302,15 @@ func (s *ProbeScheduler) RecordResult(reachable bool) {
 	}
 }
 
-// RecordCancelled resets the scheduler so the next ShouldProbe call will
-// allow probing (after the MinInterval).  The lastProbe timestamp is
-// updated to now so that MinInterval is enforced from the cancellation
-// point.
+// RecordCancelled resets the scheduler so the next TryAcquireSlot call will
+// allow probing (after the MinInterval).  A cancelled probe didn't fail, so
+// no backoff penalty is applied.  The lastProbe timestamp is updated to now
+// so that MinInterval is enforced from the cancellation point.
 func (s *ProbeScheduler) RecordCancelled() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	s.backoff = s.Config.InitialBackoff
+	s.backoff = 0
 	s.attempts = 0
 	s.lastProbe = time.Now()
 }
@@ -294,17 +336,12 @@ func (s *ProbeScheduler) Elapsed(now time.Time) time.Duration {
 	return now.Sub(s.lastProbe)
 }
 
-// Stale reports whether a result belongs to an old epoch.  Call with the
-// current epoch to detect stale results after a recovery cycle.
-func (s *ProbeScheduler) Stale(currentEpoch int) bool {
-	return currentEpoch != s.RecoveryEpoch
-}
-
-// ResetEpoch updates the scheduler's epoch.  The caller should call this
-// when the path selector starts a new recovery cycle.
-func (s *ProbeScheduler) ResetEpoch(epoch int) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	s.RecoveryEpoch = epoch
+// Stale reports whether a probe result from the given epoch generation is
+// stale.  It delegates to the authoritative RecoveryEpoch lifecycle owner
+// rather than maintaining a separate generation counter.
+func (s *ProbeScheduler) Stale(generation uint64) bool {
+	if s.epoch == nil {
+		return false
+	}
+	return !s.epoch.IsCurrent(generation)
 }

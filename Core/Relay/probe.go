@@ -121,14 +121,33 @@ func (pl *ProbeListener) Stop() {
 	<-pl.doneCh
 }
 
-// runLoop reads probe datagrams and dispatches them to handleProbe.
+// runLoop reads probe datagrams and handles them synchronously.
+// Probes are small, fast HMAC operations; no goroutine per datagram.
 func (pl *ProbeListener) runLoop() {
 	defer close(pl.doneCh)
 
-	buf := make([]byte, ProbeDatagramSize+64) // 64 bytes headroom
+	cleanupTicker := time.NewTicker(10 * time.Minute)
+	defer cleanupTicker.Stop()
+
 	for !pl.stopped.Load() {
+		// Fresh buffer per read — no shared-buffer race.
+		buf := make([]byte, ProbeDatagramSize+64) // 64 bytes headroom
+
+		// Rate-limit check must happen before we read.
+		// Use a 100ms socket timeout so we can check stop/cleanup.
+		pl.conn.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
 		n, src, err := pl.conn.ReadFromUDP(buf)
 		if err != nil {
+			var netErr net.Error
+			if errors.As(err, &netErr) && netErr.Timeout() {
+				// Periodic cleanup and stop check.
+				select {
+				case <-cleanupTicker.C:
+					pl.pruneRateLimit()
+				default:
+				}
+				continue
+			}
 			if pl.stopped.Load() {
 				return
 			}
@@ -141,37 +160,57 @@ func (pl *ProbeListener) runLoop() {
 			continue
 		}
 
-		go pl.handleProbe(buf[:n], src)
+		// Rate-limit BEFORE handling, while still in the main goroutine.
+		if !pl.allowProbe(src.IP.String()) {
+			pl.log.Debug("probe rate limited", "src", src)
+			continue
+		}
+
+		pl.handleProbe(buf[:n], src) // synchronous
 	}
 }
 
-// handleProbe processes a single probe request and sends a response.
-func (pl *ProbeListener) handleProbe(data []byte, src *net.UDPAddr) {
-	// Copy the datagram body (we're in a goroutine and buf gets reused).
-	body := make([]byte, len(data))
-	copy(body, data)
-
-	// Rate limiting by source IP.
+// pruneRateLimit removes entries older than 10 minutes to bound map growth.
+func (pl *ProbeListener) pruneRateLimit() {
 	pl.mu.Lock()
-	last, ok := pl.rateLimit[src.IP.String()]
+	defer pl.mu.Unlock()
+	limit := time.Now().Add(-10 * time.Minute)
+	for ip, t := range pl.rateLimit {
+		if t.Before(limit) {
+			delete(pl.rateLimit, ip)
+		}
+	}
+}
+
+// allowProbe returns true if the source IP hasn't exceeded the rate limit.
+// Must be called from the runLoop goroutine (before handleProbe).
+func (pl *ProbeListener) allowProbe(srcIP string) bool {
+	pl.mu.Lock()
+	defer pl.mu.Unlock()
+	last, ok := pl.rateLimit[srcIP]
 	now := time.Now()
 	if ok && now.Sub(last) < time.Second/time.Duration(pl.config.RateLimit) {
-		pl.mu.Unlock()
-		pl.log.Debug("probe rate limited", "src", src)
-		return
+		return false
 	}
-	pl.rateLimit[src.IP.String()] = now
-	pl.mu.Unlock()
+	pl.rateLimit[srcIP] = now
+	return true
+}
+
+// handleProbe processes a single probe request and sends a response.
+// Called synchronously from runLoop; data points into a buffer owned by
+// the current loop iteration.
+func (pl *ProbeListener) handleProbe(data []byte, src *net.UDPAddr) {
+	// Rate-limit already checked in runLoop before calling handleProbe.
 
 	// Magic check.
-	if string(body[:4]) != ProbeMagicReq {
-		pl.log.Debug("probe bad magic", "got", fmt.Sprintf("%x", body[:4]))
+	if string(data[:4]) != ProbeMagicReq {
+		pl.log.Debug("probe bad magic", "got", fmt.Sprintf("%x", data[:4]))
 		return
 	}
 
 	// Extract route ID and nonce.
-	routeID := RouteID(binary.LittleEndian.Uint64(body[4:12]))
-	nonce := body[12:20]
+	routeID := RouteID(binary.LittleEndian.Uint64(data[4:12]))
+	nonce := data[12:20]
 
 	// Look up route.
 	entry, ok := pl.reg.Route(routeID)
@@ -189,7 +228,7 @@ func (pl *ProbeListener) handleProbe(data []byte, src *net.UDPAddr) {
 	mac.Write(nonce)
 	expectedMAC := mac.Sum(nil)
 
-	if !hmac.Equal(body[20:52], expectedMAC) {
+	if !hmac.Equal(data[20:52], expectedMAC) {
 		pl.log.Debug("probe HMAC mismatch", "route_id", routeID, "src", src)
 		return
 	}
