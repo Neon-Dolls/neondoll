@@ -407,6 +407,7 @@ func (s *ProbeScheduler) ResetBackoff() {
 
 	s.backoff = s.Config.InitialBackoff
 	s.attempts = 0
+	s.exhaustedAt = time.Time{} // clear exhaustion on reset
 }
 
 // Elapsed returns the time since the last probe, or zero if never probed.
