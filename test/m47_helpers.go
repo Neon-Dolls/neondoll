@@ -82,6 +82,7 @@ type m46Topology struct {
 	corePub         [32]byte
 	coreEndpoint    string // Body's WG endpoint (relay UDP listener)
 	routeEndpoint   string // route 1's allocated UDP endpoint (host:port)
+	routeCredential string // route 1's server-established credential token
 
 	bodyMembership *network.Membership
 
@@ -303,6 +304,7 @@ func setupM46Topology(t *testing.T, ctx context.Context, log *slog.Logger, suffi
 		t.Fatalf("OpenRoute: %v", err)
 	}
 	tp.routeEndpoint = opened.AllocatedEndpoint
+	tp.routeCredential = opened.Credentials.Token
 	t.Logf("Route 1 opened with credentials, endpoint=%s", tp.routeEndpoint)
 
 	// Core endpoint for Body — points at the relay's UDP listener.

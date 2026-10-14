@@ -1,361 +1,310 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-
 package body
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/binary"
 	"errors"
 	"fmt"
-	"log/slog"
+	"math"
+	"net"
+	"sync"
 	"time"
-
-	"github.com/Neon-Dolls/neondoll/Core/Relay"
 )
 
-// Path labels used for identifying candidate paths in path discovery and
-// recovery.  These are the only three paths the system knows about.
-const (
-	PathDirect   = "direct"
-	PathRelayUDP = "relay-udp"
-	PathRelayWSS = "relay-wss"
-)
-
-// pathPreferenceOrder defines the probe order from most to least preferred.
-var pathPreferenceOrder = []string{PathDirect, PathRelayUDP, PathRelayWSS}
-
-// ProbeResult holds the outcome of probing a single candidate path.
+// M6.4 — Non-disruptive path reachability discovery.
 //
-// When HandshakeOK is true, the temporary tunnel and (for WSS probes) the WSS
-// bind are still alive and ready for the caller to use for migration.  The
-// caller takes ownership and MUST call Tunnel.Stop() and (if non-nil)
-// WSSBind.Close().
+// ReachProbe tests whether a relay's probe endpoint is reachable and
+// authenticates the response using route credentials.  No WG device,
+// tunnel, or key material is involved — the probe is a lightweight
+// HMAC-authenticated UDP datagram exchange.
 //
-// When HandshakeOK is false, Tunnel and WSSBind are always nil — the probe
-// was torn down completely.
-type ProbeResult struct {
-	// Path is the candidate path label ("direct", "relay-udp", "relay-wss").
-	Path string
-	// HandshakeOK is true when a real WireGuard handshake completed within
-	// the probe timeout.  When true the Tunnel (and WSSBind) are valid and
-	// must be cleaned up by the caller.
-	HandshakeOK bool
-	// Duration is the wall-clock time the probe took.
-	Duration time.Duration
-	// Error is non-nil when the probe failed (timeout, start failure,
-	// cancellation, or the path was not configured).
-	Error error
+// ProbeScheduler bounds the frequency of probe cycles, implements
+// exponential backoff on failure, and stamps results with RecoveryEpoch for
+// stale-result rejection.
 
-	// Tunnel is the probed tunnel, valid only when HandshakeOK is true.
-	// The caller takes ownership.
-	Tunnel *BodyTunnel
-	// WSSBind is set only for WSS-probe paths, valid only when HandshakeOK
-	// is true.  The caller takes ownership.
-	WSSBind *BodyWSSBind
-	// HandshakeAt records when the WireGuard handshake completed.
-	HandshakeAt time.Time
+// ─── ReachProbe ────────────────────────────────────────────────────────────
+
+// ReachProbeConfig configures a single reachability probe attempt.
+type ReachProbeConfig struct {
+	// Target is the relay's probe endpoint (host:port).
+	Target string
+
+	// RouteID is the relay route to probe.
+	RouteID uint64
+
+	// Credential is the HMAC key — the route's credential Token bytes.
+	Credential string
+
+	// Timeout is how long to wait for a probe response.
+	Timeout time.Duration
 }
 
-// defaultAttemptTimeout is shared with path_select.go and defined there.
-// Re-declared here for visibility but the value is the same package-level var.
+// ReachProbeResult captures the outcome of a single probe attempt.
+type ReachProbeResult struct {
+	Reachable bool
+	Duration  time.Duration
+	Error     error
+}
 
-// ProbePath attempts a real WireGuard handshake over the given candidate path.
+// ReachProbe sends a single authenticated probe to a relay's probe
+// endpoint and waits for a verified response.  It creates a short-lived
+// UDP socket, sends one datagram, and reads exactly one response.
 //
-// It creates a temporary, isolated tunnel sharing the same WG identity (same
-// keypair and overlay) on an OS-assigned ephemeral port, attempts a handshake
-// within the configured timeout.
+// The probe uses the same binary HMAC protocol as ProbeListener:
 //
-//	On success: the tunnel (and WSS bind for WSS paths) are returned running
-//	in ProbeResult for the caller to use for migration.  Caller MUST clean up
-//	by calling Tunnel.Stop() and (if non-nil) WSSBind.Close().
+//	Request:  magic(4) + routeID(8) + nonce(8) + HMAC(32)  = 52 bytes
+//	Response: magic(4) + routeID(8) + nonce(8) + HMAC(32)  = 52 bytes
 //
-//	On failure: everything is torn down.  Tunnel and WSSBind are nil in the
-//	returned ProbeResult.
-//
-// The active tunnel is never touched.  Using the same WG identity on a
-// separate port is safe because:
-//
-//   - WireGuard's handshake transition window keeps the old session keys
-//     valid during reinitiation, so the active session continues to
-//     decrypt and send packets throughout the brief probe.
-//   - On the Relay, WSS and UDP transports create completely separate
-//     connection IDs, so relay return-path routing is not affected.
-//
-// ProbePath respects context cancellation: if ctx is cancelled during the
-// probe, the temporary tunnel is stopped and all resources are released.
-func ProbePath(ctx context.Context, cfg PathSelectorConfig, path string, log *slog.Logger) ProbeResult {
+// HMAC-SHA256 keyed on the route credential Token.
+func ReachProbe(ctx context.Context, cfg ReachProbeConfig) ReachProbeResult {
 	start := time.Now()
-	timeout := cfg.PerAttemptTimeout
-	if timeout <= 0 {
-		timeout = defaultAttemptTimeout
+
+	conn, err := net.DialTimeout("udp", cfg.Target, cfg.Timeout)
+	if err != nil {
+		return ReachProbeResult{Error: fmt.Errorf("reach probe: dial %s: %w", cfg.Target, err), Duration: time.Since(start)}
+	}
+	defer conn.Close()
+
+	// Deadline for the entire exchange — honour whichever is shorter:
+	// the caller's context deadline or the per-probe Timeout.
+	deadline := start.Add(cfg.Timeout)
+	if dl, ok := ctx.Deadline(); ok && dl.Before(deadline) {
+		deadline = dl
+	}
+	_ = conn.SetDeadline(deadline)
+
+	nonce := make([]byte, 8)
+	if _, err := rand.Read(nonce); err != nil {
+		return ReachProbeResult{Error: fmt.Errorf("reach probe: nonce: %w", err), Duration: time.Since(start)}
 	}
 
-	log = log.With("probe", path, "timeout", timeout)
-	log.Info("probing candidate path")
-
-	// Build the tunnel config for the candidate path.
-	var wssBind *BodyWSSBind // non-nil only for WSS paths; closed on failure
-
-	var tunnelCfg BodyTunnelConfig
-	switch path {
-	case PathDirect:
-		if cfg.DirectEndpoint == "" {
-			return ProbeResult{
-				Path: path, HandshakeOK: false, Duration: time.Since(start),
-				Error: errors.New("direct endpoint not configured"),
-			}
-		}
-		tunnelCfg = bodyTunnelConfigFromSelector(cfg, cfg.DirectEndpoint, nil)
-
-	case PathRelayUDP:
-		if cfg.RelayWGUDPEndpoint == "" {
-			return ProbeResult{
-				Path: path, HandshakeOK: false, Duration: time.Since(start),
-				Error: errors.New("relay UDP endpoint not configured"),
-			}
-		}
-		tunnelCfg = bodyTunnelConfigFromSelector(cfg, cfg.RelayWGUDPEndpoint, nil)
-
-	case PathRelayWSS:
-		if cfg.RelayWSSURL == "" {
-			return ProbeResult{
-				Path: path, HandshakeOK: false, Duration: time.Since(start),
-				Error: errors.New("relay WS URL not configured"),
-			}
-		}
-		wssBind = NewWSSBind(cfg.RelayWSSURL, cfg.RouteID, cfg.RouteCredential)
-		if cfg.TLSConfig != nil {
-			wssBind.SetTLSConfig(cfg.TLSConfig)
-		}
-		peerEndpoint := relay.RelayEndpointString(cfg.RouteID)
-		tunnelCfg = bodyTunnelConfigFromSelector(cfg, peerEndpoint, wssBind)
-
-	default:
-		return ProbeResult{
-			Path: path, HandshakeOK: false, Duration: time.Since(start),
-			Error: fmt.Errorf("unknown probe path: %s", path),
-		}
+	req := encodeProbeRequest(cfg.RouteID, nonce, cfg.Credential)
+	if _, err := conn.Write(req); err != nil {
+		return ReachProbeResult{Error: fmt.Errorf("reach probe: write: %w", err), Duration: time.Since(start)}
 	}
 
-	// Create the probe tunnel.
-	tunnel := NewBodyTunnel(tunnelCfg, log)
-
-	// Start the tunnel with the parent context (not probeCtx) so that a
-	// successful probe returns a running tunnel the caller can use.  Only
-	// the handshake wait uses the bounded probeCtx.
-	startErr := tunnel.Start(ctx)
-	if startErr != nil {
-		// Tunnel didn't start. Clean up WSS bind if we had one.
-		if wssBind != nil {
-			wssBind.Close()
-		}
-		elapsed := time.Since(start)
-		log.Warn("probe: tunnel start failed", "error", startErr, "elapsed", elapsed)
-		return ProbeResult{
-			Path:        path,
-			HandshakeOK: false,
-			Duration:    elapsed,
-			Error:       fmt.Errorf("probe tunnel start: %w", startErr),
-		}
+	resp := make([]byte, 52)
+	n, err := conn.Read(resp)
+	if err != nil {
+		return ReachProbeResult{Error: fmt.Errorf("reach probe: read: %w", err), Duration: time.Since(start)}
 	}
 
-	// Wait for the WireGuard handshake within the probe timeout.
-	// We use a sub-context so we don't block forever if the parent
-	// context is very long-lived.
-	probeCtx, probeCancel := context.WithTimeout(ctx, timeout)
-	defer probeCancel()
-
-	hsErr := tunnel.WaitHandshake(probeCtx, timeout)
-	elapsed := time.Since(start)
-
-	if hsErr == nil {
-		now := time.Now()
-		log.Info("probe: handshake completed", "elapsed", elapsed)
-		return ProbeResult{
-			Path:        path,
-			HandshakeOK: true,
-			Duration:    elapsed,
-			Error:       nil,
-			Tunnel:      tunnel,
-			WSSBind:     wssBind,
-			HandshakeAt: now,
-		}
+	if err := verifyProbeResponse(resp[:n], cfg.RouteID, nonce, cfg.Credential); err != nil {
+		return ReachProbeResult{Error: fmt.Errorf("reach probe: verify: %w", err), Duration: time.Since(start)}
 	}
 
-	// Handshake failed.  Tear down the probe tunnel.
-	tunnel.Stop()
-	if wssBind != nil {
-		wssBind.Close()
-	}
-
-	log.Info("probe: no handshake", "error", hsErr, "elapsed", elapsed)
-	return ProbeResult{
-		Path:        path,
-		HandshakeOK: false,
-		Duration:    elapsed,
-		Error:       hsErr,
-	}
+	return ReachProbeResult{Reachable: true, Duration: time.Since(start)}
 }
 
-// ProbeConfig controls the behaviour of ProbeBetter.
-type ProbeConfig struct {
-	// PerAttemptTimeout limits each individual probe attempt.  Zero means
-	// PathSelectorConfig.PerAttemptTimeout, falling back to 5 seconds.
-	PerAttemptTimeout time.Duration
-	// MinBackoff is the initial delay between probe attempts.  Zero = 1s.
-	MinBackoff time.Duration
-	// MaxBackoff caps the exponential backoff.  Zero = 10s.
+func encodeProbeRequest(routeID uint64, nonce []byte, credential string) []byte {
+	buf := make([]byte, 52)
+	copy(buf[0:4], []byte("NLPR"))
+	binary.LittleEndian.PutUint64(buf[4:12], routeID)
+	copy(buf[12:20], nonce)
+	mac := computeProbeHMAC("NLPR", routeID, nonce, credential)
+	copy(buf[20:52], mac)
+	return buf
+}
+
+func verifyProbeResponse(data []byte, routeID uint64, nonce []byte, credential string) error {
+	if len(data) < 52 {
+		return fmt.Errorf("response too short: %d < 52", len(data))
+	}
+	if string(data[0:4]) != "NLPS" {
+		return errors.New("bad response magic")
+	}
+	if binary.LittleEndian.Uint64(data[4:12]) != routeID {
+		return errors.New("route ID mismatch")
+	}
+	if string(data[12:20]) != string(nonce) {
+		return errors.New("nonce mismatch")
+	}
+	expected := computeProbeHMAC("NLPS", routeID, nonce, credential)
+	if !hmac.Equal(data[20:52], expected) {
+		return errors.New("HMAC mismatch")
+	}
+	return nil
+}
+
+func computeProbeHMAC(magic string, routeID uint64, nonce []byte, credential string) []byte {
+	m := hmac.New(sha256.New, []byte(credential))
+	m.Write([]byte(magic))
+	var id [8]byte
+	binary.LittleEndian.PutUint64(id[:], routeID)
+	m.Write(id[:])
+	m.Write(nonce)
+	return m.Sum(nil)
+}
+
+// ─── ProbeScheduler ────────────────────────────────────────────────────────
+
+// ProbeScheduler bounds the frequency of probe cycles and provides
+// exponential backoff on failure.  It is safe for concurrent use.
+type ProbeScheduler struct {
+	Config     ProbeSchedulerConfig
+	RecoveryEpoch int // epoch at construction time for stale-result rejection
+
+	mu          sync.Mutex
+	lastProbe   time.Time
+	backoff     time.Duration
+	attempts    int
+}
+
+// ProbeSchedulerConfig configures probe scheduling behaviour.
+type ProbeSchedulerConfig struct {
+	// MinInterval is the minimum time between consecutive probe cycles.
+	// The scheduler will not allow more than one probe every MinInterval.
+	MinInterval time.Duration
+
+	// MaxBackoff caps the exponential backoff duration.
 	MaxBackoff time.Duration
-	// BackoffFactor is the exponential multiplier.  Zero or negative = 2.0.
-	BackoffFactor float64
+
+	// MaxAttempts is the maximum consecutive failed attempts before the
+	// scheduler gives up (ShouldProbe returns false).  Zero means no limit.
+	MaxAttempts int
+
+	// InitialBackoff is the backoff duration after the first failure.
+	InitialBackoff time.Duration
 }
 
-func defaultProbeConfig() ProbeConfig {
-	return ProbeConfig{
-		PerAttemptTimeout: 0, // use PathSelectorConfig's or fallback
-		MinBackoff:        1 * time.Second,
-		MaxBackoff:        10 * time.Second,
-		BackoffFactor:     2.0,
+// DefaultProbeSchedulerConfig returns a sensible default configuration.
+func DefaultProbeSchedulerConfig() ProbeSchedulerConfig {
+	return ProbeSchedulerConfig{
+		MinInterval:    30 * time.Second,
+		MaxBackoff:     10 * time.Minute,
+		MaxAttempts:    10,
+		InitialBackoff: 5 * time.Second,
 	}
 }
 
-// effectiveBackoff returns the next backoff duration given the current delay.
-// It starts at MinBackoff and grows by BackoffFactor, then caps at MaxBackoff.
-func (cfg ProbeConfig) effectiveBackoff(current time.Duration) time.Duration {
-	if current <= 0 {
-		return cfg.MinBackoff
+// NewProbeScheduler creates a scheduler with the given config and epoch.
+func NewProbeScheduler(cfg ProbeSchedulerConfig, epoch int) *ProbeScheduler {
+	if cfg.MinInterval <= 0 {
+		cfg.MinInterval = 30 * time.Second
 	}
-	next := time.Duration(float64(current) * cfg.BackoffFactor)
-	if next > cfg.MaxBackoff {
-		return cfg.MaxBackoff
+	if cfg.MaxBackoff <= 0 {
+		cfg.MaxBackoff = 10 * time.Minute
 	}
-	return next
+	if cfg.InitialBackoff <= 0 {
+		cfg.InitialBackoff = 5 * time.Second
+	}
+	return &ProbeScheduler{
+		Config:        cfg,
+		RecoveryEpoch: epoch,
+		backoff:       cfg.InitialBackoff,
+	}
 }
 
-// resolveProbeTimeout returns the effective probe timeout, preferring
-// ProbeConfig.PerAttemptTimeout over PathSelectorConfig.PerAttemptTimeout,
-// falling back to the package default.
-func resolveProbeTimeout(pCfg ProbeConfig, sCfg PathSelectorConfig) time.Duration {
-	if pCfg.PerAttemptTimeout > 0 {
-		return pCfg.PerAttemptTimeout
+// ShouldProbe reports whether a new probe cycle is permitted.  If false,
+// the caller should wait and check again before probing.
+func (s *ProbeScheduler) ShouldProbe(now time.Time) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Enforce minimum interval between probe cycles.
+	if !s.lastProbe.IsZero() && now.Sub(s.lastProbe) < s.Config.MinInterval {
+		return false
 	}
-	if sCfg.PerAttemptTimeout > 0 {
-		return sCfg.PerAttemptTimeout
+
+	// Enforce max attempts.
+	if s.Config.MaxAttempts > 0 && s.attempts >= s.Config.MaxAttempts {
+		return false
 	}
-	return defaultAttemptTimeout
+
+	return true
 }
 
-// candidatesBetterThan returns paths more preferred than the given path, in
-// order of preference.  Returns nil if the given path is already the best
-// (direct) or unrecognised.
-func candidatesBetterThan(currentPath string) []string {
-	for i, p := range pathPreferenceOrder {
-		if p == currentPath {
-			// Return all paths more preferred than current.
-			return pathPreferenceOrder[:i]
+// BackoffDuration returns how long the caller should wait before the next
+// probe attempt.  It accounts for both the MinInterval and exponential
+// backoff.
+func (s *ProbeScheduler) BackoffDuration(now time.Time) time.Duration {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	interval := s.Config.MinInterval
+	if !s.lastProbe.IsZero() {
+		elapsed := now.Sub(s.lastProbe)
+		if elapsed < interval {
+			interval -= elapsed
+		} else {
+			interval = 0
 		}
 	}
-	// Unknown path — treat as no known candidate.
-	return nil
+
+	return time.Duration(math.Max(float64(interval), float64(s.backoff)))
 }
 
-// ProbeBetter tries candidate paths that are better than currentPath, in
-// preference order (direct > relay-udp > relay-wss).
-//
-// For each candidate it performs a real WireGuard handshake via ProbePath.
-// If a candidate succeeds, ProbeBetter returns a *ProbeResult with the
-// running tunnel (and WSS bind, if applicable) that the caller can use
-// for migration.  The caller takes ownership of the tunnel and must call
-// Tunnel.Stop() and (if non-nil) WSSBind.Close().
-//
-// ProbeBetter behaviour:
-//   - If the candidate succeeds (real WireGuard handshake), it is returned
-//     immediately as *ProbeResult with HandshakeOK=true and Tunnel set.
-//   - If the candidate fails (handshake timeout, start failure, etc.), the
-//     probe is cleaned up, a backoff delay is applied, and probing continues
-//     to the next candidate.
-//   - Failed, cancelled and superseded candidates are cleaned up immediately.
-//   - Cancel the ctx at any point — in-progress probes are stopped, backoff
-//     is interrupted, and any partial state is released.
-//
-// ProbeBetter returns nil when no better path is available (current path is
-// already the best or unknown), all candidates failed, or ctx was cancelled.
-//
-// The active tunnel is never modified.  The caller is responsible for using
-// the returned candidate with migration logic (future work).
-func ProbeBetter(
-	ctx context.Context,
-	cfg PathSelectorConfig,
-	currentPath string,
-	probeCfg ProbeConfig,
-	log *slog.Logger,
-) *ProbeResult {
-	// On the best path — nothing to probe.
-	if candidates := candidatesBetterThan(currentPath); len(candidates) == 0 {
-		log.Info("path prober: on best path, nothing to probe",
-			"current", currentPath)
-		return nil
+// RecordResult feeds back a probe result into the scheduler's backoff and
+// attempt tracking.  reachable=true resets the backoff; reachable=false
+// increases it exponentially up to MaxBackoff.
+func (s *ProbeScheduler) RecordResult(reachable bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.lastProbe = time.Now()
+
+	if reachable {
+		// Successful probe resets backoff and attempts.
+		s.backoff = s.Config.InitialBackoff
+		s.attempts = 0
+	} else {
+		s.attempts++
+		s.backoff = time.Duration(math.Min(
+			float64(s.Config.InitialBackoff)*math.Pow(2, float64(s.attempts-1)),
+			float64(s.Config.MaxBackoff),
+		))
 	}
+}
 
-	// Ensure sensible defaults for probe config fields not set.
-	if probeCfg.MinBackoff <= 0 {
-		probeCfg.MinBackoff = 1 * time.Second
+// RecordCancelled resets the scheduler so the next ShouldProbe call will
+// allow probing (after the MinInterval).  The lastProbe timestamp is
+// updated to now so that MinInterval is enforced from the cancellation
+// point.
+func (s *ProbeScheduler) RecordCancelled() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.backoff = s.Config.InitialBackoff
+	s.attempts = 0
+	s.lastProbe = time.Now()
+}
+
+// ResetBackoff clears backoff and attempt tracking without modifying the
+// last-probe timestamp.  Useful after a recovery epoch change.
+func (s *ProbeScheduler) ResetBackoff() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.backoff = s.Config.InitialBackoff
+	s.attempts = 0
+}
+
+// Elapsed returns the time since the last probe, or zero if never probed.
+func (s *ProbeScheduler) Elapsed(now time.Time) time.Duration {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.lastProbe.IsZero() {
+		return 0
 	}
-	if probeCfg.MaxBackoff <= 0 {
-		probeCfg.MaxBackoff = 10 * time.Second
-	}
-	if probeCfg.BackoffFactor <= 0 {
-		probeCfg.BackoffFactor = 2.0
-	}
-	timeout := resolveProbeTimeout(probeCfg, cfg)
+	return now.Sub(s.lastProbe)
+}
 
-	candidates := candidatesBetterThan(currentPath)
+// Stale reports whether a result belongs to an old epoch.  Call with the
+// current epoch to detect stale results after a recovery cycle.
+func (s *ProbeScheduler) Stale(currentEpoch int) bool {
+	return currentEpoch != s.RecoveryEpoch
+}
 
-	log.Info("path prober: seeking better path",
-		"current", currentPath,
-		"candidates", candidates,
-		"timeout", timeout,
-		"min_backoff", probeCfg.MinBackoff,
-		"max_backoff", probeCfg.MaxBackoff)
+// ResetEpoch updates the scheduler's epoch.  The caller should call this
+// when the path selector starts a new recovery cycle.
+func (s *ProbeScheduler) ResetEpoch(epoch int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
-	backoff := time.Duration(0)
-
-	for i, candidate := range candidates {
-		// Check cancellation before each probe attempt.
-		if ctx.Err() != nil {
-			log.Info("path prober: cancelled",
-				"candidate", candidate, "attempt", i+1)
-			return nil
-		}
-
-		// Apply backoff before probing (skip on first attempt).
-		if backoff > 0 {
-			log.Debug("path prober: backoff",
-				"duration", backoff, "candidate", candidate)
-			select {
-			case <-time.After(backoff):
-			case <-ctx.Done():
-				log.Info("path prober: cancelled during backoff",
-					"candidate", candidate)
-				return nil
-			}
-		}
-
-		result := ProbePath(ctx, cfg, candidate, log)
-
-		if result.HandshakeOK {
-			log.Info("path prober: found viable candidate",
-				"candidate", candidate,
-				"duration", result.Duration)
-			return &result
-		}
-
-		// Candidate failed.  Compute backoff for the next attempt.
-		log.Info("path prober: candidate failed",
-			"candidate", candidate, "error", result.Error)
-		backoff = probeCfg.effectiveBackoff(backoff)
-	}
-
-	log.Info("path prober: no viable better path found",
-		"candidates_tried", len(candidates))
-	return nil
+	s.RecoveryEpoch = epoch
 }
