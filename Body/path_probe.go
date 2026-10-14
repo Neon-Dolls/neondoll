@@ -182,8 +182,9 @@ type ProbeScheduler struct {
 	mu        sync.Mutex
 	lastProbe time.Time
 	inFlight  bool // true while a probe slot is reserved
-	backoff   time.Duration
-	attempts  int
+	backoff    time.Duration
+	attempts   int
+	exhaustedAt time.Time // set when attempts >= MaxAttempts, cleared on cooldown expiry
 }
 
 // ProbeSchedulerConfig configures probe scheduling behaviour.
@@ -196,8 +197,13 @@ type ProbeSchedulerConfig struct {
 	MaxBackoff time.Duration
 
 	// MaxAttempts is the maximum consecutive failed attempts before the
-	// scheduler gives up (ShouldProbe returns false).  Zero means no limit.
+	// scheduler pauses discovery for MaxAttemptsCooldown before resuming.
+	// Zero means no limit.
 	MaxAttempts int
+
+	// MaxAttemptsCooldown is how long discovery is paused after exhausting
+	// MaxAttempts before resuming. Zero means 10 × MaxBackoff.
+	MaxAttemptsCooldown time.Duration
 
 	// InitialBackoff is the backoff duration after the first failure.
 	InitialBackoff time.Duration
@@ -260,9 +266,15 @@ func (s *ProbeScheduler) TryAcquireSlot(now time.Time) bool {
 		return false
 	}
 
-	// Enforce max attempts.
+	// Enforce max attempts with cooldown.
 	if s.Config.MaxAttempts > 0 && s.attempts >= s.Config.MaxAttempts {
-		return false
+		if s.exhaustedAt.IsZero() || now.Sub(s.exhaustedAt) < s.cooldownDuration() {
+			return false
+		}
+		// Cooldown expired — reset and allow probing.
+		s.attempts = 0
+		s.backoff = s.Config.InitialBackoff
+		s.exhaustedAt = time.Time{}
 	}
 
 	// Reserve the slot — mark as in-flight so no other caller can sneak in.
@@ -308,12 +320,35 @@ func (s *ProbeScheduler) BackoffDuration(now time.Time) time.Duration {
 		remainingBackoff = s.backoff - elapsed
 	}
 
-	// Return the max of the two blocking durations — both must clear
+	// Return the max of the blocking durations — all must clear
 	// before TryAcquireSlot would accept.
-	if remainingMinInterval > remainingBackoff {
-		return remainingMinInterval
+	maxBlock := remainingMinInterval
+	if remainingBackoff > maxBlock {
+		maxBlock = remainingBackoff
 	}
-	return remainingBackoff
+
+	// Also account for MaxAttempts cooldown.
+	if s.Config.MaxAttempts > 0 && s.attempts >= s.Config.MaxAttempts && !s.exhaustedAt.IsZero() {
+		cd := s.cooldownDuration()
+		remainingExhausted := cd - now.Sub(s.exhaustedAt)
+		if remainingExhausted < 0 {
+			remainingExhausted = 0
+		}
+		if remainingExhausted > maxBlock {
+			maxBlock = remainingExhausted
+		}
+	}
+
+	return maxBlock
+}
+
+// cooldownDuration returns how long to pause after exhausting MaxAttempts.
+// Defaults to 10 × MaxBackoff when MaxAttemptsCooldown is zero.
+func (s *ProbeScheduler) cooldownDuration() time.Duration {
+	if s.Config.MaxAttemptsCooldown > 0 {
+		return s.Config.MaxAttemptsCooldown
+	}
+	return 10 * s.Config.MaxBackoff
 }
 
 // RecordResult feeds back a probe result into the scheduler's backoff and
@@ -328,15 +363,23 @@ func (s *ProbeScheduler) RecordResult(reachable bool) {
 	s.inFlight = false // release slot
 
 	if reachable {
-		// Successful probe resets backoff and attempts.
+		// Successful probe resets backoff, attempts, and exhaustion.
 		s.backoff = 0
 		s.attempts = 0
+		s.exhaustedAt = time.Time{}
 	} else {
 		s.attempts++
-		s.backoff = time.Duration(math.Min(
-			float64(s.Config.InitialBackoff)*math.Pow(2, float64(s.attempts-1)),
-			float64(s.Config.MaxBackoff),
-		))
+		// Start cooldown if we just exhausted MaxAttempts.
+		if s.Config.MaxAttempts > 0 && s.attempts >= s.Config.MaxAttempts {
+			if s.exhaustedAt.IsZero() {
+				s.exhaustedAt = time.Now()
+			}
+		} else {
+			s.backoff = time.Duration(math.Min(
+				float64(s.Config.InitialBackoff)*math.Pow(2, float64(s.attempts-1)),
+				float64(s.Config.MaxBackoff),
+			))
+		}
 	}
 }
 
@@ -352,6 +395,7 @@ func (s *ProbeScheduler) RecordCancelled() {
 	s.backoff = 0
 	s.attempts = 0
 	s.inFlight = false // release slot
+	s.exhaustedAt = time.Time{} // clear exhaustion on cancellation
 	s.lastProbe = time.Now()
 }
 

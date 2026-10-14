@@ -523,3 +523,48 @@ func TestElapsed(t *testing.T) {
 		t.Fatal("Elapsed should be positive after probing")
 	}
 }
+
+// TestMaxAttemptsCooldown verifies that MaxAttempts exhaustion triggers a
+// cooldown rather than permanent block — probing resumes automatically after
+// the cooldown expires.
+func TestMaxAttemptsCooldown_ResumesAfterCooldown(t *testing.T) {
+	s := NewProbeScheduler(ProbeSchedulerConfig{
+		MinInterval:         time.Nanosecond,
+		MaxBackoff:          time.Millisecond,
+		MaxAttempts:         3,
+		InitialBackoff:      time.Nanosecond,
+		MaxAttemptsCooldown: 50 * time.Millisecond,
+	}, NewRecoveryEpoch(nil))
+
+	// Exhaust MaxAttempts with failure records.
+	for i := 0; i < 3; i++ {
+		if !s.TryAcquireSlot(time.Now()) {
+			t.Fatalf("should acquire slot on attempt %d", i+1)
+		}
+		time.Sleep(time.Millisecond)
+		s.RecordResult(false)
+	}
+
+	// During cooldown: TryAcquireSlot returns false.
+	if s.TryAcquireSlot(time.Now()) {
+		t.Fatal("TryAcquireSlot should be false during cooldown")
+	}
+
+	// BackoffDuration should account for cooldown.
+	if d := s.BackoffDuration(time.Now()); d <= 0 {
+		t.Fatal("BackoffDuration should be >0 during cooldown, got", d)
+	}
+
+	// Wait for cooldown to expire (50ms) + margin.
+	time.Sleep(60 * time.Millisecond)
+
+	// After cooldown: TryAcquireSlot should succeed — automatic recovery.
+	if !s.TryAcquireSlot(time.Now()) {
+		t.Fatal("TryAcquireSlot should be true after cooldown expires (automatic recovery)")
+	}
+
+	// BackoffDuration should be small after recovery.
+	if d := s.BackoffDuration(time.Now()); d > 50*time.Millisecond {
+		t.Fatal("BackoffDuration should be near zero after cooldown recovery, got", d)
+	}
+}
