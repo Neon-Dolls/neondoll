@@ -6,9 +6,9 @@
 // sends a probe packet; the relay checks credentials and returns an
 // authenticated path quality measurement.
 //
-// Keeps the active tunnel working throughout probing. Proves candidate
-// viability with real WireGuard (handshake verification, not just socket
-// reachability).
+// Keeps the active tunnel working throughout probing. Proves authenticated
+// reachability via HMAC route credential verification (no WireGuard
+// handshake, no tunnel creation, no endpoint state change).
 
 package integration
 

@@ -230,7 +230,9 @@ func TestTryAcquireSlot_MinInterval(t *testing.T) {
 		t.Fatal("TryAcquireSlot should be false right after probing")
 	}
 
-	// After MinInterval AND backoff pass — should allow probing again.
+	// After MinInterval AND backoff pass — but slot is still in-flight from the
+	// first TryAcquireSlot. Must release it first, then the slot is free.
+	s.RecordResult(true) // releases in-flight slot
 	time.Sleep(60 * time.Millisecond)
 	if !s.TryAcquireSlot(time.Now()) {
 		t.Fatal("TryAcquireSlot should be true after MinInterval and backoff")
@@ -401,6 +403,108 @@ func TestEpochAdvance(t *testing.T) {
 	}
 	if s.Stale(1) {
 		t.Fatal("Stale(1) should be false (current generation)")
+	}
+}
+
+// ─── In-flight tracking ────────────────────────────────────────────────────
+
+// TestTryAcquireSlot_RejectsInFlight verifies that once a slot is reserved,
+// no other caller can acquire one until RecordResult releases the slot.
+func TestTryAcquireSlot_RejectsInFlight(t *testing.T) {
+	s := NewProbeScheduler(ProbeSchedulerConfig{
+		MinInterval:    time.Nanosecond,
+		MaxBackoff:     time.Hour,
+		MaxAttempts:    10,
+		InitialBackoff: time.Nanosecond,
+	}, NewRecoveryEpoch(nil))
+
+	// Acquire the slot.
+	if !s.TryAcquireSlot(time.Now()) {
+		t.Fatal("TryAcquireSlot should be true initially")
+	}
+
+	// In-flight blocks — even though MinInterval/backoff pass instantly,
+	// the in-flight flag prevents overlapping probes.
+	time.Sleep(time.Millisecond)
+	if s.TryAcquireSlot(time.Now()) {
+		t.Fatal("TryAcquireSlot should be false while probe is in-flight")
+	}
+
+	// RecordResult releases the slot.
+	s.RecordResult(true)
+
+	if !s.TryAcquireSlot(time.Now()) {
+		t.Fatal("TryAcquireSlot should be true after RecordResult releases slot")
+	}
+}
+
+// TestTryAcquireSlot_RejectsInFlight_Cancelled verifies that RecordCancelled
+// releases the in-flight slot.
+func TestTryAcquireSlot_RejectsInFlight_Cancelled(t *testing.T) {
+	s := NewProbeScheduler(ProbeSchedulerConfig{
+		MinInterval:    time.Nanosecond,
+		MaxBackoff:     time.Hour,
+		MaxAttempts:    10,
+		InitialBackoff: time.Nanosecond,
+	}, NewRecoveryEpoch(nil))
+
+	if !s.TryAcquireSlot(time.Now()) {
+		t.Fatal("TryAcquireSlot should be true initially")
+	}
+
+	s.RecordCancelled()
+
+	if !s.TryAcquireSlot(time.Now()) {
+		t.Fatal("TryAcquireSlot should be true after RecordCancelled releases slot")
+	}
+}
+
+// ─── BackoffDuration consistency ────────────────────────────────────────────
+
+// TestBackoffDuration_ConsistentWithTryAcquireSlot verifies that
+// BackoffDuration returns 0 exactly when TryAcquireSlot would succeed, and
+// >0 when it would fail.
+func TestBackoffDuration_ConsistentWithTryAcquireSlot(t *testing.T) {
+	s := NewProbeScheduler(ProbeSchedulerConfig{
+		MinInterval:    time.Second,
+		MaxBackoff:     time.Hour,
+		MaxAttempts:    10,
+		InitialBackoff: time.Minute,
+	}, NewRecoveryEpoch(nil))
+
+	// Never probed → BackoffDuration returns 0 (consistent with TryAcquireSlot).
+	if d := s.BackoffDuration(time.Now()); d != 0 {
+		t.Fatalf("BackoffDuration should be 0 when never probed, got %v", d)
+	}
+
+	// Acquire and complete the probe slot.
+	s.TryAcquireSlot(time.Now())
+	s.RecordResult(true)
+
+	// Now lastProbe is set → BackoffDuration returns MinInterval remainder.
+	d := s.BackoffDuration(time.Now())
+	if d == 0 {
+		t.Fatal("BackoffDuration should be >0 when MinInterval is active")
+	}
+}
+
+// TestBackoffDuration_InFlight verifies that BackoffDuration returns non-zero
+// while a probe is in-flight, matching TryAcquireSlot's rejection.
+func TestBackoffDuration_InFlight(t *testing.T) {
+	s := NewProbeScheduler(ProbeSchedulerConfig{
+		MinInterval:    time.Minute,
+		MaxBackoff:     time.Hour,
+		MaxAttempts:    10,
+		InitialBackoff: time.Minute,
+	}, NewRecoveryEpoch(nil))
+
+	// Reserve the slot.
+	s.TryAcquireSlot(time.Now())
+
+	// In-flight → BackoffDuration should be >0.
+	d := s.BackoffDuration(time.Now())
+	if d <= 0 {
+		t.Fatal("BackoffDuration should be >0 while probe is in-flight")
 	}
 }
 

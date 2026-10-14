@@ -197,3 +197,30 @@ func TestProbeListenerSizeMismatch(t *testing.T) {
 		t.Fatal("expected timeout/error for size mismatch, got response")
 	}
 }
+
+func TestProbeListenerRateLimitMapBound(t *testing.T) {
+	cfg := ProbeListenerConfig{
+		RateLimit:           1000000,
+		RateLimitMaxEntries: 3,
+	}
+	cfg.ApplyDefaults()
+	pl := NewProbeListener(cfg, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	// First 3 unique IPs should be allowed.
+	for i := 0; i < 3; i++ {
+		ip := net.IP{10, 0, 0, byte(i + 1)}.String()
+		if !pl.allowProbe(ip) {
+			t.Fatalf("IP %d should be allowed (map not at capacity)", i)
+		}
+	}
+
+	// 4th unique IP should be rejected.
+	if pl.allowProbe(net.IP{10, 0, 0, 4}.String()) {
+		t.Fatal("4th unique IP should be rejected when map is at capacity")
+	}
+
+	// Existing IP should still be allowed.
+	if !pl.allowProbe(net.IP{10, 0, 0, 1}.String()) {
+		t.Fatal("Existing IP should be allowed even at capacity")
+	}
+}

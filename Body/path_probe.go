@@ -168,7 +168,9 @@ func computeProbeHMAC(magic string, routeID uint64, nonce []byte, credential str
 // ─── ProbeScheduler ────────────────────────────────────────────────────────
 
 // ProbeScheduler bounds the frequency of probe cycles and provides
-// exponential backoff on failure.  It is safe for concurrent use.
+// exponential backoff on failure.  TryAcquireSlot reserves a slot for a
+// single concurrent probe; RecordResult and RecordCancelled release it.
+// It is safe for concurrent use.
 type ProbeScheduler struct {
 	Config ProbeSchedulerConfig
 
@@ -179,6 +181,7 @@ type ProbeScheduler struct {
 
 	mu        sync.Mutex
 	lastProbe time.Time
+	inFlight  bool // true while a probe slot is reserved
 	backoff   time.Duration
 	attempts  int
 }
@@ -235,10 +238,17 @@ func NewProbeScheduler(cfg ProbeSchedulerConfig, epoch *RecoveryEpoch) *ProbeSch
 // read-only), concurrent callers cannot both observe a true result and
 // start overlapping cycles — one of them will find the slot taken.
 //
-// The check honours: MinInterval, exponential backoff, and MaxAttempts.
+// The check honours: in-flight reservation, MinInterval, exponential
+// backoff, and MaxAttempts.
 func (s *ProbeScheduler) TryAcquireSlot(now time.Time) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	// Reject if a probe is already in-flight — only one concurrent probe
+	// is allowed regardless of how much time has elapsed since the last one.
+	if s.inFlight {
+		return false
+	}
 
 	// Enforce minimum interval between probe cycles.
 	if !s.lastProbe.IsZero() && now.Sub(s.lastProbe) < s.Config.MinInterval {
@@ -255,39 +265,67 @@ func (s *ProbeScheduler) TryAcquireSlot(now time.Time) bool {
 		return false
 	}
 
-	// Reserve the slot.
+	// Reserve the slot — mark as in-flight so no other caller can sneak in.
 	s.lastProbe = now
+	s.inFlight = true
 	return true
 }
 
 // BackoffDuration returns how long the caller should wait before the next
-// probe attempt.  It accounts for both the MinInterval and exponential
-// backoff.
+// probe cycle.  It accounts for in-flight state, MinInterval, and
+// exponential backoff, consistent with TryAcquireSlot's rejection policy.
+//
+// When a probe is in-flight, BackoffDuration returns max(MinInterval,
+// backoff) — the minimum wall time that must elapse after the current
+// reservation before the caller should even ask for a new slot.
 func (s *ProbeScheduler) BackoffDuration(now time.Time) time.Duration {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	interval := s.Config.MinInterval
-	if !s.lastProbe.IsZero() {
-		elapsed := now.Sub(s.lastProbe)
-		if elapsed < interval {
-			interval -= elapsed
-		} else {
-			interval = 0
-		}
+	// In-flight probe blocks unconditionally — no slot available until
+	// RecordResult or RecordCancelled releases it.
+	if s.inFlight {
+		return time.Duration(math.Max(
+			float64(s.Config.MinInterval),
+			float64(s.backoff),
+		))
 	}
 
-	return time.Duration(math.Max(float64(interval), float64(s.backoff)))
+	// Never probed and not in-flight → slot is available immediately.
+	if s.lastProbe.IsZero() {
+		return 0
+	}
+
+	elapsed := now.Sub(s.lastProbe)
+
+	var remainingMinInterval time.Duration
+	if elapsed < s.Config.MinInterval {
+		remainingMinInterval = s.Config.MinInterval - elapsed
+	}
+
+	var remainingBackoff time.Duration
+	if elapsed < s.backoff {
+		remainingBackoff = s.backoff - elapsed
+	}
+
+	// Return the max of the two blocking durations — both must clear
+	// before TryAcquireSlot would accept.
+	if remainingMinInterval > remainingBackoff {
+		return remainingMinInterval
+	}
+	return remainingBackoff
 }
 
 // RecordResult feeds back a probe result into the scheduler's backoff and
 // attempt tracking.  reachable=true resets the backoff; reachable=false
 // increases it exponentially up to MaxBackoff.
+// Releases the in-flight slot so TryAcquireSlot may succeed again.
 func (s *ProbeScheduler) RecordResult(reachable bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	s.lastProbe = time.Now()
+	s.inFlight = false // release slot
 
 	if reachable {
 		// Successful probe resets backoff and attempts.
@@ -306,12 +344,14 @@ func (s *ProbeScheduler) RecordResult(reachable bool) {
 // allow probing (after the MinInterval).  A cancelled probe didn't fail, so
 // no backoff penalty is applied.  The lastProbe timestamp is updated to now
 // so that MinInterval is enforced from the cancellation point.
+// Releases the in-flight slot.
 func (s *ProbeScheduler) RecordCancelled() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	s.backoff = 0
 	s.attempts = 0
+	s.inFlight = false // release slot
 	s.lastProbe = time.Now()
 }
 

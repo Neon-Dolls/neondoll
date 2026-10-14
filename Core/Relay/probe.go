@@ -35,15 +35,24 @@ const (
 // Defaults for ProbeListenerConfig.
 const (
 	DefaultProbePort    = 0 // dynamically allocated if 0
-	DefaultProbeRateLim = 100 // probes/second per source IP
+	DefaultProbeRateLim             = 100   // probes/second per source IP
+	DefaultProbeRateLimitMaxEntries = 10000 // hard cap on tracked source IPs
 	DefaultProbeTimeout = 5 * time.Second
 )
 
 // ProbeListenerConfig configures a relay's probe listener.
 type ProbeListenerConfig struct {
-	Enabled  bool          // set to true to start the probe listener
-	Port     int           // 0 = pick ephemeral port
-	RateLimit int          // max probes/second per source IP; 0 = default
+	Enabled  bool // set to true to start the probe listener
+	Port     int  // 0 = pick ephemeral port
+
+	// RateLimit is the max probes/second from a single source IP; 0 = default
+	// (DefaultProbeRateLim).
+	RateLimit int `json:"rate_limit,omitempty"`
+
+	// RateLimitMaxEntries is the hard cap on tracked source IPs in the
+	// rate-limit map.  When the map is at capacity, new (unseen) IPs are
+	// rejected outright.  Zero means DefaultProbeRateLimitMaxEntries (10000).
+	RateLimitMaxEntries int `json:"rate_limit_max_entries,omitempty"`
 }
 
 // ApplyDefaults fills zero fields with sensible defaults.
@@ -53,6 +62,9 @@ func (c *ProbeListenerConfig) ApplyDefaults() {
 	}
 	if c.RateLimit == 0 {
 		c.RateLimit = DefaultProbeRateLim
+	}
+	if c.RateLimitMaxEntries == 0 {
+		c.RateLimitMaxEntries = DefaultProbeRateLimitMaxEntries
 	}
 }
 
@@ -182,11 +194,18 @@ func (pl *ProbeListener) pruneRateLimit() {
 	}
 }
 
-// allowProbe returns true if the source IP hasn't exceeded the rate limit.
-// Must be called from the runLoop goroutine (before handleProbe).
+// allowProbe checks the source IP against the per-IP rate limit and the
+// hard cap on the rate-limit map size.  Returns true if the probe is
+// allowed through.
 func (pl *ProbeListener) allowProbe(srcIP string) bool {
 	pl.mu.Lock()
 	defer pl.mu.Unlock()
+
+	// Hard bound: reject new (unseen) IPs when the map is at capacity.
+	if _, exists := pl.rateLimit[srcIP]; !exists && len(pl.rateLimit) >= pl.config.RateLimitMaxEntries {
+		return false
+	}
+
 	last, ok := pl.rateLimit[srcIP]
 	now := time.Now()
 	if ok && now.Sub(last) < time.Second/time.Duration(pl.config.RateLimit) {
