@@ -9,105 +9,100 @@ import (
 	"time"
 )
 
-// DefaultMigrationTimeout bounds how long a migration may spend proving the
-// candidate path before giving up and keeping the old path authoritative.
-const DefaultMigrationTimeout = 10 * time.Second
+// ErrMigrationSuperseded is returned when the epoch generation was
+// concurrently advanced (by another migration or recovery cycle)
+// before the commit phase completed.
+var ErrMigrationSuperseded = errors.New("body: migration superseded by newer cycle")
 
-// MigrationConfig controls a single MigratePath operation.
+// MigrationCandidate describes a potential replacement path.
+// Validate must NOT start a competing WireGuard tunnel or otherwise
+// interfere with the active path — it is called during preparation,
+// before any epoch ownership commitment. Only bound to candidate
+// descriptors: M6.4 probe results, endpoint reachability checks, etc.
+//
+// Full WireGuard handshake validation is deferred to the cutover
+// slice and does NOT belong here.
+type MigrationCandidate interface {
+	// Validate checks whether the candidate path is viable.
+	// It MUST NOT initiate a WireGuard handshake or modify
+	// the active tunnel's state.
+	Validate(ctx context.Context) error
+}
+
+// MigrationConfig controls the migration lifecycle.
 type MigrationConfig struct {
-	// ProbeTimeout bounds candidate validation (candidate must complete a
-	// real WireGuard handshake with Core within this window). Zero uses
-	// DefaultMigrationTimeout.
+	// ProbeTimeout bounds how long candidate validation may run.
+	// Zero value uses DefaultMigrationProbeTimeout.
 	ProbeTimeout time.Duration
 }
 
-func (c MigrationConfig) probeTimeout() time.Duration {
+// ProbeTimeoutOrDefault returns ProbeTimeout, falling back to
+// DefaultMigrationProbeTimeout when zero.
+func (c MigrationConfig) ProbeTimeoutOrDefault() time.Duration {
 	if c.ProbeTimeout <= 0 {
-		return DefaultMigrationTimeout
+		return DefaultMigrationProbeTimeout
 	}
 	return c.ProbeTimeout
 }
 
-// ErrMigrationSuperseded indicates the migration lost the epoch's ownership
-// race: a newer recovery or migration already committed a replacement while
-// this candidate was being validated. The old tunnel was left untouched.
-var ErrMigrationSuperseded = errors.New("body: migrate path: superseded by newer recovery attempt")
+// DefaultMigrationProbeTimeout is the default timeout for candidate
+// validation when no explicit timeout is configured.
+const DefaultMigrationProbeTimeout = 10 * time.Second
 
-// MigratePath performs a controlled migration from the currently active
-// fallback path to a proven better path.
+// MigratePath prepares a controlled path migration by reserving epoch
+// ownership and validating the candidate descriptor. It does NOT start
+// a competing WireGuard tunnel — only the active path carries encrypted
+// traffic throughout preparation.
 //
-// Unlike RecoverPath, which assumes the old path is already lost and stops the
-// old tunnel before selecting a replacement, MigratePath keeps the existing
-// path authoritative until the candidate has proven itself:
+// Lifecycle (this slice only — WG cutover is deferred to the next):
 //
-//  1. Reserve a generation. NextGenForTunnel atomically rejects stale
-//     candidates (a candidate targeting an old tunnel that is no longer the
-//     epoch's active tunnel) and concurrent commits (only one reconciliation
-//     decision may own the epoch at a time).
-//  2. Validate the candidate *without touching the old tunnel*. The candidate
-//     must complete a real WireGuard handshake within the bounded window.
-//     The operation is cancellable via ctx.
-//  3. Commit the candidate only after validation succeeds. TryCommit fails if
-//     the epoch was superseded or shut down while we were validating.
-//  4. Only after a successful commit is the old tunnel stopped. The old path
-//     then becomes non-authoritative and is closed; stale frames or callbacks
-//     from its transport can no longer affect the new path.
+//  1. Reserve — epoch.NextGenForTunnel(epoch.Active()) atomically claims
+//     a generation ticket, rejecting stale targets or concurrent cycles.
+//  2. Validate — candidate.Validate(ctx) checks viability using the
+//     M6.4 probe result, without any WG handshake initiation.
+//  3. Commit — epoch.TryReserveMigration(gen) confirms the generation
+//     was not bumped during validation. If bumped, returns
+//     ErrMigrationSuperseded.
 //
-// On any failure before commit, the epoch marker is cancelled and the old
-// tunnel remains authoritative and untouched. MigratePath never commits a
-// candidate that has not proven a real handshake. If cfg.ProbeTimeout is zero,
-// DefaultMigrationTimeout is used.
+// On any failure, TryCancel(gen) is called and the epoch.Active()
+// tunnel is NEVER stopped or modified. The caller receives the
+// committed generation on success; this gen must be passed to the
+// cutover operation (next slice) to complete the actual WG device
+// and Relay return-path transition.
 func MigratePath(
 	ctx context.Context,
-	oldTunnel *BodyTunnel,
-	candidate *BodyTunnel,
+	epoch *RecoveryEpoch,
+	candidate MigrationCandidate,
 	cfg MigrationConfig,
 	log *slog.Logger,
-	epoch *RecoveryEpoch,
-) PathSelectionResult {
-	// 1. Reserve a generation.  NextGenForTunnel atomically checks that
-	//    oldTunnel is still the epoch's active tunnel, rejecting stale
-	//    candidates and concurrent recovery/migration attempts.
+) (committedGen uint64, err error) {
+	// 1. Reserve a generation. Read the active tunnel from the epoch
+	//    — no external old-tunnel argument needed.
+	oldTunnel := epoch.Active()
+	if oldTunnel == nil {
+		return 0, errors.New("body: migrate path: no active tunnel")
+	}
+
 	gen := epoch.NextGenForTunnel(oldTunnel)
 	if gen == 0 {
-		return PathSelectionResult{
-			Err: errors.New("body: migrate path: epoch closed or superseded"),
-		}
+		return 0, errors.New("body: migrate path: epoch closed or superseded")
 	}
 
-	// 2. Validate the candidate without touching the old tunnel. The old
-	//    path stays authoritative for the entire validation window.
-	probeTimeout := cfg.probeTimeout()
-	canCtx, cancel := context.WithTimeout(ctx, probeTimeout)
-	defer cancel()
+	// 2. Validate candidate without starting any WG device.
+	validateCtx, validateCancel := context.WithTimeout(ctx, cfg.ProbeTimeoutOrDefault())
+	defer validateCancel()
 
-	if err := candidate.WaitHandshake(canCtx, probeTimeout); err != nil {
-		// Candidate failed to prove itself (or validation was
-		// cancelled). Release the epoch marker; the old tunnel remains
-		// untouched and authoritative.
+	if err := candidate.Validate(validateCtx); err != nil {
 		epoch.TryCancel(gen)
-		candidate.Stop()
-		return PathSelectionResult{
-			Err: fmt.Errorf("body: migrate path: candidate validation: %w", err),
-		}
+		return 0, fmt.Errorf("body: migrate path: candidate validation: %w", err)
 	}
 
-	// 3. Commit.  If stale, the new path must not be used, and the old
-	//    path stays authoritative.
-	if !epoch.TryCommit(gen, candidate) {
-		// Our generation is stale — another recovery or migration
-		// committed its tunnel while we were validating. Clean up our
-		// candidate and leave the old tunnel untouched.
-		candidate.Stop()
-		return PathSelectionResult{Err: ErrMigrationSuperseded}
+	// 3. Commit the generation. If the gen was bumped concurrently
+	//    (by recovery or another migration), TryReserveMigration
+	//    returns false.
+	if !epoch.TryReserveMigration(gen) {
+		return 0, ErrMigrationSuperseded
 	}
 
-	// 4. Commit succeeded: the candidate is now the epoch's active tunnel.
-	//    The old path is no longer authoritative; close it so stale frames
-	//    or callbacks from its transport cannot affect the new path.
-	if err := oldTunnel.Stop(); err != nil {
-		log.Warn("body: migrate path: stop old tunnel", "error", err)
-	}
-
-	return PathSelectionResult{Tunnel: candidate}
+	return gen, nil
 }

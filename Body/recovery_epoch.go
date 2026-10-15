@@ -140,6 +140,23 @@ func (e *RecoveryEpoch) IsCurrent(gen uint64) bool {
 	return !e.closed && gen == e.gen
 }
 
+// TryReserveMigration commits the given generation for a pending
+// migration without changing the active tunnel. Unlike TryCommit
+// (which installs a new active tunnel immediately), this preserves
+// the old path for ongoing encrypted traffic until the cutover step.
+//
+// Returns false if the generation is stale (superseded by a newer
+// migration or recovery cycle).
+func (e *RecoveryEpoch) TryReserveMigration(gen uint64) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if gen != e.gen {
+		return false
+	}
+	e.pendingRecovery = nil
+	return true
+}
+
 // Active returns the currently committed tunnel, or nil.
 func (e *RecoveryEpoch) Active() *BodyTunnel {
 	e.mu.Lock()
