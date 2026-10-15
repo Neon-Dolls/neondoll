@@ -180,6 +180,102 @@ func TestMigratePath_Superseded(t *testing.T) {
 	}
 }
 
+func TestTryReserveMigration_Abandoned(t *testing.T) {
+	tunnel := newMinimalTunnelForTest(t)
+	epoch := NewRecoveryEpoch(tunnel)
+
+	// Reserve a generation via NextGenForTunnel.
+	gen := epoch.NextGenForTunnel(tunnel)
+	if gen == 0 {
+		t.Fatal("migration failed to reserve epoch gen")
+	}
+
+	// Commit via TryReserveMigration — ownership stays reserved.
+	if !epoch.TryReserveMigration(gen) {
+		t.Fatal("TryReserveMigration should succeed for current gen")
+	}
+
+	// Ownership is reserved: NextGenForTunnel on the same tunnel
+	// is blocked by the duplicate guard.
+	if nextGen := epoch.NextGenForTunnel(tunnel); nextGen != 0 {
+		t.Fatal("NextGenForTunnel should be blocked while migration owns reservation")
+	}
+
+	// Abandon: release ownership via TryCancel.
+	epoch.TryCancel(gen)
+
+	// After release, NextGenForTunnel on the same tunnel works again.
+	if nextGen := epoch.NextGenForTunnel(tunnel); nextGen == 0 {
+		t.Fatal("NextGenForTunnel should succeed after TryCancel released ownership")
+	}
+}
+
+func TestTryReserveMigration_ClosedEpoch(t *testing.T) {
+	tunnel := newMinimalTunnelForTest(t)
+	epoch := NewRecoveryEpoch(tunnel)
+
+	// Reserve a generation before shutdown.
+	gen := epoch.NextGenForTunnel(tunnel)
+	if gen == 0 {
+		t.Fatal("migration failed to reserve epoch gen")
+	}
+
+	// Shut down the epoch.
+	epoch.Shutdown()
+
+	// TryReserveMigration must reject after shutdown.
+	if epoch.TryReserveMigration(gen) {
+		t.Fatal("TryReserveMigration should fail after epoch shutdown")
+	}
+
+	// The tunnel was stopped by Shutdown — active is nil.
+	if got := epoch.Active(); got != nil {
+		t.Fatal("expected nil active after shutdown")
+	}
+}
+
+func TestMigratePath_ConcurrentMigration(t *testing.T) {
+	tunnel := newMinimalTunnelForTest(t)
+	epoch := NewRecoveryEpoch(tunnel)
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	// First migration succeeds normally.
+	gen1, err := MigratePath(context.Background(), epoch, &validCandidate{}, testMigrationConfig(), log)
+	if err != nil {
+		t.Fatalf("first migration should succeed: %v", err)
+	}
+	if gen1 == 0 {
+		t.Fatal("expected non-zero gen from first migration")
+	}
+
+	// Ownership is reserved — pendingRecovery stays set so
+	// NextGenForTunnel rejects a second attempt on the same tunnel.
+	_, err2 := MigratePath(context.Background(), epoch, &validCandidate{}, testMigrationConfig(), log)
+	if err2 == nil {
+		t.Fatal("second migration on same tunnel should be rejected (duplicate guard)")
+	}
+
+	// First migration's gen is still valid — active tunnel preserved.
+	if got := epoch.Active(); got != tunnel {
+		t.Fatal("migration replaced the active tunnel")
+	}
+}
+
+func TestMigratePath_Shutdown(t *testing.T) {
+	tunnel := newMinimalTunnelForTest(t)
+	epoch := NewRecoveryEpoch(tunnel)
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	// Shut down before migration attempt.
+	epoch.Shutdown()
+
+	// Active is nil after shutdown — MigratePath should fail fast.
+	_, err := MigratePath(context.Background(), epoch, &validCandidate{}, testMigrationConfig(), log)
+	if err == nil {
+		t.Fatal("expected error after epoch shutdown")
+	}
+}
+
 func TestMigratePath_Ownership_Epoch(t *testing.T) {
 	tunnel := newMinimalTunnelForTest(t)
 	epoch := NewRecoveryEpoch(tunnel)
