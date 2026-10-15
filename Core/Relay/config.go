@@ -70,6 +70,11 @@ type ServiceConfig struct {
 	// additional packets are dropped and counted. Zero means the default
 	// (256).
 	MaxBodyQueueDepth int `json:"max_body_queue_depth,omitempty"`
+
+	// Probe configures the non-disruptive reachability probe endpoint.
+	// Zero-valued fields are filled with defaults. When Enabled is false
+	// (the default), no probe listener is started.
+	Probe ProbeListenerConfig `json:"probe,omitempty"`
 }
 
 // UDPConfig configures the Relay UDP ingress path. Each open relay route
@@ -109,6 +114,7 @@ func DefaultServiceConfig() ServiceConfig {
 		MaxBodyQueueDepth:   defaultBodyMaxQueueDepth,
 	}
 	cfg.UDP.ApplyDefaults()
+	cfg.Probe.ApplyDefaults()
 	return cfg
 }
 

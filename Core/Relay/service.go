@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sync"
 	"time"
 )
@@ -37,13 +38,15 @@ func (s ServiceState) String() string {
 }
 
 // Service is the relay service. It manages configuration, the route
-// registry, liveness checks, diagnostic metrics, and an optional
-// outbound control tunnel to a Relay.
+// registry, liveness checks, diagnostic metrics, an optional
+// outbound control tunnel to a Relay, and a non-disruptive
+// reachability probe endpoint (M6.4).
 type Service struct {
 	config   ServiceConfig
 	registry *Registry
 	metrics  *Metrics
 	udp      *UDPListener
+	probe    *ProbeListener
 
 	clientCfg ClientConfig
 	client    *ControlClient
@@ -62,14 +65,22 @@ func NewService(cfg ServiceConfig, clientCfg ClientConfig) (*Service, error) {
 		return nil, fmt.Errorf("relay: invalid config: %w", err)
 	}
 	cfg.UDP.ApplyDefaults()
+	cfg.Probe.ApplyDefaults()
 	registry := NewRegistry(cfg.MaxRegistrations, cfg.MaxRoutes)
 	metrics := NewMetrics()
+
+	var probe *ProbeListener
+	if cfg.Probe.Enabled {
+		probe = NewProbeListener(cfg.Probe, registry, slog.Default())
+	}
+
 	return &Service{
 		config:    cfg,
 		clientCfg: clientCfg,
 		registry:  registry,
 		metrics:   metrics,
 		udp:       NewUDPListener(cfg.UDP, registry, metrics),
+		probe:     probe,
 		state:     ServiceStateStopped,
 	}, nil
 }
@@ -108,6 +119,16 @@ func (s *Service) Start(ctx context.Context) error {
 		s.client = client
 	}
 
+	// Start probe listener if configured
+	if s.probe != nil {
+		if err := s.probe.Start(); err != nil {
+			// Non-fatal: reachability probing degrades gracefully.
+			// Log and continue without the probe listener.
+			slog.Warn("relay: probe listener start skipped", "error", err)
+			s.probe = nil
+		}
+	}
+
 	s.mu.Lock()
 	s.state = ServiceStateRunning
 	s.mu.Unlock()
@@ -139,6 +160,11 @@ func (s *Service) Shutdown(ctx context.Context) error {
 	if err := s.udp.Shutdown(); err != nil {
 		// Non-fatal — continue with liveness/registry shutdown
 		_ = err
+	}
+
+	// Shutdown probe listener if running
+	if s.probe != nil {
+		s.probe.Stop()
 	}
 
 	// Cancel the liveness loop
@@ -199,6 +225,12 @@ func (s *Service) Metrics() *Metrics {
 // UDP returns the service's UDP ingress listener.
 func (s *Service) UDP() *UDPListener {
 	return s.udp
+}
+
+// Probe returns the service's reachability probe listener, or nil if
+// not configured or failed to start.
+func (s *Service) Probe() *ProbeListener {
+	return s.probe
 }
 
 // SetPacketSink binds the Core-tunnel boundary (packet sink) for a
