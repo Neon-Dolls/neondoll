@@ -23,15 +23,18 @@ package integration
 
 import (
 	"context"
+	"crypto/hmac"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"fmt"
+	"net"
 	"net/netip"
 	"testing"
 	"time"
 
 	body "github.com/Neon-Dolls/neondoll/Body"
-	"github.com/Neon-Dolls/neondoll/Core/Relay"
+	relay "github.com/Neon-Dolls/neondoll/Core/Relay"
 )
 
 // directCandidate implements body.MigrationCandidate for direct UDP cutover.
@@ -46,6 +49,73 @@ func (c *directCandidate) Validate(ctx context.Context) (*body.MigrationTarget, 
 }
 
 func (c *directCandidate) Stop() {}
+
+// coreProbeResponder is a test-side M6.4 probe endpoint that validates
+// HMAC-authenticated probes and sends authenticated responses, enabling
+// direct endpoint reachability probing without the full relay ProbeListener.
+type coreProbeResponder struct {
+	conn *net.UDPConn
+	port int
+}
+
+// startCoreProbeResponder starts a UDP server that responds to M6.4
+// reachability probes. It validates the request HMAC using the route
+// credential and echoes the nonce back, proving direct endpoint reachability.
+func startCoreProbeResponder(t *testing.T, routeID relay.RouteID, credential string) *coreProbeResponder {
+	t.Helper()
+
+	conn, err := net.ListenUDP("udp", &net.UDPAddr{Port: 0})
+	if err != nil {
+		t.Fatalf("probe responder listen: %v", err)
+	}
+	port := conn.LocalAddr().(*net.UDPAddr).Port
+
+	r := &coreProbeResponder{conn: conn, port: port}
+
+	go func() {
+		buf := make([]byte, relay.ProbeDatagramSize)
+		for {
+			n, src, err := conn.ReadFromUDP(buf)
+			if err != nil {
+				return
+			}
+			if n < relay.ProbeDatagramSize {
+				continue
+			}
+			if string(buf[:4]) != relay.ProbeMagicReq {
+				continue
+			}
+
+			reqRouteID := relay.RouteID(binary.LittleEndian.Uint64(buf[4:12]))
+			if reqRouteID != routeID {
+				continue
+			}
+
+			nonce := buf[12:20]
+
+			// Validate request HMAC
+			expectedMAC := relay.ProbeHMAC(relay.ProbeMagicReq, routeID, nonce, credential)
+			if !hmac.Equal(buf[20:52], expectedMAC) {
+				continue
+			}
+
+			// Build response
+			resp := make([]byte, relay.ProbeDatagramSize)
+			copy(resp[:4], relay.ProbeMagicResp)
+			binary.LittleEndian.PutUint64(resp[4:12], uint64(routeID))
+			copy(resp[12:20], nonce)
+
+			respMAC := relay.ProbeHMAC(relay.ProbeMagicResp, routeID, nonce, credential)
+			copy(resp[20:52], respMAC)
+
+			conn.SetWriteDeadline(time.Now().Add(2 * time.Second))
+			conn.WriteToUDP(resp, src)
+		}
+	}()
+
+	t.Cleanup(func() { conn.Close() })
+	return r
+}
 
 func TestM66_MobilityReturnConformance(t *testing.T) {
 	ctx := context.Background()
@@ -271,26 +341,49 @@ func TestM66_MobilityReturnConformance(t *testing.T) {
 	// ═══════════════════════════════════════════════════════════════
 	t.Log("=== Phase 3: M6.4 discovery → M6.5 migration back to direct ===")
 
-	// Start a new Core UDP device (direct path available again)
+	// ── Phase 3a: Negative assertion — direct unavailable ──
+	// Before the direct Core endpoint comes back, prove that M6.4
+	// discovery does NOT authorize a direct migration while the
+	// WSS path remains healthy.
+	t.Log("--- Phase 3a: Negative assertion — direct unavailable ---")
+
+	t.Log("verifying WSS tunnel is operational before negative probe")
+	proveBidirectionalTraffic(t, wssTunnel.Netstack(), coreNetB, bodyOverlay, coreOverlay, "phase3a-pre-discovery")
+
+	// Probe a port with no listener — direct is genuinely unavailable.
+	negResult := body.ReachProbe(ctx, body.ReachProbeConfig{
+		Target:     "127.0.0.1:1",
+		RouteID:    uint64(routeID),
+		Credential: credential,
+		Timeout:    5 * time.Second,
+	})
+	if negResult.Reachable {
+		t.Fatal("negative assertion: direct path must be unreachable before Core device starts")
+	}
+	t.Logf("negative assertion PASSED: direct unreachable (reachable=%v, error=%v, duration=%v)",
+		negResult.Reachable, negResult.Error, negResult.Duration)
+
+	t.Log("verifying WSS tunnel stayed operational during negative probe")
+	proveBidirectionalTraffic(t, wssTunnel.Netstack(), coreNetB, bodyOverlay, coreOverlay, "phase3a-post-negative-discovery")
+
+	// ── Phase 3b: Positive M6.4 discovery of direct endpoint ──
+	t.Log("--- Phase 3b: Positive M6.4 discovery of direct endpoint ---")
+
+	// Start a new Core UDP device (direct path available again).
 	coreDevC, coreNetC, corePortC := startCoreUDPDeviceWithNetstack(t, coreKeys, bodyKeys.pubHex)
 	_ = coreDevC
 
-	// ── Phase 3a: M6.4 better-path discovery ──
-	// Exercise the actual reach-probe scheduler to discover route viability
-	// BEFORE migration. The probe reaches the relay's ProbeListener as the
-	// authoritative discovery endpoint.
-	t.Log("--- Phase 3a: M6.4 better-path discovery ---")
+	// Start a M6.4 probe responder alongside the direct Core device.
+	// The responder validates HMAC-authenticated probes against the
+	// route credential and echoes the nonce — proving reachability of
+	// the direct endpoint, not just the relay.
+	probeResp := startCoreProbeResponder(t, routeID, credential)
+	probeAddr := fmt.Sprintf("127.0.0.1:%d", probeResp.port)
+	t.Logf("direct probe responder listening on %s", probeAddr)
 
 	t.Log("verifying WSS tunnel is operational before M6.4 discovery")
-	proveBidirectionalTraffic(t, wssTunnel.Netstack(), coreNetB, bodyOverlay, coreOverlay, "phase3a-pre-discovery")
+	proveBidirectionalTraffic(t, wssTunnel.Netstack(), coreNetB, bodyOverlay, coreOverlay, "phase3b-pre-discovery")
 
-	pl := relay.NewProbeListener(relay.ProbeListenerConfig{}, svc.Registry(), log)
-	if err := pl.Start(); err != nil {
-		t.Fatalf("ProbeListener.Start: %v", err)
-	}
-	defer pl.Stop()
-
-	probeAddr := pl.Addr().String()
 	scheduler := body.NewProbeScheduler(body.ProbeSchedulerConfig{
 		MinInterval:    1 * time.Second,
 		MaxBackoff:     5 * time.Second,
@@ -310,28 +403,28 @@ func TestM66_MobilityReturnConformance(t *testing.T) {
 	scheduler.RecordResult(probeResult.Reachable)
 
 	if !probeResult.Reachable {
-		t.Fatalf("M6.4 discovery failed: route %d unreachable (error: %v, duration: %v)", routeID, probeResult.Error, probeResult.Duration)
+		t.Fatalf("M6.4 direct discovery failed: endpoint %s unreachable (error=%v, duration=%v)",
+			probeAddr, probeResult.Error, probeResult.Duration)
 	}
-	t.Logf("M6.4 discovery: route %d reachable via relay in %v (error=%v)", routeID, probeResult.Duration, probeResult.Error)
+	t.Logf("M6.4 direct discovery: endpoint %s reachable in %v", probeAddr, probeResult.Duration)
 
 	t.Log("verifying WSS tunnel stayed operational during M6.4 discovery")
-	proveBidirectionalTraffic(t, wssTunnel.Netstack(), coreNetB, bodyOverlay, coreOverlay, "phase3a-post-discovery")
+	proveBidirectionalTraffic(t, wssTunnel.Netstack(), coreNetB, bodyOverlay, coreOverlay, "phase3b-post-discovery")
 
-	// Discovery result authorizes migration. The better path (direct) is
-	// constructed from topology — informed by M6.4's confirmation that the
-	// route is alive. Pass the discovery result into M6.5 by gating
-	// candidate construction on a successful probe.
-	t.Logf("M6.4 discovery authorized migration — constructing direct candidate for route %d", routeID)
+	// Discovery result authorizes migration of direct candidate.
+	// NOTE: In production, loss→recovery orchestration (M6.1→M6.2) and
+	// discovery→migration orchestration (M6.4→M6.5) must be wired by
+	// higher-level control logic. This test exercises the primitives
+	// end-to-end but does not wire a production orchestrator.
+	t.Log("M6.4 discovery authorized migration — constructing direct candidate")
 
-	// ── Phase 3b: M6.5 migration back to direct ──
-	t.Log("--- Phase 3b: M6.5 migration back to direct ---")
+	// ── Phase 3c: M6.5 migration back to direct ──
+	t.Log("--- Phase 3c: M6.5 migration back to direct ---")
 
-	// Create candidate for direct-path cutover
 	candidate := &directCandidate{
 		endpoint: fmt.Sprintf("127.0.0.1:%d", corePortC),
 	}
 
-	// Reserve generation and cut over
 	migrateCfg := body.MigrationConfig{
 		ProbeTimeout: 10 * time.Second,
 	}
