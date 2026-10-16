@@ -204,9 +204,9 @@ func CutoverPath(
 	// ------------------------------------------------------------------
 	if !epoch.TryCommit(gen, newTunnel) {
 		newTunnel.Stop()
-		log.Warn("cutover: commit race — generation superseded, rolling back",
+		log.Warn("cutover: commit race — generation superseded",
 			"gen", gen)
-		return buildAndCommitRollback(ctx, oldCfg, epoch, gen, timeout, log)
+		return CutoverResult{Err: ErrMigrationSuperseded}
 	}
 
 	log.Debug("cutover: completed successfully",

@@ -790,3 +790,109 @@ func TestCutoverPath_BindNotClosedAfterTransfer(t *testing.T) {
 
 	t.Log("TestCutoverPath_BindNotClosedAfterTransfer: PASS")
 }
+
+// TestCutoverPath_SupersessionDuringCommit verifies that when the epoch's
+// generation is superseded by another thread after BREAK but before COMMIT,
+// CutoverPath stops only its candidate tunnel, returns ErrMigrationSuperseded,
+// and does NOT start a rollback tunnel that could interfere with the new owner.
+//
+// This is deterministic: a goroutine polls for BREAK (oldTunnel.Stop()), then
+// advances the epoch and commits a different tunnel. CutoverPath's subsequent
+// TryCommit with the stale gen fails, and it must NOT attempt rollback.
+func TestCutoverPath_SupersessionDuringCommit(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	log := testLogger(t)
+
+	// ── Setup: direct UDP core + body tunnel ────────────────────────
+	coreKeys := newTestKeypair(t)
+	bodyKeys := newTestKeypair(t)
+
+	coreTun, coreNet, corePort := startCoreUDPDeviceWithNetstack(t, coreKeys, bodyKeys.pubHex)
+	t.Cleanup(func() { coreTun.Close() })
+	coreEndpoint := fmt.Sprintf("127.0.0.1:%d", corePort)
+
+	coreOverlay := netip.MustParseAddr("fd00::1")
+	bodyOverlay := netip.MustParseAddr("fd00::2")
+
+	oldCfg := body.BodyTunnelConfig{
+		PrivateKey:     hexToKey(t, bodyKeys.privHex),
+		CorePublicKey:  hexToKey(t, coreKeys.pubHex),
+		OverlayAddress: bodyOverlay,
+		OverlayPrefix:  netip.MustParsePrefix("fd00::/64"),
+		CoreEndpoint:   coreEndpoint,
+		ListenPort:     0,
+		MTU:            device.DefaultMTU,
+	}
+	oldTunnel := body.NewBodyTunnel(oldCfg, log)
+	if err := oldTunnel.Start(ctx); err != nil {
+		t.Fatalf("old tunnel Start: %v", err)
+	}
+	t.Cleanup(func() {
+		if oldTunnel.Started() {
+			oldTunnel.Stop()
+		}
+	})
+
+	hsCtx, hsCancel := context.WithTimeout(ctx, 15*time.Second)
+	defer hsCancel()
+	if err := oldTunnel.WaitHandshake(hsCtx, 15*time.Second); err != nil {
+		t.Fatalf("old tunnel handshake: %v", err)
+	}
+	t.Log("old tunnel handshake complete")
+
+	proveBidirectionalTraffic(t, oldTunnel.Netstack(), coreNet,
+		bodyOverlay, coreOverlay, "pre-cutover")
+	t.Log("pre-cutover traffic OK")
+
+	// ── Epoch + generation ──────────────────────────────────────────
+	epoch := body.NewRecoveryEpoch(oldTunnel)
+	gen := epoch.NextGenForTunnel(oldTunnel)
+	candidate := &cutoverCandidate{endpoint: coreEndpoint}
+
+	// ── Superseding tunnel (struct only, never started) ──────────────
+	supTunnel := body.NewBodyTunnel(oldCfg, log)
+
+	// ── Start CutoverPath in background ──────────────────────────────
+	resultCh := make(chan body.CutoverResult, 1)
+	go func() {
+		resultCh <- body.CutoverPath(ctx, oldTunnel, epoch, candidate, gen,
+			body.MigrationConfig{ProbeTimeout: 5 * time.Second}, log)
+	}()
+
+	// ── Detect BREAK: poll until old tunnel stops ────────────────────
+	for oldTunnel.Started() {
+		if ctx.Err() != nil {
+			t.Fatalf("timed out waiting for BREAK: %v", ctx.Err())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Log("BREAK detected — old tunnel stopped")
+
+	// ── Supersede the epoch (simulate another thread winning) ────────
+	supGen := epoch.NextGen()
+	if !epoch.TryCommit(supGen, supTunnel) {
+		t.Fatal("failed to commit superseding tunnel")
+	}
+	t.Logf("epoch superseded with gen=%d", supGen)
+
+	// ── Wait for CutoverPath to finish ───────────────────────────────
+	result := <-resultCh
+
+	// ── Verify: no rollback, no tunnel, epoch owned by superseder ────
+	if !errors.Is(result.Err, body.ErrMigrationSuperseded) {
+		t.Fatalf("expected ErrMigrationSuperseded, got: %v", result.Err)
+	}
+	if result.Tunnel != nil {
+		t.Fatal("CutoverPath returned a tunnel despite supersession")
+	}
+	if epoch.Active() != supTunnel {
+		t.Error("epoch.Active() is not the superseding tunnel — rollback may have interfered")
+	}
+	if oldTunnel.Started() {
+		t.Error("old tunnel was restarted despite supersession")
+	}
+
+	t.Log("TestCutoverPath_SupersessionDuringCommit: PASS")
+}
