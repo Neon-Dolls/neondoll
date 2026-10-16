@@ -72,8 +72,8 @@ func NewBodyTunnel(cfg BodyTunnelConfig, log *slog.Logger) *BodyTunnel {
 		log = slog.Default()
 	}
 	return &BodyTunnel{
-		cfg: cfg,
-		log: log.With("component", "body.wireguard"),
+		cfg:      cfg,
+		log:      log.With("component", "body.wireguard"),
 		shutdown: make(chan struct{}),
 	}
 }
@@ -262,5 +262,3 @@ func (bt *BodyTunnel) IpcSet(uapi string) error {
 	}
 	return bt.dev.IpcSet(uapi)
 }
-
-

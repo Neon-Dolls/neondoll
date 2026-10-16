@@ -336,14 +336,6 @@ func TestBodyPathSelect_WSSFallback(t *testing.T) {
 	t.Cleanup(func() { srv.Close() })
 	wssURL := "ws" + strings.TrimPrefix(srv.URL, "http")
 
-	// Timing monitor
-	go func() {
-		for sec := 1; ; sec++ {
-			time.Sleep(1 * time.Second)
-			t.Logf("TIMING: T+%ds elapsed", sec)
-		}
-	}()
-
 	// Start UDP forwarder: captureCh → Core UDP → injectCh
 	var (
 		wg            sync.WaitGroup
@@ -352,6 +344,18 @@ func TestBodyPathSelect_WSSFallback(t *testing.T) {
 	)
 	forwardCtx, forwardCancel = context.WithCancel(context.Background())
 	defer forwardCancel()
+
+	// Timing monitor — exits when forwarder stops
+	go func() {
+		for sec := 1; ; sec++ {
+			select {
+			case <-forwardCtx.Done():
+				return
+			case <-time.After(1 * time.Second):
+				t.Logf("TIMING: T+%ds elapsed", sec)
+			}
+		}
+	}()
 
 	relayUDPConn, err := net.Dial("udp", coreUDPAddr)
 	if err != nil {
