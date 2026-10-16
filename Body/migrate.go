@@ -16,15 +16,19 @@ import (
 // MigrationTarget describes the path to establish during cutover. The
 // candidate creates the MigrationTarget during Validate; the caller owns
 // it and must eventually call Stop to release candidate resources.
+//
+// When a Bind is returned, ownership of the Bind transfers to the caller.
+// The candidate's Stop() MUST NOT close a Bind that was returned via
+// Validate — the bind is now owned by the new tunnel.
 type MigrationTarget struct {
 	// CoreEndpoint is the core's reachable address for the new path in
 	// "ip:port" format.
 	CoreEndpoint string
 
 	// Bind is an optional non-default WireGuard transport bind. When nil
-	// the new tunnel uses a default UDP bind. Non-nil supports alternative
-	// transports such as Relay or WSS. The candidate retains ownership of
-	// the bind until its Stop method is called.
+	// the new tunnel uses a default UDP bind. When non-nil, ownership of
+	// the Bind transfers to the caller; the candidate's Stop() MUST NOT
+	// close it.
 	Bind conn.Bind
 }
 
@@ -80,7 +84,7 @@ func MigratePath(
 		return 0, fmt.Errorf("migrate: candidate validate: %w", err)
 	}
 
-	gen := epoch.NextGenForTunnel(nil) // TODO: pass actual tunnel once epoch supports it
+	gen := epoch.NextGenForTunnel(epoch.Active())
 	if !epoch.TryReserveMigration(gen) {
 		candidate.Stop()
 		return 0, ErrMigrationSuperseded
@@ -138,6 +142,7 @@ func CutoverPath(
 	// ------------------------------------------------------------------
 	target, err := candidate.Validate(ctx)
 	if err != nil {
+		candidate.Stop()
 		return CutoverResult{Err: fmt.Errorf("cutover: candidate validate: %w", err)}
 	}
 	log.Debug("cutover: candidate re-validated",
@@ -174,7 +179,6 @@ func CutoverPath(
 	newCfg.CoreEndpoint = target.CoreEndpoint
 	newCfg.Bind = target.Bind
 	newTunnel := NewBodyTunnel(newCfg, log)
-	candidate.Stop() // candidate resources no longer needed
 
 	// ------------------------------------------------------------------
 	// 5. Start + wait for WG handshake.
@@ -232,7 +236,6 @@ func buildAndCommitRollback(
 	log *slog.Logger,
 ) CutoverResult {
 	rbCfg := oldCfg
-	rbCfg.Bind = nil // fresh UDP bind — the old bind was closed during BREAK
 	rbTunnel := NewBodyTunnel(rbCfg, log)
 	log.Debug("cutover: constructing rollback tunnel",
 		"endpoint", rbCfg.CoreEndpoint)
