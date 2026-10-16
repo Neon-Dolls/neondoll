@@ -6,103 +6,205 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/netip"
 	"time"
 )
 
-// ErrMigrationSuperseded is returned when the epoch generation was
-// concurrently advanced (by another migration or recovery cycle)
-// before the commit phase completed.
-var ErrMigrationSuperseded = errors.New("body: migration superseded by newer cycle")
-
-// MigrationCandidate describes a potential replacement path.
-// Validate must NOT start a competing WireGuard tunnel or otherwise
-// interfere with the active path — it is called during preparation,
-// before any epoch ownership commitment. Only bound to candidate
-// descriptors: M6.4 probe results, endpoint reachability checks, etc.
+// MigrationCandidate is the interface implemented by migration source/target
+// resolvers.  Validate checks whether the candidate path is usable and
+// returns the preferred endpoint for the new WireGuard tunnel.
 //
-// Full WireGuard handshake validation is deferred to the cutover
-// slice and does NOT belong here.
+// It MUST NOT initiate a WireGuard handshake or modify the active
+// tunnel's state.
 type MigrationCandidate interface {
-	// Validate checks whether the candidate path is viable.
-	// It MUST NOT initiate a WireGuard handshake or modify
-	// the active tunnel's state.
-	Validate(ctx context.Context) error
+	Validate(ctx context.Context) (netip.AddrPort, error)
 }
 
-// MigrationConfig controls the migration lifecycle.
+// MigrationConfig controls the behaviour of MigratePath and CutoverPath.
 type MigrationConfig struct {
-	// ProbeTimeout bounds how long candidate validation may run.
-	// Zero value uses DefaultMigrationProbeTimeout.
+	// ProbeTimeout limits how long MigratePath waits for candidate
+	// validation and CutoverPath waits for the initial WireGuard handshake.
 	ProbeTimeout time.Duration
 }
 
-// ProbeTimeoutOrDefault returns ProbeTimeout, falling back to
-// DefaultMigrationProbeTimeout when zero.
-func (c MigrationConfig) ProbeTimeoutOrDefault() time.Duration {
-	if c.ProbeTimeout <= 0 {
-		return DefaultMigrationProbeTimeout
-	}
-	return c.ProbeTimeout
+// DefaultMigrationTimeout is the default value for ProbeTimeout when zero.
+const DefaultMigrationTimeout = 10 * time.Second
+
+// ErrMigrationSuperseded is returned when a CutoverPath attempt discovers
+// that the generation it holds is no longer current (another migration
+// committed first, or the epoch was shut down).
+var ErrMigrationSuperseded = errors.New("migration superseded: generation no longer current")
+
+// CutoverResult holds the outcome of a controlled migration cutover.
+type CutoverResult struct {
+	// Tunnel is the tunnel that should be used for active traffic after
+	// cutover.  On success this is the new, committed tunnel.  On
+	// handshake failure it is a rollback tunnel re-established on the
+	// original config — the caller MUST take ownership of this tunnel.
+	Tunnel *BodyTunnel
+
+	// Err is non-nil when the cutover did not complete normally.  See
+	// Tunnel for the fallback tunnel (or nil if rollback also failed).
+	Err error
 }
 
-// DefaultMigrationProbeTimeout is the default timeout for candidate
-// validation when no explicit timeout is configured.
-const DefaultMigrationProbeTimeout = 10 * time.Second
-
-// MigratePath prepares a controlled path migration by reserving epoch
-// ownership and validating the candidate descriptor. It does NOT start
-// a competing WireGuard tunnel — only the active path carries encrypted
-// traffic throughout preparation.
+// MigratePath initiates a controlled path migration and returns the
+// generation ticket the caller must present at cutover time.
 //
-// Lifecycle (this slice only — WG cutover is deferred to the next):
+// It validates the candidate and reserves the generation.  The caller
+// must later call CutoverPath with the returned gen.
 //
-//  1. Reserve — epoch.NextGenForTunnel(epoch.Active()) atomically claims
-//     a generation ticket, rejecting stale targets or concurrent cycles.
-//  2. Validate — candidate.Validate(ctx) checks viability using the
-//     M6.4 probe result, without any WG handshake initiation.
-//  3. Commit — epoch.TryReserveMigration(gen) confirms the generation
-//     was not bumped during validation. If bumped, returns
-//     ErrMigrationSuperseded.
-//
-// On any failure, TryCancel(gen) is called and the epoch.Active()
-// tunnel is NEVER stopped or modified. The caller receives the
-// committed generation on success; this gen must be passed to the
-// cutover operation (next slice) to complete the actual WG device
-// and Relay return-path transition.
+// If the epoch cannot produce a generation (closed or the old tunnel is
+// no longer the active tunnel), MigratePath returns 0, ErrMigrationSuperseded.
 func MigratePath(
 	ctx context.Context,
 	epoch *RecoveryEpoch,
 	candidate MigrationCandidate,
 	cfg MigrationConfig,
 	log *slog.Logger,
-) (committedGen uint64, err error) {
-	// 1. Reserve a generation. Read the active tunnel from the epoch
-	//    — no external old-tunnel argument needed.
-	oldTunnel := epoch.Active()
-	if oldTunnel == nil {
-		return 0, errors.New("body: migrate path: no active tunnel")
+) (uint64, error) {
+	if epoch == nil {
+		return 0, fmt.Errorf("migrate: nil epoch")
 	}
 
-	gen := epoch.NextGenForTunnel(oldTunnel)
+	active := epoch.Active()
+	if active == nil {
+		return 0, fmt.Errorf("migrate: no active tunnel")
+	}
+
+	// Reserve the next available generation.
+	gen := epoch.NextGenForTunnel(active)
 	if gen == 0 {
-		return 0, errors.New("body: migrate path: epoch closed or superseded")
+		return 0, fmt.Errorf("migrate: %w: no generation available", ErrMigrationSuperseded)
 	}
 
-	// 2. Validate candidate without starting any WG device.
-	validateCtx, validateCancel := context.WithTimeout(ctx, cfg.ProbeTimeoutOrDefault())
-	defer validateCancel()
+	timeout := cfg.ProbeTimeout
+	if timeout <= 0 {
+		timeout = DefaultMigrationTimeout
+	}
 
-	if err := candidate.Validate(validateCtx); err != nil {
+	// Validate the candidate with a context that respects ProbeTimeout.
+	validateCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	if _, err := candidate.Validate(validateCtx); err != nil {
 		epoch.TryCancel(gen)
-		return 0, fmt.Errorf("body: migrate path: candidate validation: %w", err)
+		return 0, fmt.Errorf("migrate: candidate validate: %w", err)
 	}
 
-	// 3. Commit the generation. If the gen was bumped concurrently
-	//    (by recovery or another migration), TryReserveMigration
-	//    returns false.
+	// Re-check the generation: if the epoch advanced while we were
+	// validating (another NextGen or migration won), this is a supersession.
 	if !epoch.TryReserveMigration(gen) {
+		epoch.TryCancel(gen)
 		return 0, ErrMigrationSuperseded
 	}
 
+	log.Debug("migrate: candidate validated, migration reserved",
+		"gen", gen,
+		"probe_timeout", timeout,
+	)
+
 	return gen, nil
+}
+
+// CutoverPath completes a controlled path migration by:
+//
+//  1. Re-validating the candidate to obtain the target endpoint.
+//  2. Checking the generation ticket is still current.
+//  3. Creating and starting a new WireGuard tunnel that preserves the
+//     original identity (private key, overlay address, membership).
+//  4. Waiting for the initial WireGuard handshake to complete.
+//  5. Committing the new tunnel atomically via the epoch.
+//  6. Stopping the old tunnel.
+//
+// If the handshake fails, CutoverPath creates a rollback tunnel on the
+// original endpoint path and returns it (with a non-nil Err).  The caller
+// MUST take ownership of the rollback tunnel.
+//
+// If the generation was consumed by another migration, CutoverPath returns
+// ErrMigrationSuperseded (with no rollback — another path already won).
+func CutoverPath(
+	ctx context.Context,
+	oldTunnel *BodyTunnel,
+	epoch *RecoveryEpoch,
+	candidate MigrationCandidate,
+	gen uint64,
+	cfg MigrationConfig,
+	log *slog.Logger,
+) CutoverResult {
+	timeout := cfg.ProbeTimeout
+	if timeout <= 0 {
+		timeout = DefaultMigrationTimeout
+	}
+
+	// 1. Re-validate the candidate to get the target endpoint.
+	endpoint, err := candidate.Validate(ctx)
+	if err != nil {
+		return CutoverResult{Err: fmt.Errorf("cutover: candidate validate: %w", err)}
+	}
+
+	// 2. Quick guard: is this generation still current?
+	if !epoch.TryReserveMigration(gen) {
+		log.Debug("cutover: generation stale, migration superseded", "gen", gen)
+		return CutoverResult{Err: ErrMigrationSuperseded}
+	}
+
+	// 3. Build the new tunnel config — preserve identity, change endpoint.
+	oldCfg := oldTunnel.cfg
+	newCfg := oldCfg
+	newCfg.CoreEndpoint = endpoint.String()
+	newCfg.Bind = nil // let Start allocate a fresh UDP bind
+	newTunnel := NewBodyTunnel(newCfg, log)
+
+	// 4. Start the new tunnel.
+	if err := newTunnel.Start(ctx); err != nil {
+		newTunnel.Stop()
+		epoch.TryCancel(gen)
+		log.Warn("cutover: new tunnel start failed, rolling back", "err", err)
+		rollback := buildRollbackTunnel(oldCfg, log)
+		if rbErr := rollback.Start(ctx); rbErr != nil {
+			return CutoverResult{Err: fmt.Errorf("cutover: start %w, rollback: %v", err, rbErr)}
+		}
+		return CutoverResult{Tunnel: rollback, Err: fmt.Errorf("cutover: start: %w", err)}
+	}
+
+	// 5. Wait for the initial WireGuard handshake.
+	hsCtx, hsCancel := context.WithTimeout(ctx, timeout)
+	defer hsCancel()
+	if err := newTunnel.WaitHandshake(hsCtx, timeout); err != nil {
+		newTunnel.Stop()
+		epoch.TryCancel(gen)
+		log.Warn("cutover: handshake failed, rolling back", "err", err)
+		rollback := buildRollbackTunnel(oldCfg, log)
+		if rbErr := rollback.Start(ctx); rbErr != nil {
+			return CutoverResult{Err: fmt.Errorf("cutover: handshake %w, rollback: %v", err, rbErr)}
+		}
+		return CutoverResult{Tunnel: rollback, Err: fmt.Errorf("cutover: handshake: %w", err)}
+	}
+
+	// 6. Commit atomically — make this tunnel the epoch's active tunnel.
+	if !epoch.TryCommit(gen, newTunnel) {
+		newTunnel.Stop()
+		epoch.TryCancel(gen)
+		log.Warn("cutover: commit race — generation claimed by another migration", "gen", gen)
+		rollback := buildRollbackTunnel(oldCfg, log)
+		if rbErr := rollback.Start(ctx); rbErr != nil {
+			return CutoverResult{Err: fmt.Errorf("cutover: commit %w, rollback: %v", ErrMigrationSuperseded, rbErr)}
+		}
+		return CutoverResult{Tunnel: rollback, Err: fmt.Errorf("cutover: %w", ErrMigrationSuperseded)}
+	}
+
+	// 7. Cutover complete — stop the old path.
+	oldTunnel.Stop()
+	log.Debug("cutover: completed successfully", "gen", gen, "endpoint", endpoint)
+
+	return CutoverResult{Tunnel: newTunnel, Err: nil}
+}
+
+// buildRollbackTunnel creates a *BodyTunnel from oldCfg that will be wired
+// back to the original endpoint.  It does NOT start it — the caller must
+// call Start.
+func buildRollbackTunnel(oldCfg BodyTunnelConfig, log *slog.Logger) *BodyTunnel {
+	rbCfg := oldCfg
+	rbCfg.Bind = nil // fresh UDP bind, never reuse a closed one
+	return NewBodyTunnel(rbCfg, log)
 }

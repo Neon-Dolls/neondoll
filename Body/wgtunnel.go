@@ -162,6 +162,20 @@ func (bt *BodyTunnel) Stop() error {
 	return nil
 }
 
+// Config returns a copy of the tunnel configuration.
+func (bt *BodyTunnel) Config() BodyTunnelConfig {
+	bt.mu.Lock()
+	defer bt.mu.Unlock()
+	return bt.cfg
+}
+
+// Started returns true while the tunnel has been started and not yet stopped.
+func (bt *BodyTunnel) Started() bool {
+	bt.mu.Lock()
+	defer bt.mu.Unlock()
+	return bt.started
+}
+
 // Netstack returns the userspace TCP/IP stack network handle.
 func (bt *BodyTunnel) Netstack() *netstack.Net {
 	return bt.net

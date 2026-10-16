@@ -16,16 +16,16 @@ import (
 
 type validCandidate struct{}
 
-func (c *validCandidate) Validate(ctx context.Context) error {
-	return nil
+func (c *validCandidate) Validate(ctx context.Context) (netip.AddrPort, error) {
+	return netip.MustParseAddrPort("127.0.0.1:51820"), nil
 }
 
 type failingCandidate struct {
 	err error
 }
 
-func (c *failingCandidate) Validate(ctx context.Context) error {
-	return c.err
+func (c *failingCandidate) Validate(ctx context.Context) (netip.AddrPort, error) {
+	return netip.AddrPort{}, c.err
 }
 
 type blockingCandidate struct {
@@ -34,7 +34,7 @@ type blockingCandidate struct {
 	err   error
 }
 
-func (c *blockingCandidate) Validate(ctx context.Context) error {
+func (c *blockingCandidate) Validate(ctx context.Context) (netip.AddrPort, error) {
 	select {
 	case <-c.ready:
 	default:
@@ -42,9 +42,9 @@ func (c *blockingCandidate) Validate(ctx context.Context) error {
 	}
 	select {
 	case <-c.block:
-		return c.err
+		return netip.AddrPort{}, c.err
 	case <-ctx.Done():
-		return ctx.Err()
+		return netip.AddrPort{}, ctx.Err()
 	}
 }
 
