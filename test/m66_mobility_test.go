@@ -186,14 +186,54 @@ func TestM66_MobilityReturnConformance(t *testing.T) {
 	}
 
 	// ═══════════════════════════════════════════════════════════════
-	// Phase 2: Direct loss → WSS recovery (steps 3-4)
+	// Phase 2: Direct loss → M6.1 loss observation → M6.2 WSS recovery
 	// ═══════════════════════════════════════════════════════════════
-	t.Log("=== Phase 2: Direct loss → WSS recovery ===")
+	t.Log("=== Phase 2: Direct loss → M6.1 loss observation → M6.2 WSS recovery ===")
 
-	// Kill direct path on Core side
+	// Start M6.1 loss observer on the active direct tunnel BEFORE killing
+	// the Core device. This exercises actual path-loss observation and
+	// proves detection fires before recovery.
+	obsCfg := body.LossObserverConfig{
+		WGLivenessTimeout: 6 * time.Second,
+		PollInterval:      500 * time.Millisecond,
+		// Tunnel already has handshake from Phase 1; no grace needed.
+	}
+	onLoss := make(chan body.PathLossEvent, 1)
+	obs, err := body.StartLossObserver(initialTunnel, ctx, obsCfg, onLoss, log)
+	if err != nil {
+		t.Fatalf("StartLossObserver: %v", err)
+	}
+	defer obs.Cancel()
+
+	t.Logf("loss observer started — now killing direct Core device (port %d)", corePortA)
 	coreDevA.Close()
 
-	// Recover via WSS
+	// Wait for M6.1 path-loss detection to fire (WGLivenessLost).
+	t.Logf("waiting for WGLivenessLost (timeout=%s)...", obsCfg.WGLivenessTimeout)
+	select {
+	case ev := <-onLoss:
+		if ev.Reason != body.WGLivenessLost {
+			t.Fatalf("expected WGLivenessLost, got %v", ev.Reason)
+		}
+		t.Logf("M6.1 path loss detected: reason=%v", ev.Reason)
+	case <-time.After(15 * time.Second):
+		t.Fatalf("timed out waiting for path loss detection (WGLivenessTimeout=%v)", obsCfg.WGLivenessTimeout)
+	case <-ctx.Done():
+		t.Fatalf("context cancelled: %v", ctx.Err())
+	}
+
+	// Observer has fired; shut it down cleanly.
+	obs.Cancel()
+	<-obs.Done
+
+	// NOTE: Production orchestration connecting M6.1 loss detection to M6.2
+	// recovery is not yet present in this codebase. This integration test
+	// performs that orchestration role explicitly — analogous to a future
+	// supervisor/recovery loop reacting to PathLossEvent.
+	t.Log("M6.1 detection verified — recovering via WSS (orchestration: explicit)")
+	t.Log("(production gap: no automatic wiring from loss observation to recovery)")
+
+	// Recover via WSS (M6.2)
 	recResult := body.RecoverPath(ctx, initialTunnel, pathCfg, log, epoch)
 	if recResult.Err != nil {
 		t.Fatalf("RecoverPath: %v", recResult.Err)
@@ -227,13 +267,64 @@ func TestM66_MobilityReturnConformance(t *testing.T) {
 	}
 
 	// ═══════════════════════════════════════════════════════════════
-	// Phase 3: Direct available → migration back (steps 5-7)
+	// Phase 3: M6.4 better-path discovery → M6.5 migration (steps 5-7)
 	// ═══════════════════════════════════════════════════════════════
-	t.Log("=== Phase 3: Direct path available → migration ===")
+	t.Log("=== Phase 3: M6.4 discovery → M6.5 migration back to direct ===")
 
 	// Start a new Core UDP device (direct path available again)
 	coreDevC, coreNetC, corePortC := startCoreUDPDeviceWithNetstack(t, coreKeys, bodyKeys.pubHex)
 	_ = coreDevC
+
+	// ── Phase 3a: M6.4 better-path discovery ──
+	// Exercise the actual reach-probe scheduler to discover route viability
+	// BEFORE migration. The probe reaches the relay's ProbeListener as the
+	// authoritative discovery endpoint.
+	t.Log("--- Phase 3a: M6.4 better-path discovery ---")
+
+	t.Log("verifying WSS tunnel is operational before M6.4 discovery")
+	proveBidirectionalTraffic(t, wssTunnel.Netstack(), coreNetB, bodyOverlay, coreOverlay, "phase3a-pre-discovery")
+
+	pl := relay.NewProbeListener(relay.ProbeListenerConfig{}, svc.Registry(), log)
+	if err := pl.Start(); err != nil {
+		t.Fatalf("ProbeListener.Start: %v", err)
+	}
+	defer pl.Stop()
+
+	probeAddr := pl.Addr().String()
+	scheduler := body.NewProbeScheduler(body.ProbeSchedulerConfig{
+		MinInterval:    1 * time.Second,
+		MaxBackoff:     5 * time.Second,
+		MaxAttempts:    3,
+		InitialBackoff: 500 * time.Millisecond,
+	}, epoch)
+
+	if !scheduler.TryAcquireSlot(time.Now()) {
+		t.Fatal("expected ProbeScheduler slot to be available")
+	}
+	probeResult := body.ReachProbe(ctx, body.ReachProbeConfig{
+		Target:     probeAddr,
+		RouteID:    uint64(routeID),
+		Credential: credential,
+		Timeout:    5 * time.Second,
+	})
+	scheduler.RecordResult(probeResult.Reachable)
+
+	if !probeResult.Reachable {
+		t.Fatalf("M6.4 discovery failed: route %d unreachable (error: %v, duration: %v)", routeID, probeResult.Error, probeResult.Duration)
+	}
+	t.Logf("M6.4 discovery: route %d reachable via relay in %v (error=%v)", routeID, probeResult.Duration, probeResult.Error)
+
+	t.Log("verifying WSS tunnel stayed operational during M6.4 discovery")
+	proveBidirectionalTraffic(t, wssTunnel.Netstack(), coreNetB, bodyOverlay, coreOverlay, "phase3a-post-discovery")
+
+	// Discovery result authorizes migration. The better path (direct) is
+	// constructed from topology — informed by M6.4's confirmation that the
+	// route is alive. Pass the discovery result into M6.5 by gating
+	// candidate construction on a successful probe.
+	t.Logf("M6.4 discovery authorized migration — constructing direct candidate for route %d", routeID)
+
+	// ── Phase 3b: M6.5 migration back to direct ──
+	t.Log("--- Phase 3b: M6.5 migration back to direct ---")
 
 	// Create candidate for direct-path cutover
 	candidate := &directCandidate{
