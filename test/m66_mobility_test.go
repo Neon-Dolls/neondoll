@@ -30,6 +30,7 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -54,8 +55,16 @@ func (c *directCandidate) Stop() {}
 // HMAC-authenticated probes and sends authenticated responses, enabling
 // direct endpoint reachability probing without the full relay ProbeListener.
 type coreProbeResponder struct {
-	conn *net.UDPConn
-	port int
+	conn      *net.UDPConn
+	port      int
+	available atomic.Bool
+}
+
+// SetAvailable controls whether the responder processes incoming probes.
+// When false, valid probes are silently dropped — simulating the direct
+// path being disabled while the UDP listener remains open.
+func (r *coreProbeResponder) SetAvailable(v bool) {
+	r.available.Store(v)
 }
 
 // startCoreProbeResponder starts a UDP server that responds to M6.4
@@ -96,6 +105,12 @@ func startCoreProbeResponder(t *testing.T, routeID relay.RouteID, credential str
 			// Validate request HMAC
 			expectedMAC := relay.ProbeHMAC(relay.ProbeMagicReq, routeID, nonce, credential)
 			if !hmac.Equal(buf[20:52], expectedMAC) {
+				continue
+			}
+
+			// Check shared availability — when disabled, simulate direct
+			// path being unreachable even though the socket is listening.
+			if !r.available.Load() {
 				continue
 			}
 
@@ -366,49 +381,71 @@ func TestM66_MobilityReturnConformance(t *testing.T) {
 	t.Log("verifying WSS tunnel stayed operational during negative probe")
 	proveBidirectionalTraffic(t, wssTunnel.Netstack(), coreNetB, bodyOverlay, coreOverlay, "phase3a-post-negative-discovery")
 
-	// ── Phase 3b: Positive M6.4 discovery of direct endpoint ──
-	t.Log("--- Phase 3b: Positive M6.4 discovery of direct endpoint ---")
+	// ── Phase 3b: Positive M6.4 discovery with shared availability ──
+	t.Log("--- Phase 3b: M6.4 discovery with shared availability ---")
 
-	// Start a new Core UDP device (direct path available again).
-	coreDevC, coreNetC, corePortC := startCoreUDPDeviceWithNetstack(t, coreKeys, bodyKeys.pubHex)
-	_ = coreDevC
+	// Start a new Core UDP device and a probe responder.
+	// The responder shares an availability condition with the WG
+	// device — both must be reachable for discovery to succeed.
+	coreDevC, _, corePortC := startCoreUDPDeviceWithNetstack(t, coreKeys, bodyKeys.pubHex)
 
-	// Start a M6.4 probe responder alongside the direct Core device.
-	// The responder validates HMAC-authenticated probes against the
-	// route credential and echoes the nonce — proving reachability of
-	// the direct endpoint, not just the relay.
 	probeResp := startCoreProbeResponder(t, routeID, credential)
+	probeResp.SetAvailable(true)
 	probeAddr := fmt.Sprintf("127.0.0.1:%d", probeResp.port)
-	t.Logf("direct probe responder listening on %s", probeAddr)
+	t.Logf("direct probe responder listening on %s (Core WG on port %d)", probeAddr, corePortC)
 
-	t.Log("verifying WSS tunnel is operational before M6.4 discovery")
 	proveBidirectionalTraffic(t, wssTunnel.Netstack(), coreNetB, bodyOverlay, coreOverlay, "phase3b-pre-discovery")
 
-	scheduler := body.NewProbeScheduler(body.ProbeSchedulerConfig{
-		MinInterval:    1 * time.Second,
-		MaxBackoff:     5 * time.Second,
-		MaxAttempts:    3,
-		InitialBackoff: 500 * time.Millisecond,
-	}, epoch)
-
-	if !scheduler.TryAcquireSlot(time.Now()) {
-		t.Fatal("expected ProbeScheduler slot to be available")
+	// Helper for repeated probe attempts
+	doProbe := func(label string) bool {
+		s := body.NewProbeScheduler(body.ProbeSchedulerConfig{
+			MinInterval:    1 * time.Second,
+			MaxBackoff:     5 * time.Second,
+			MaxAttempts:    3,
+			InitialBackoff: 500 * time.Millisecond,
+		}, epoch)
+		if !s.TryAcquireSlot(time.Now()) {
+			t.Fatalf("ProbeScheduler slot unavailable (%s)", label)
+		}
+		res := body.ReachProbe(ctx, body.ReachProbeConfig{
+			Target:     probeAddr,
+			RouteID:    uint64(routeID),
+			Credential: credential,
+			Timeout:    5 * time.Second,
+		})
+		s.RecordResult(res.Reachable)
+		t.Logf("probe [%s]: reachable=%v, error=%v, duration=%v",
+			label, res.Reachable, res.Error, res.Duration)
+		return res.Reachable
 	}
-	probeResult := body.ReachProbe(ctx, body.ReachProbeConfig{
-		Target:     probeAddr,
-		RouteID:    uint64(routeID),
-		Credential: credential,
-		Timeout:    5 * time.Second,
-	})
-	scheduler.RecordResult(probeResult.Reachable)
 
-	if !probeResult.Reachable {
-		t.Fatalf("M6.4 direct discovery failed: endpoint %s unreachable (error=%v, duration=%v)",
-			probeAddr, probeResult.Error, probeResult.Duration)
+	// ── Probe #1: Both WG device and responder available ──
+	if !doProbe("both-available") {
+		t.Fatalf("positive probe #1: both available — expected reachable")
 	}
-	t.Logf("M6.4 direct discovery: endpoint %s reachable in %v", probeAddr, probeResult.Duration)
 
-	t.Log("verifying WSS tunnel stayed operational during M6.4 discovery")
+	// ── Disable shared condition: close WG device, silence responder ──
+	// The responder's UDP socket is still open, but it drops probes —
+	// simulating a network condition that disables the entire direct path.
+	t.Log("disabling shared condition: closing WG device, silencing responder")
+	coreDevC.Close()
+	probeResp.SetAvailable(false)
+
+	if doProbe("direct-disabled") {
+		t.Fatal("negative probe: with direct path disabled and responder silenced, " +
+			"discovery must not report reachable")
+	}
+	t.Log("negative assertion PASSED: direct unreachable with responder running but disabled")
+
+	// ── Restore shared condition: new WG device, re-enable responder ──
+	t.Log("restoring shared condition: new WG device, re-enabling responder")
+	_, coreNetD, corePortD := startCoreUDPDeviceWithNetstack(t, coreKeys, bodyKeys.pubHex)
+	probeResp.SetAvailable(true)
+
+	if !doProbe("both-restored") {
+		t.Fatalf("positive probe #2: both restored — expected reachable")
+	}
+
 	proveBidirectionalTraffic(t, wssTunnel.Netstack(), coreNetB, bodyOverlay, coreOverlay, "phase3b-post-discovery")
 
 	// Discovery result authorizes migration of direct candidate.
@@ -418,11 +455,11 @@ func TestM66_MobilityReturnConformance(t *testing.T) {
 	// end-to-end but does not wire a production orchestrator.
 	t.Log("M6.4 discovery authorized migration — constructing direct candidate")
 
-	// ── Phase 3c: M6.5 migration back to direct ──
-	t.Log("--- Phase 3c: M6.5 migration back to direct ---")
+	// ── Phase 3c: M6.5 migration back to direct (to coreDevD) ──
+	t.Log("--- Phase 3c: M6.5 migration back to direct (to restored device) ---")
 
 	candidate := &directCandidate{
-		endpoint: fmt.Sprintf("127.0.0.1:%d", corePortC),
+		endpoint: fmt.Sprintf("127.0.0.1:%d", corePortD),
 	}
 
 	migrateCfg := body.MigrationConfig{
@@ -453,7 +490,7 @@ func TestM66_MobilityReturnConformance(t *testing.T) {
 	// ═══════════════════════════════════════════════════════════════
 	t.Log("=== Phase 4: Traffic over new direct path ===")
 
-	proveBidirectionalTraffic(t, finalTunnel.Netstack(), coreNetC, bodyOverlay, coreOverlay, "phase4-direct-return")
+	proveBidirectionalTraffic(t, finalTunnel.Netstack(), coreNetD, bodyOverlay, coreOverlay, "phase4-direct-return")
 
 	// ═══════════════════════════════════════════════════════════════
 	// Final assertions
