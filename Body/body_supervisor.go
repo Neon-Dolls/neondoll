@@ -45,7 +45,20 @@ func (h *SupervisorHandle) Done() <-chan struct{} {
 	return h.done
 }
 
-// Stop signals the supervisor to shut down cleanly.
+// Stop initiates a clean shutdown of the supervisor. It cancels the
+// supervisor's internal context, which causes the supervisor to
+// release its loss observer and abort any in-progress recovery.
+// Stop returns immediately — it does NOT wait for the supervisor
+// goroutine to exit. Use Done() if you need to synchronize.
+//
+// After Stop():
+//   - The supervisor goroutine exits asynchronously.
+//   - The tunnel being observed (the initial tunnel or the last
+//     committed tunnel) is left in its current state.  If recovery
+//     had not started, the tunnel may still be usable.  If recovery
+//     was in progress, the old tunnel has been stopped.
+//   - The epoch remains accessible via ActiveTunnel().
+//   - Subsequent calls to Stop are no-ops.
 func (h *SupervisorHandle) Stop() {
 	h.stop()
 }

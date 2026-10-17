@@ -294,9 +294,16 @@ func TestM67_ShutdownDuringRecovery(t *testing.T) {
 	// (which will fail repeatedly against the bogus relay)
 	coreDevA.Close()
 
-	// Wait for loss to fire (WGLivenessTimeout = 6s) plus a bit
-	// for recovery to begin.
-	time.Sleep(8 * time.Second)
+	// Wait for recovery to start (IsRecovering returns true),
+	// then cancel while recovery is in-flight.
+	t.Log("waiting for recovery to start...")
+	recoveryDeadline := time.Now().Add(15 * time.Second)
+	for !epoch.IsRecovering() {
+		if time.Now().After(recoveryDeadline) {
+			t.Fatal("recovery did not start within deadline")
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
 
 	// Cancel context while recovery is in-flight (retrying via backoff)
 	t.Log("cancelling supervisor context during recovery...")
@@ -309,4 +316,210 @@ func TestM67_ShutdownDuringRecovery(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("supervisor did not shut down within 3s after context cancellation during recovery")
 	}
+}
+
+// TestM67_RecoveryRetry verifies that the supervisor retries recovery
+// when the recovery path becomes available during the backoff window.
+//
+// 1. Relay infrastructure starts but route is NOT open.
+// 2. Body establishes a direct-UDP tunnel to Core A.
+// 3. Supervisor starts observing.
+// 4. Core A is killed → loss detected → first recovery attempt fails
+//    (relay route not registered).
+// 5. During backoff: route is opened and Core B is started on the relay.
+// 6. Supervisor retries → recovery succeeds via relay WSS.
+// 7. Identity, handshake, and bidirectional traffic are verified.
+func TestM67_RecoveryRetry(t *testing.T) {
+	ctx := context.Background()
+	log := testLogger(t)
+
+	coreKeys := newTestKeypair(t)
+	bodyKeys := newTestKeypair(t)
+	var bodyPriv [32]byte
+	priv, err := hex.DecodeString(bodyKeys.privHex)
+	if err != nil {
+		t.Fatalf("decode body priv: %v", err)
+	}
+	copy(bodyPriv[:], priv)
+
+	corePub := hexToKey(t, coreKeys.pubHex)
+	overlayPrefix := netip.MustParsePrefix("fd00::/112")
+	bodyOverlay := netip.MustParseAddr("fd00::10")
+	coreOverlay := netip.MustParseAddr("fd00::11")
+
+	routeID := relay.RouteID(43)
+	credential := "retry-test-cred"
+
+	// ── Relay infrastructure ready but route NOT open ──
+	relayAddr := pickFreeTCPAddrPort(t)
+	svcCtx, svcCancel := context.WithCancel(ctx)
+	csCtx, csCancel := context.WithCancel(ctx)
+	defer svcCancel()
+	defer csCancel()
+
+	svcCfg := relay.DefaultServiceConfig()
+	hash := sha256.Sum256([]byte(credential))
+	svcCfg.Credentials = []string{hex.EncodeToString(hash[:])}
+	svcCfg.KeepaliveInterval = 2 * time.Second
+	svcCfg.RouteTimeout = 180 * time.Second
+	svcCfg.RegistrationTimeout = 180 * time.Second
+
+	svc, err := relay.NewService(svcCfg, relay.ClientConfig{})
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+	if err := svc.Start(svcCtx); err != nil {
+		t.Fatalf("svc.Start: %v", err)
+	}
+
+	cs := relay.NewControlServer(svc, relayAddr, nil)
+	if err := cs.Start(csCtx); err != nil {
+		t.Fatalf("cs.Start: %v", err)
+	}
+
+	clientCfg := relay.DefaultClientConfig()
+	clientCfg.RelayURL = "ws://" + relayAddr + "/relay"
+	clientCfg.RegistrationToken = credential
+	clientCfg.HandshakeTimeout = 5 * time.Second
+	clientCfg.ReadTimeout = 15 * time.Second
+	clientCfg.PingInterval = 5 * time.Second
+
+	client := relay.NewControlClient(clientCfg)
+	if err := client.Start(svcCtx); err != nil {
+		t.Fatalf("client.Start: %v", err)
+	}
+	waitClientConnected(t, client, "relay-client")
+
+	// Route is intentionally NOT opened — first recovery will fail.
+
+	// ── Core A (direct UDP) ──
+	coreDevA, coreNetA, coreAPort := startCoreUDPDeviceWithNetstack(t, coreKeys, bodyKeys.pubHex)
+	_ = coreNetA
+	// ── Path selector config (shared: init + supervisor) ──
+	pathCfg := body.PathSelectorConfig{
+		PrivateKey:        bodyPriv,
+		CorePublicKey:     corePub,
+		DirectEndpoint:    fmt.Sprintf("127.0.0.1:%d", coreAPort),
+		RelayWSSURL:       relayAddr,
+		RouteID:           routeID,
+		RouteCredential:   credential,
+		OverlayAddress:    bodyOverlay,
+		OverlayPrefix:     overlayPrefix,
+		PerAttemptTimeout: 6 * time.Second,
+	}
+
+	// ── Body tunnel via direct path ──
+	initial := body.SelectInitialPath(ctx, pathCfg, log)
+	if initial.Err != nil {
+		t.Fatalf("initial path selection: %v", initial.Err)
+	}
+	bodyTunnel := initial.Tunnel
+	if err := bodyTunnel.WaitHandshake(ctx, 15*time.Second); err != nil {
+		t.Fatalf("initial handshake: %v", err)
+	}
+
+	// Record initial identity
+	initialCfg := bodyTunnel.Config()
+	privHash := sha256.Sum256(initialCfg.PrivateKey[:])
+
+	// ── Start supervisor ──
+	epoch := body.NewRecoveryEpoch(bodyTunnel)
+	supCfg := body.SupervisorConfig{
+		PathSelector: pathCfg,
+		LossObserver: body.LossObserverConfig{
+			WGLivenessTimeout: 6 * time.Second,
+			PollInterval:      500 * time.Millisecond,
+		},
+		RecoverTimeout: 20 * time.Second,
+		SharedEpoch:    epoch,
+	}
+
+	sup, err := body.StartPathSupervisor(ctx, bodyTunnel, supCfg, log)
+	if err != nil {
+		t.Fatalf("StartPathSupervisor: %v", err)
+	}
+	defer func() {
+		sup.Stop()
+		select {
+		case <-sup.Done():
+		case <-time.After(3 * time.Second):
+			t.Error("supervisor did not shut down within 3s")
+		}
+	}()
+
+	// ── Kill Core A → trigger loss → first recovery fails (route closed) ──
+	t.Log("killing Core A...")
+	coreDevA.Close()
+
+	// Wait for first recovery to start (IsRecovering = true)
+	t.Log("waiting for first recovery attempt to start...")
+	deadline := time.Now().Add(15 * time.Second)
+	for !epoch.IsRecovering() {
+		if time.Now().After(deadline) {
+			t.Fatal("recovery did not start within deadline")
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	// Wait for first recovery to fail (route not registered on relay)
+	t.Log("waiting for first recovery to fail...")
+	deadline = time.Now().Add(30 * time.Second)
+	for epoch.IsRecovering() {
+		if time.Now().After(deadline) {
+			t.Fatal("first recovery did not fail within deadline")
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Log("first recovery failed — entering backoff window")
+
+	// ── During backoff: open route + start Core B ──
+	t.Log("opening relay route and starting Core B...")
+	_, routeErr := client.OpenRoute(svcCtx, routeID, relay.RouteCredentials{Token: credential})
+	if routeErr != nil {
+		t.Fatalf("OpenRoute: %v", routeErr)
+	}
+	regID, ok := svc.Registry().RouteRegistration(routeID)
+	if !ok {
+		t.Fatal("route registration not found after OpenRoute")
+	}
+	svc.Registry().SetRouteCredentials(regID, routeID, relay.RouteCredentials{Token: credential})
+
+	tr := relay.NewRelayTransport(client)
+	tr.Open(0)
+	coreDevB, coreNetB := startWgDevice(t, tr, coreKeys, coreOverlay, bodyKeys.pubHex, "relay:1", "fd00::10/128")
+	defer coreDevB.Close()
+	_ = coreNetB
+
+	// ── Wait for supervisor to retry and succeed ──
+	t.Log("waiting for recovery to succeed via relay WSS...")
+	deadline = time.Now().Add(20 * time.Second)
+	var recoveredTunnel *body.BodyTunnel
+	for {
+		active := epoch.Active()
+		if active != bodyTunnel && active != nil {
+			recoveredTunnel = active
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("recovery did not succeed via relay within deadline")
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Log("recovery succeeded via relay WSS")
+
+	// ── Verify identity preserved ──
+	t.Log("verifying identity...")
+	recoveredCfg := recoveredTunnel.Config()
+	recoveredHash := sha256.Sum256(recoveredCfg.PrivateKey[:])
+	if privHash != recoveredHash {
+		t.Fatal("recovered tunnel private key changed! identity not preserved")
+	}
+
+	// ── Verify WG handshake ──
+	if err := recoveredTunnel.WaitHandshake(ctx, 10*time.Second); err != nil {
+		t.Fatalf("recovered tunnel handshake: %v", err)
+	}
+
+	// ── Verify bidirectional traffic ──
+	proveBidirectionalTraffic(t, recoveredTunnel.Netstack(), coreNetB, bodyOverlay, coreOverlay, "retry-recovered")
 }
