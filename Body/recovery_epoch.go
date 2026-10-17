@@ -168,6 +168,16 @@ func (e *RecoveryEpoch) Active() *BodyTunnel {
 	return e.active
 }
 
+// IsRecovering reports whether a recovery attempt is currently in-flight.
+// The epoch has an outstanding NextGenForTunnel that has not yet committed
+// or been cancelled.  Callers can use this to observe that recovery has
+// started without coupling to the recovery internals.
+func (e *RecoveryEpoch) IsRecovering() bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.pendingRecovery != nil
+}
+
 // Shutdown permanently closes the epoch.  Active tunnels are stopped.
 // After Shutdown, NextGenForTunnel and TryCommit return failure, so
 // in-flight recovery attempts discover closure through their normal

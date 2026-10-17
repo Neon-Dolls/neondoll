@@ -1,139 +1,222 @@
-// M6.7 — Body Path Supervisor.
-//
-// The Path Supervisor wires existing M6.1 loss observation to M6.2 recovery,
-// using M6.3 epoch ownership to prevent concurrent or stale recovery attempts.
-//
-// Supervisor lifecycle:
-//  1. Start observing the active Body tunnel.
-//  2. On confirmed path loss, trigger bounded recovery.
-//  3. After successful recovery, observe the new active tunnel.
-//  4. On failure or cancellation, stop cleanly.
-//
-// No new transport architecture, no broad refactoring, no UI — this is a
-// focused orchestrator that reuses existing primitives.
+// SPDX-License-Identifier: AGPL-3.0-only
 
 package body
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log/slog"
 	"time"
 )
 
-// SupervisorConfig controls the Path Supervisor.
+// SupervisorConfig configures the Body Path Supervisor.
 type SupervisorConfig struct {
-	// PathSelector configures available endpoints for recovery.
+	// PathSelector is the configuration for selecting candidate paths.
 	PathSelector PathSelectorConfig
 
-	// LossObserver configures path loss detection.
+	// LossObserver configures loss detection timing.
 	LossObserver LossObserverConfig
 
-	// RecoverTimeout bounds each recovery attempt.
-	// Defaults to 30s when zero.
+	// RecoverTimeout is the deadline for each individual recovery attempt.
+	// If zero, each recovery blocks indefinitely (not recommended).
 	RecoverTimeout time.Duration
+
+	// SharedEpoch is an optional externally-owned RecoveryEpoch.  When
+	// non-nil the supervisor uses this shared epoch instead of creating a
+	// private one, allowing callers (and future coordinators) to observe
+	// the authoritative active-path state via epoch.Active().  The initial
+	// tunnel passed to StartPathSupervisor must match epoch.Active().
+	//
+	// When nil the supervisor creates a private epoch as before.
+	SharedEpoch *RecoveryEpoch
 }
 
-// SupervisorHandle controls a running Path Supervisor goroutine.
+// SupervisorHandle controls a running supervisor goroutine.
 type SupervisorHandle struct {
-	// Done fires when the supervisor finishes — either after a failed recovery
-	// attempt, cancellation, or (in future cycles) a terminal condition.
-	Done   <-chan struct{}
-	cancel context.CancelFunc
+	done       chan struct{}
+	stop       context.CancelFunc
+	epoch      *RecoveryEpoch
+	lossConfig LossObserverConfig
 }
 
-// Stop cancels the supervisor and waits for it to finish.
+// Done returns a channel that closes when the supervisor has shut down.
+func (h *SupervisorHandle) Done() <-chan struct{} {
+	return h.done
+}
+
+// Stop signals the supervisor to shut down cleanly.
 func (h *SupervisorHandle) Stop() {
-	h.cancel()
-	<-h.Done
+	h.stop()
 }
 
-// StartPathSupervisor starts a goroutine that monitors activeTunnel for path
-// loss and triggers bounded recovery using the given config.
+// ActiveTunnel returns the currently-active tunnel according to the
+// supervisor's epoch.  It is safe for concurrent use.  Returns nil when
+// the supervisor has not yet started or has shut down without a committed
+// tunnel.
+func (h *SupervisorHandle) ActiveTunnel() *BodyTunnel {
+	if h.epoch == nil {
+		return nil
+	}
+	return h.epoch.Active()
+}
+
+// StartPathSupervisor launches a supervisor goroutine that monitors the
+// provided tunnel for connectivity loss.  When loss is detected it
+// triggers a recovery attempt via RecoverPath.  Retryable failures are
+// retried with exponential backoff; terminal errors and context
+// cancellation cause the supervisor to shut down.
 //
-// The supervisor stops on:
-//   - Successful recovery (continues observing the new tunnel)
-//   - Context cancellation (clean shutdown)
-//   - Failed recovery (all paths exhausted)
-//   - Stale recovery attempt (epoch ownership lost — a previous recovery
-//     already claimed the epoch for this tunnel)
-//   - Loss observer setup failure
+// cfg.SharedEpoch, when non-nil, is used instead of an internally-created
+// epoch.  In that case initial must match epoch.Active().
 func StartPathSupervisor(
 	ctx context.Context,
-	activeTunnel *BodyTunnel,
+	initial *BodyTunnel,
 	cfg SupervisorConfig,
 	log *slog.Logger,
 ) (*SupervisorHandle, error) {
-	ctx, cancel := context.WithCancel(ctx)
-	h := &SupervisorHandle{cancel: cancel}
-
-	if cfg.RecoverTimeout <= 0 {
-		cfg.RecoverTimeout = 30 * time.Second
+	if initial == nil {
+		return nil, fmt.Errorf("body: start supervisor: initial tunnel is nil")
 	}
 
-	done := make(chan struct{})
-	h.Done = done
+	// Determine the epoch: shared or private.
+	var epoch *RecoveryEpoch
+	if cfg.SharedEpoch != nil {
+		epoch = cfg.SharedEpoch
+		if active := epoch.Active(); active != initial {
+			return nil, fmt.Errorf(
+				"body: start supervisor: initial tunnel does not match shared epoch active tunnel",
+			)
+		}
+	} else {
+		epoch = NewRecoveryEpoch(initial)
+	}
 
-	go func() {
-		defer close(done)
-		runSupervisor(ctx, activeTunnel, cfg, log)
-	}()
-
+	recoveryCtx, cancel := context.WithCancel(ctx)
+	h := &SupervisorHandle{
+		done:       make(chan struct{}),
+		stop:       cancel,
+		epoch:      epoch,
+		lossConfig: cfg.LossObserver,
+	}
+	go runSupervisor(recoveryCtx, initial, cfg, epoch, h, log)
 	return h, nil
 }
 
+// isRecoveryTerminal returns true when a recovery error should stop the
+// supervisor permanently.
+func isRecoveryTerminal(err error) bool {
+	if errors.Is(err, ErrPathCancelled) {
+		return false // clean shutdown, not terminal
+	}
+	if errors.Is(err, ErrAllPathsFailed) {
+		return false // retryable
+	}
+	return errors.Is(err, ErrEpochClosed) || errors.Is(err, ErrRecoverySuperseded)
+}
+
+// runSupervisor implements the core supervisory loop.  See StartPathSupervisor.
 func runSupervisor(
 	ctx context.Context,
-	tunnel *BodyTunnel,
+	initial *BodyTunnel,
 	cfg SupervisorConfig,
+	epoch *RecoveryEpoch,
+	h *SupervisorHandle,
 	log *slog.Logger,
 ) {
-	epoch := NewRecoveryEpoch(tunnel)
-	current := tunnel
+	defer close(h.done)
 
+	current := initial
 	for {
-		// ── Phase 1: Observe the current tunnel ──
-		onLoss := make(chan PathLossEvent, 1)
-		obs, err := StartLossObserver(current, ctx, cfg.LossObserver, onLoss, log)
+		select {
+		case <-ctx.Done():
+			log.Warn("supervisor: context cancelled, shutting down")
+			return
+		default:
+		}
+
+		// 1. Observe the current tunnel for connectivity loss.
+		log.Debug("supervisor: observing tunnel", "tunnel", current)
+		lossCh := make(chan PathLossEvent, 1)
+		observer, err := StartLossObserver(current, ctx, cfg.LossObserver, lossCh, log)
 		if err != nil {
-			log.Error("supervisor: failed to start loss observer",
-				"error", err,
-			)
+			log.Error("supervisor: failed to start loss observer, shutting down", "error", err)
 			return
 		}
 
-		// ── Phase 2: Wait for loss or cancellation ──
 		select {
+		case <-lossCh:
+			// Loss detected — proceed to recovery.
+			observer.Cancel()
+			<-observer.Done
+			log.Warn("supervisor: loss detected, triggering recovery")
+
 		case <-ctx.Done():
-			log.Info("supervisor: cancelled, stopping observer")
-			obs.Cancel()
-			<-obs.Done
+			observer.Cancel()
+			<-observer.Done
+			log.Warn("supervisor: context cancelled, shutting down")
 			return
+		}
 
-		case ev := <-onLoss:
-			log.Warn("supervisor: path loss detected",
-				"reason", ev.Reason,
-				"detail", ev.Detail,
-			)
-			obs.Cancel()
-			<-obs.Done
+		// 2. Recovery loop with retry.
+		//
+		// When RecoverPath returns a retryable error the old tunnel is
+		// already stopped and can't be restarted, so we re-enter recovery
+		// from scratch.  Terminal errors shut down the supervisor.
+	recoveryLoop:
+		for retry := 0; ; retry++ {
+			select {
+			case <-ctx.Done():
+				log.Warn("supervisor: recovery cancelled, shutting down")
+				return
+			default:
+			}
 
-			// ── Phase 3: Bounded recovery ──
-			recoveryCtx, rcancel := context.WithTimeout(ctx, cfg.RecoverTimeout)
-			result := RecoverPath(recoveryCtx, current, cfg.PathSelector, log, epoch)
-			rcancel()
+			// Create a context with the per-attempt timeout.
+			attemptCtx := ctx
+			var attemptCancel context.CancelFunc
+			if cfg.RecoverTimeout > 0 {
+				attemptCtx, attemptCancel = context.WithTimeout(ctx, cfg.RecoverTimeout)
+			}
 
-			if result.Err != nil {
-				log.Error("supervisor: recovery failed",
-					"error", result.Err,
-				)
+			result := RecoverPath(attemptCtx, current, cfg.PathSelector, log, epoch)
+
+			if attemptCancel != nil {
+				attemptCancel()
+			}
+
+			if result.Err == nil {
+				// Recovery succeeded.  Commit was already done by
+				// RecoverPath.  Start observing the new tunnel.
+				current = epoch.Active()
+				log.Info("supervisor: recovery complete, now observing new tunnel",
+					"path", result.Path)
+				break recoveryLoop
+			}
+
+			log.Warn("supervisor: recovery attempt failed",
+				"error", result.Err, "retry", retry)
+
+			if isRecoveryTerminal(result.Err) {
+				log.Error("supervisor: terminal recovery error, shutting down",
+					"error", result.Err)
 				return
 			}
 
-			log.Info("supervisor: recovery succeeded, observing new tunnel",
-				"tunnel_overlay", result.Tunnel.Config().OverlayAddress,
-			)
-			current = result.Tunnel
-			// Loop: observe the new tunnel.
+			// Retryable — wait with exponential backoff capped at 30s.
+			backoff := time.Duration(1<<min(retry, 5)) * time.Second
+			if backoff > 30*time.Second {
+				backoff = 30 * time.Second
+			}
+
+			timer := time.NewTimer(backoff)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				log.Warn("supervisor: recovery cancelled during backoff, shutting down")
+				return
+			case <-timer.C:
+			}
 		}
 	}
 }

@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
+
 package body
 
 import (
@@ -8,23 +9,24 @@ import (
 	"log/slog"
 )
 
-// RecoverPath replaces the active tunnel with a freshly selected path,
-// using epoch-based generation ownership so that only the current
-// recovery cycle may commit a candidate as active.
+// Sentinel errors for recovery outcomes.
+var (
+	ErrEpochClosed        = errors.New("body: recover path: epoch closed or superseded")
+	ErrRecoverySuperseded = errors.New("body: recover path: superseded by newer recovery attempt")
+)
+
+// RecoverPath carries out a recovery attempt: it advances the epoch to a new
+// generation, stops the old tunnel, selects a new path via SelectInitialPath,
+// and commits the result.  If any step fails it returns a PathSelectionResult
+// with a non-nil Err.
 //
-// Ownership check (via NextGenForTunnel) runs atomically with generation
-// advancement, preventing a stale loss callback (for an already-replaced
-// tunnel) from bumping the epoch and invalidating a healthy recovery.
-//
-// The old tunnel is stopped AFTER the genen claim, not before.  Neither
-// epoch state nor tunnel liveness gate resource cleanup — a stale attempt
-// may always release its own candidate.
-//
-// Superseded attempts clean up their candidate and return an error.
-//
-// Identity, pairing, membership, and credentials are preserved without
-// re-pairing.  Background probing, preferred-path return, and migration
-// are M6.4+ scope and are NOT covered here.
+// Errors are classified as:
+//   - ErrEpochClosed / ErrRecoverySuperseded — terminal; another owner
+//     or a newer attempt has taken over.
+//   - ErrPathCancelled — the context was cancelled.  The caller should
+//     shut down cleanly.
+//   - All other errors (stop failure, path selection failure) are
+//     retryable — the old tunnel is gone but a fresh attempt can start.
 func RecoverPath(
 	ctx context.Context,
 	oldTunnel *BodyTunnel,
@@ -38,13 +40,16 @@ func RecoverPath(
 	gen := epoch.NextGenForTunnel(oldTunnel)
 	if gen == 0 {
 		return PathSelectionResult{
-			Err: errors.New("body: recover path: epoch closed or superseded"),
+			Err: ErrEpochClosed,
 		}
 	}
 
 	// 2. Stop the old tunnel unconditionally.  Resource cleanup is always
 	//    permitted — epoch authority gates commit, not resource release.
 	if err := oldTunnel.Stop(); err != nil {
+		// Release the pending-recovery marker so a subsequent recovery
+		// attempt can start from a fresh generation.
+		epoch.TryCancel(gen)
 		return PathSelectionResult{
 			Err: fmt.Errorf("body: recover path: stop old tunnel: %w", err),
 		}
@@ -54,7 +59,7 @@ func RecoverPath(
 	result := SelectInitialPath(ctx, cfg, log)
 	if result.Err != nil {
 		// SelectInitialPath failed.  Release the pending-recovery marker
-		// so a subsequent loss callback can start a fresh recovery.
+		// so a subsequent recovery attempt can start fresh.
 		epoch.TryCancel(gen)
 		return result
 	}
@@ -68,7 +73,7 @@ func RecoverPath(
 			result.BoundBind.Close()
 		}
 		return PathSelectionResult{
-			Err: errors.New("body: recover path: superseded by newer recovery attempt"),
+			Err: ErrRecoverySuperseded,
 		}
 	}
 

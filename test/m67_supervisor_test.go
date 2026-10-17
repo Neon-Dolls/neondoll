@@ -1,267 +1,312 @@
 //go:build integration
 
-// Core 4 / M6.7 — Body Path Supervisor.
+// Core 4 / M6.7 — Body Path Supervisor (slice 1).
 //
-// Proves the Path Supervisor correctly wires M6.1 loss observation to M6.2
-// recovery using M6.3 epoch ownership.
-//
-// Tests:
-//   - LossAndRecovery: kill the active Core peer, verify the supervisor
-//     recovers to an alternative Core on a different port.
-//   - ShutdownDuringRecovery: cancel the supervisor while loss is being
-//     processed, verify clean goroutine termination.
+// Integration tests confirming:
+//   - Supervisor detects loss and automatically recovers via relay
+//   - Supervisor shuts down cleanly when context is cancelled during recovery
 
 package integration
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
-	"log/slog"
-	"math/rand"
 	"net/netip"
-	"strings"
 	"testing"
 	"time"
 
-	"golang.zx2c4.com/wireguard/conn"
-	"golang.zx2c4.com/wireguard/device"
-	"golang.zx2c4.com/wireguard/tun/netstack"
-
 	body "github.com/Neon-Dolls/neondoll/Body"
+	relay "github.com/Neon-Dolls/neondoll/Core/Relay"
 )
 
-// ── helpers ───────────────────────────────────────────────────────────────────
+func TestM67_LossAndRecovery(t *testing.T) {
+	ctx := context.Background()
+	log := testLogger(t)
 
-// pickTwoPorts returns two available UDP ports for Core peers.
-func pickTwoPorts() (int, int) {
-	const base = 20000
-	offset1 := rand.Intn(10000)
-	offset2 := rand.Intn(10000)
-	return base + offset1, base + offset2 + 5000 // avoid collision
-}
-
-// createCoreDevice creates a WireGuard device as a Core responder that accepts
-// connections from the body peer over the overlay address fd00::1.
-func createCoreDevice(t *testing.T, keys testKeypair, bodyPubHex string, listenPort int) (*device.Device, *netstack.Net) {
-	t.Helper()
-
-	tun, tnet, err := netstack.CreateNetTUN(
-		[]netip.Addr{netip.MustParseAddr("fd00::1")},
-		nil, 1280,
-	)
-	if err != nil {
-		t.Fatalf("createCoreDevice CreateNetTUN: %v", err)
-	}
-
-	dev := device.NewDevice(tun, conn.NewDefaultBind(),
-		device.NewLogger(device.LogLevelError,
-			fmt.Sprintf("Core(%d) ", listenPort)))
-
-	if err := dev.IpcSet(fmt.Sprintf(
-		"private_key=%s\nlisten_port=%d\n", keys.privHex, listenPort,
-	)); err != nil {
-		t.Fatalf("createCoreDevice IpcSet(keys+port): %v", err)
-	}
-		if err := dev.IpcSet(fmt.Sprintf(
-		"public_key=%s\nallowed_ip=0.0.0.0/0\nallowed_ip=::/0\npersistent_keepalive_interval=1\n",
-		bodyPubHex,
-	)); err != nil {
-		t.Fatalf("createCoreDevice IpcSet(peer): %v", err)
-	}
-
-	dev.Up()
-	t.Cleanup(func() { dev.Close() })
-	return dev, tnet
-}
-
-// waitForHandshake polls a WG device until it shows a peer handshake or the
-// context expires.
-func waitForHandshake(ctx context.Context, dev *device.Device) error {
-	for ctx.Err() == nil {
-		ipc, err := dev.IpcGet()
-		if err != nil {
-			return fmt.Errorf("IpcGet: %w", err)
-		}
-		if strings.Contains(ipc, "last_handshake_time_sec=") {
-			return nil
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	return ctx.Err()
-}
-
-// bodyOverlayAddr returns the overlay address used by the body tunnel.
-func bodyOverlayAddr() netip.Addr {
-	return netip.MustParseAddr("fd00::2")
-}
-
-// ── Test: Loss → Recovery ─────────────────────────────────────────────────────
-
-func TestPathSupervisor_LossAndRecovery_M6_7(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	bodyKeys := newTestKeypair(t)
+	// ── Keypairs ──
 	coreKeys := newTestKeypair(t)
-	coreAPort, coreBPort := pickTwoPorts()
-	overlayAddr := bodyOverlayAddr()
+	bodyKeys := newTestKeypair(t)
 
-	// Create two Core peers (same keys, different ports).
-	coreA, _ := createCoreDevice(t, coreKeys, bodyKeys.pubHex, coreAPort)
-	coreB, _ := createCoreDevice(t, coreKeys, bodyKeys.pubHex, coreBPort)
+	const routeID = relay.RouteID(42)
+	const credential = "supervisor-loss-recovery-cred"
+	const token = "supervisor-loss-recovery-token"
 
-	// Create initial Body tunnel to Core A.
-	bt := body.NewBodyTunnel(body.BodyTunnelConfig{
-		PrivateKey:     hexToKey(t, bodyKeys.privHex),
-		CorePublicKey:  hexToKey(t, coreKeys.pubHex),
-		OverlayAddress: overlayAddr,
-		OverlayPrefix:  netip.PrefixFrom(overlayAddr, 64),
-		CoreEndpoint:   fmt.Sprintf("127.0.0.1:%d", coreAPort),
-		ListenPort:     0,
-	}, nil)
-	if err := bt.Start(ctx); err != nil {
-		t.Fatalf("Start body tunnel: %v", err)
+	bodyOverlay := netip.MustParseAddr("fd00::2")
+	coreOverlay := netip.MustParseAddr("fd00::1")
+	overlayPrefix := netip.MustParsePrefix("fd00::/112")
+
+	bodyPriv := hexToKey(t, bodyKeys.privHex)
+	corePub := hexToKey(t, coreKeys.pubHex)
+
+	// ═════════════════════════════════════════════════
+	// Core infrastructure
+	// ═════════════════════════════════════════════════
+
+	// 1. Core direct UDP device (path A)
+	coreDevA, coreNetA, corePortA := startCoreUDPDeviceWithNetstack(t, coreKeys, bodyKeys.pubHex)
+
+	// 2. Relay service + control server
+	relayAddr := pickFreeTCPAddrPort(t)
+
+	svcCfg := relay.DefaultServiceConfig()
+	hash := sha256.Sum256([]byte(token))
+	svcCfg.Credentials = []string{hex.EncodeToString(hash[:])}
+	svcCfg.KeepaliveInterval = 2 * time.Second
+	svcCfg.RouteTimeout = 180 * time.Second
+	svcCfg.RegistrationTimeout = 180 * time.Second
+
+	svc, err := relay.NewService(svcCfg, relay.ClientConfig{})
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
 	}
-	t.Cleanup(func() { bt.Stop() })
-
-	// Wait for initial handshake with Core A.
-	if err := bt.WaitHandshake(ctx, 10*time.Second); err != nil {
-		t.Fatalf("initial handshake with Core A: %v", err)
+	svcCtx, svcCancel := context.WithCancel(context.Background())
+	defer svcCancel()
+	if err := svc.Start(svcCtx); err != nil {
+		t.Fatalf("svc.Start: %v", err)
 	}
-	t.Log("initial handshake with Core A established ✓")
 
-	// ── Start the supervisor ────────────────────────────────────────────
-	// Start supervisor with a discard logger (nil logger would panic on slog calls).
-	log := slog.New(slog.DiscardHandler)
+	cs := relay.NewControlServer(svc, relayAddr, nil)
+	csCtx, csCancel := context.WithCancel(svcCtx)
+	defer csCancel()
+	if err := cs.Start(csCtx); err != nil {
+		t.Fatalf("cs.Start: %v", err)
+	}
 
-	supervisorCfg := body.SupervisorConfig{
-		PathSelector: body.PathSelectorConfig{
-			PrivateKey:      hexToKey(t, bodyKeys.privHex),
-			CorePublicKey:   hexToKey(t, coreKeys.pubHex),
-			OverlayAddress:  overlayAddr,
-			OverlayPrefix:   netip.PrefixFrom(overlayAddr, 64),
-			DirectEndpoint:  fmt.Sprintf("127.0.0.1:%d", coreBPort),
-		},
+	// 3. Core side: control client + relay transport
+	clientCfg := relay.DefaultClientConfig()
+	clientCfg.RelayURL = "ws://" + relayAddr + "/relay"
+	clientCfg.RegistrationToken = token
+	clientCfg.HandshakeTimeout = 5 * time.Second
+	clientCfg.ReadTimeout = 15 * time.Second
+	clientCfg.PingInterval = 5 * time.Second
+
+	client := relay.NewControlClient(clientCfg)
+	if err := client.Start(svcCtx); err != nil {
+		t.Fatalf("client.Start: %v", err)
+	}
+	waitClientConnected(t, client, "core-client")
+
+	opened, openErr := client.OpenRoute(svcCtx, routeID, relay.RouteCredentials{Token: credential})
+	if openErr != nil {
+		t.Fatalf("OpenRoute: %v", openErr)
+	}
+	_ = opened
+
+	regID, ok := svc.Registry().RouteRegistration(routeID)
+	if !ok {
+		t.Fatalf("RouteRegistration(%d): not found", routeID)
+	}
+	if err := svc.Registry().SetRouteCredentials(regID, routeID, relay.RouteCredentials{Token: credential}); err != nil {
+		t.Fatalf("SetRouteCredentials: %v", err)
+	}
+
+	// 4. Core WSS relay device (path B)
+	tr := relay.NewRelayTransport(client)
+	if _, _, err := tr.Open(0); err != nil {
+		t.Fatalf("tr.Open(0): %v", err)
+	}
+	t.Cleanup(func() { _ = tr.Close() })
+
+	coreDevB, coreNetB := startWgDevice(t, tr, coreKeys, coreOverlay, bodyKeys.pubHex, "relay:1", "fd00::2/128")
+	_ = coreDevB
+
+	// ── Path selector config ──
+	pathCfg := body.PathSelectorConfig{
+		PrivateKey:        bodyPriv,
+		CorePublicKey:     corePub,
+		DirectEndpoint:    fmt.Sprintf("127.0.0.1:%d", corePortA),
+		RelayWSSURL:       relayAddr,
+		RouteID:           routeID,
+		RouteCredential:   credential,
+		OverlayAddress:    bodyOverlay,
+		OverlayPrefix:     overlayPrefix,
+		PerAttemptTimeout: 5 * time.Second,
+	}
+
+	// ═════════════════════════════════════════════════
+	// Phase 1: Initial direct connection
+	// ═════════════════════════════════════════════════
+
+	initialResult := body.SelectInitialPath(ctx, pathCfg, log)
+	if initialResult.Err != nil {
+		t.Fatalf("SelectInitialPath: %v", initialResult.Err)
+	}
+	if initialResult.Path != "direct" {
+		t.Fatalf("expected direct path, got %q", initialResult.Path)
+	}
+	initialTunnel := initialResult.Tunnel
+
+	if err := initialTunnel.WaitHandshake(ctx, 15*time.Second); err != nil {
+		t.Fatalf("initial tunnel handshake: %v", err)
+	}
+
+	proveBidirectionalTraffic(t, initialTunnel.Netstack(), coreNetA, bodyOverlay, coreOverlay, "phase1-direct")
+
+	initialCfg := initialTunnel.Config()
+	privHash := sha256.Sum256(initialCfg.PrivateKey[:])
+
+	// ═════════════════════════════════════════════════
+	// Phase 2: Start supervisor, kill direct, verify auto-recovery
+	// ═════════════════════════════════════════════════
+
+	epoch := body.NewRecoveryEpoch(initialTunnel)
+
+	supCfg := body.SupervisorConfig{
+		PathSelector: pathCfg,
 		LossObserver: body.LossObserverConfig{
-			PollInterval:      50 * time.Millisecond,
-			WGLivenessTimeout: 200 * time.Millisecond,
+			WGLivenessTimeout: 6 * time.Second,
+			PollInterval:      500 * time.Millisecond,
 		},
 		RecoverTimeout: 10 * time.Second,
+		SharedEpoch:    epoch,
 	}
 
-	supervisor, err := body.StartPathSupervisor(ctx, bt, supervisorCfg, log)
+	supCtx, supCancel := context.WithCancel(ctx)
+	defer supCancel()
+
+	sup, err := body.StartPathSupervisor(supCtx, initialTunnel, supCfg, log)
 	if err != nil {
 		t.Fatalf("StartPathSupervisor: %v", err)
 	}
-	defer supervisor.Stop()
 
-	// ── Kill Core A → triggers path loss ───────────────────────────────
-	t.Log("killing Core A — path loss imminent")
-	coreA.Close()
+	if epoch.Active() != initialTunnel {
+		t.Fatal("epoch.Active() should still be initial tunnel before loss")
+	}
 
-	// Poll until the old tunnel is stopped (RecoverPath killed it) or
-	// until the supervisor fails.
-	deadline := time.Now().Add(5 * time.Second)
-	var recovered bool
+	// Kill the direct path
+	t.Logf("killing direct Core device (port %d)...", corePortA)
+	coreDevA.Close()
+
+	// Wait for supervisor to detect loss and recover.  The supervisor
+	// internally starts a loss observer, then on loss calls RecoverPath
+	// which commits the new tunnel to the epoch.
+	timeout := 30 * time.Second
+	deadline := time.Now().Add(timeout)
+
+	var recoveredTunnel *body.BodyTunnel
 	for time.Now().Before(deadline) {
-		if !bt.Started() {
-			recovered = true
+		recoveredTunnel = epoch.Active()
+		if recoveredTunnel != nil && recoveredTunnel != initialTunnel {
 			break
 		}
-		// If the supervisor stopped early, recovery failed.
-		select {
-		case <-supervisor.Done:
-			t.Fatal("supervisor stopped without recovering")
-		default:
-		}
-		time.Sleep(20 * time.Millisecond)
+		time.Sleep(200 * time.Millisecond)
 	}
-	if !recovered {
-		t.Fatal("timed out waiting for old tunnel to be stopped (recovery)")
+	if recoveredTunnel == nil || recoveredTunnel == initialTunnel {
+		t.Fatalf("supervisor did not recover within %v", timeout)
 	}
-	t.Log("old tunnel stopped — recovery triggered ✓")
 
-	// Supervisor must still be running (observing the new tunnel).
+	t.Log("supervisor recovered — epoch active tunnel changed")
+
+	// Verify identity preserved
+	recoveredCfg := recoveredTunnel.Config()
+	recoveredHash := sha256.Sum256(recoveredCfg.PrivateKey[:])
+	if privHash != recoveredHash {
+		t.Fatal("recovered tunnel private key changed! identity not preserved")
+	}
+
+	// Verify traffic over recovered path
+	if err := recoveredTunnel.WaitHandshake(ctx, 10*time.Second); err != nil {
+		t.Fatalf("recovered tunnel handshake: %v", err)
+	}
+
+	proveBidirectionalTraffic(t, recoveredTunnel.Netstack(), coreNetB, bodyOverlay, coreOverlay, "phase2-recovered")
+
+	// Supervisor should still be running
 	select {
-	case <-supervisor.Done:
-		t.Fatal("supervisor stopped unexpectedly after recovery")
+	case <-sup.Done():
+		t.Fatal("supervisor exited unexpectedly after recovery")
 	default:
 	}
-
-	// Wait briefly for the new tunnel to establish a handshake with Core B.
-	time.Sleep(200 * time.Millisecond)
-	if err := waitForHandshake(ctx, coreB); err != nil {
-		if ipc, ipcErr := coreB.IpcGet(); ipcErr == nil {
-			t.Logf("Core B UAPI state:\n%s", ipc)
-		}
-		t.Fatalf("Core B has no handshake — body tunnel did not connect: %v", err)
-	}
-	t.Log("Core B handshake confirmed — recovery to Core B ✓")
 }
 
-// ── Test: Shutdown during recovery ────────────────────────────────────────────
+func TestM67_ShutdownDuringRecovery(t *testing.T) {
+	ctx := context.Background()
+	log := testLogger(t)
 
-func TestPathSupervisor_ShutdownDuringRecovery_M6_7(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-
-	bodyKeys := newTestKeypair(t)
 	coreKeys := newTestKeypair(t)
-	coreAPort, _ := pickTwoPorts()
-	overlayAddr := bodyOverlayAddr()
+	bodyKeys := newTestKeypair(t)
 
-	// Single Core peer — loss will trigger recovery, but we cancel the
-	// supervisor before it can complete.
-	coreA, _ := createCoreDevice(t, coreKeys, bodyKeys.pubHex, coreAPort)
+	const routeID = relay.RouteID(43)
+	const credential = "shutdown-recovery-cred"
+	const token = "shutdown-recovery-token"
 
-	bt := body.NewBodyTunnel(body.BodyTunnelConfig{
-		PrivateKey:     hexToKey(t, bodyKeys.privHex),
-		CorePublicKey:  hexToKey(t, coreKeys.pubHex),
-		OverlayAddress: overlayAddr,
-		OverlayPrefix:  netip.PrefixFrom(overlayAddr, 64),
-		CoreEndpoint:   fmt.Sprintf("127.0.0.1:%d", coreAPort),
-		ListenPort:     0,
-	}, nil)
-	if err := bt.Start(ctx); err != nil {
-		t.Fatalf("Start body tunnel: %v", err)
+	bodyOverlay := netip.MustParseAddr("fd00::4")
+	overlayPrefix := netip.MustParsePrefix("fd00::/112")
+
+	bodyPriv := hexToKey(t, bodyKeys.privHex)
+	corePub := hexToKey(t, coreKeys.pubHex)
+
+	// Direct-only setup — no real relay.  The supervisor's recovery
+	// will be given a bad relay WSS URL so recovery keeps retrying
+	// (ErrAllPathsFailed → retryable → backoff → retry).  We cancel
+	// the context while recovery is in the backoff-retry cycle.
+	coreDevA, coreNetA, corePortA := startCoreUDPDeviceWithNetstack(t, coreKeys, bodyKeys.pubHex)
+	_ = coreNetA
+
+	// Initial path selector for direct connection only
+	pathCfg := body.PathSelectorConfig{
+		PrivateKey:        bodyPriv,
+		CorePublicKey:     corePub,
+		DirectEndpoint:    fmt.Sprintf("127.0.0.1:%d", corePortA),
+		RelayWSSURL:       "127.0.0.1:1", // nothing listens here → recovery fails fast
+		RouteID:           routeID,
+		RouteCredential:   credential,
+		OverlayAddress:    bodyOverlay,
+		OverlayPrefix:     overlayPrefix,
+		PerAttemptTimeout: 2 * time.Second,
 	}
-	t.Cleanup(func() { bt.Stop() })
 
-	if err := bt.WaitHandshake(ctx, 10*time.Second); err != nil {
-		t.Fatalf("initial handshake: %v", err)
+	initialResult := body.SelectInitialPath(ctx, pathCfg, log)
+	if initialResult.Err != nil {
+		t.Fatalf("SelectInitialPath: %v", initialResult.Err)
+	}
+	if initialResult.Path != "direct" {
+		t.Fatalf("expected direct path, got %q", initialResult.Path)
+	}
+	initialTunnel := initialResult.Tunnel
+
+	if err := initialTunnel.WaitHandshake(ctx, 15*time.Second); err != nil {
+		t.Fatalf("initial tunnel handshake: %v", err)
 	}
 
-	// Start supervisor with recovery pointing to an unreachable port so
-	// that recovery blocks until ctx is cancelled.
-	log := slog.New(slog.DiscardHandler)
-	supervisor, err := body.StartPathSupervisor(ctx, bt, body.SupervisorConfig{
-		PathSelector: body.PathSelectorConfig{
-			PrivateKey:      hexToKey(t, bodyKeys.privHex),
-			CorePublicKey:   hexToKey(t, coreKeys.pubHex),
-			OverlayAddress:  overlayAddr,
-			OverlayPrefix:   netip.PrefixFrom(overlayAddr, 64),
-			DirectEndpoint: fmt.Sprintf("127.0.0.1:%d", coreAPort+1),
-		},
+	epoch := body.NewRecoveryEpoch(initialTunnel)
+
+	supCfg := body.SupervisorConfig{
+		PathSelector: pathCfg,
 		LossObserver: body.LossObserverConfig{
-			PollInterval:      50 * time.Millisecond,
-			WGLivenessTimeout: 150 * time.Millisecond,
+			WGLivenessTimeout: 6 * time.Second,
+			PollInterval:      500 * time.Millisecond,
 		},
-		RecoverTimeout: 5 * time.Second,
-	}, log)
+		RecoverTimeout: 2 * time.Second,
+		SharedEpoch:    epoch,
+	}
+
+	supCtx, supCancel := context.WithCancel(ctx)
+
+	sup, err := body.StartPathSupervisor(supCtx, initialTunnel, supCfg, log)
 	if err != nil {
 		t.Fatalf("StartPathSupervisor: %v", err)
 	}
 
-	// Kill Core A and then cancel the parent context.
-	coreA.Close()
-	time.Sleep(100 * time.Millisecond) // let the observer detect loss
-	cancel()                            // cancels supervisor's ctx
+	// Kill the direct path so loss fires → supervisor starts recovery
+	// (which will fail repeatedly against the bogus relay)
+	coreDevA.Close()
 
-	// Supervisor must stop cleanly within a reasonable time.
+	// Wait for loss to fire (WGLivenessTimeout = 6s) plus a bit
+	// for recovery to begin.
+	time.Sleep(8 * time.Second)
+
+	// Cancel context while recovery is in-flight (retrying via backoff)
+	t.Log("cancelling supervisor context during recovery...")
+	supCancel()
+
+	// Verify clean shutdown within 3 seconds
 	select {
-	case <-supervisor.Done:
-		t.Log("supervisor shut down cleanly during recovery ✓")
+	case <-sup.Done():
+		t.Log("supervisor shut down cleanly during recovery")
 	case <-time.After(3 * time.Second):
-		t.Fatal("supervisor did not shut down within 3s")
+		t.Fatal("supervisor did not shut down within 3s after context cancellation during recovery")
 	}
 }
