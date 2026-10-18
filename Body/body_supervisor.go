@@ -31,19 +31,22 @@ type SupervisorConfig struct {
 	// When nil the supervisor creates a private epoch as before.
 	SharedEpoch *RecoveryEpoch
 
-	// Discovery configures automatic better-path discovery and migration
-	// after the supervisor recovers onto a fallback path.  When enabled,
-	// the supervisor probes the direct endpoint after recovery and
-	// performs controlled migration when the preferred path is reachable.
+	// Discovery configures automatic better-path discovery and migration.
+	// When enabled, the supervisor probes the preferred path when on a
+	// fallback — both after recovery onto a fallback and when the Body
+	// initially connects on a fallback path — and performs controlled
+	// migration when the preferred path is reachable.
 	// Zero DiscoveryConfig or DiscoveryConfig.Enabled == false disables
 	// automatic discovery (the default).
 	Discovery DiscoveryConfig
 }
 
-// DiscoveryConfig controls automatic better-path discovery after recovery.
+// DiscoveryConfig controls automatic better-path discovery.
 type DiscoveryConfig struct {
 	// Enabled controls whether the supervisor automatically runs
-	// better-path discovery after recovery onto a fallback path.
+	// better-path discovery when on a fallback path — both after
+	// recovery onto a fallback and when a Body initially connects
+	// on a fallback (WSS/Relay) path.
 	Enabled bool
 
 	// ProbeTarget is the UDP address to probe for direct-path
@@ -216,7 +219,15 @@ func runSupervisor(
 ) {
 	defer close(h.done)
 
-	current := initial
+	var current *BodyTunnel = initial
+
+	// fallbackDiscExhausted is set when initial-fallback or post-recovery
+	// discovery exhausts all probe attempts, preventing the outer loop
+	// from restarting discovery unnecessarily on the same tunnel.  It
+	// does not gate the post-recovery discovery block, which runs
+	// independently after each recovery event.
+	var fallbackDiscExhausted bool
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -234,18 +245,106 @@ func runSupervisor(
 			return
 		}
 
-		select {
-		case <-lossCh:
-			// Loss detected — proceed to recovery.
-			observer.Cancel()
-			<-observer.Done
-			log.Warn("supervisor: loss detected, triggering recovery")
+		// 2a. Decide if we should also run initial-fallback discovery.
+		//     When the current path is a fallback (WSS/Relay) and discovery
+		//     is enabled, probe the preferred path in parallel while keeping
+		//     the loss observer running, so loss during discovery is handled.
+		isFallback := current.Config().Bind != nil
+		shouldDiscover := cfg.Discovery.Enabled && isFallback && !fallbackDiscExhausted
 
-		case <-ctx.Done():
-			observer.Cancel()
-			<-observer.Done
-			log.Warn("supervisor: context cancelled, shutting down")
-			return
+		if shouldDiscover {
+			discCfg := getDiscoveryConfig(cfg.Discovery)
+			probeTarget := discCfg.ProbeTarget
+			if probeTarget == "" {
+				probeTarget = cfg.PathSelector.DirectEndpoint
+			}
+
+			discLossCh := make(chan PathLossEvent, 1)
+			discObs, discObsErr := StartLossObserver(current, ctx, cfg.LossObserver, discLossCh, log)
+			if discObsErr != nil {
+				log.Warn("supervisor: cannot start loss observer for initial discovery, observing without discovery",
+					"error", discObsErr)
+				select {
+				case <-lossCh:
+					observer.Cancel()
+					<-observer.Done
+				case <-ctx.Done():
+					observer.Cancel()
+					<-observer.Done
+					log.Warn("supervisor: context cancelled, shutting down")
+					return
+				}
+			} else {
+				discCtx, discCancel := context.WithCancel(ctx)
+				discDone := make(chan *BodyTunnel, 1)
+				go func() {
+					discDone <- runDiscovery(discCtx, current, probeTarget, cfg.PathSelector, discCfg, epoch, log)
+				}()
+
+				select {
+				case <-lossCh:
+					// Main observer fired — loss on initial fallback path.
+					observer.Cancel()
+					<-observer.Done
+					discCancel()
+					<-discDone
+					discObs.Cancel()
+					<-discObs.Done
+
+				case <-discLossCh:
+					// Fallback tunnel lost during initial discovery.
+					discCancel()
+					<-discDone
+					discObs.Cancel()
+					<-discObs.Done
+					observer.Cancel()
+					<-observer.Done
+
+				case newTunnel := <-discDone:
+					// Discovery completed (migration or exhausted).
+					discObs.Cancel()
+					<-discObs.Done
+					observer.Cancel()
+					<-observer.Done
+					discCancel()
+
+					if newTunnel != nil {
+						current = newTunnel
+						log.Info("supervisor: initial fallback discovery succeeded, migrated to preferred path")
+						continue // restart outer loop with preferred path
+					}
+
+					// Discovery exhausted — keep observing on fallback.
+					fallbackDiscExhausted = true
+					log.Warn("supervisor: initial fallback discovery exhausted, staying on fallback")
+					continue // restart outer loop without discovery for this tunnel
+
+				case <-ctx.Done():
+					observer.Cancel()
+					<-observer.Done
+					discCancel()
+					<-discDone
+					discObs.Cancel()
+					<-discObs.Done
+					log.Warn("supervisor: context cancelled, shutting down")
+					return
+				}
+			}
+		} else {
+			// Normal observation: direct path or discovery disabled.
+			select {
+			case <-lossCh:
+				// Loss detected — proceed to recovery.
+				observer.Cancel()
+				<-observer.Done
+				log.Warn("supervisor: loss detected, triggering recovery")
+
+			case <-ctx.Done():
+				observer.Cancel()
+				<-observer.Done
+				log.Warn("supervisor: context cancelled, shutting down")
+				return
+			}
 		}
 
 		// 2. Recovery loop with retry.
@@ -339,6 +438,7 @@ func runSupervisor(
 								)
 							} else {
 								log.Warn("supervisor: discovery did not produce a migration, staying on fallback")
+								fallbackDiscExhausted = true
 							}
 
 						case <-ctx.Done():
