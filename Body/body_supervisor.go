@@ -286,8 +286,10 @@ func runSupervisor(
 				// 3. M6.7 slice 2: automatic better-path discovery.
 				//
 				// If recovered onto a fallback path and discovery is
-				// enabled, probe the preferred path.  On success, perform
-				// controlled migration to restore the preferred path.
+				// enabled, probe the preferred path while keeping the
+				// loss observer running on the fallback tunnel.  If the
+				// fallback fails during discovery, cancel discovery and
+				// re-enter the recovery loop via the shared epoch.
 				if cfg.Discovery.Enabled && result.Path != "direct" {
 					log.Info("supervisor: recovered onto fallback, starting better-path discovery",
 						"path", result.Path,
@@ -299,14 +301,53 @@ func runSupervisor(
 						probeTarget = cfg.PathSelector.DirectEndpoint
 					}
 
-					newTunnel := runDiscovery(ctx, current, probeTarget, cfg.PathSelector, discCfg, epoch, log)
-					if newTunnel != nil {
-						current = newTunnel
-						log.Info("supervisor: discovery+migration complete, now on preferred path",
-							"path", "direct",
-						)
+					// Run loss observation on the fallback tunnel in
+					// parallel with discovery.  If the fallback fails,
+					// cancel discovery and re-enter the recovery loop.
+					discLossCh := make(chan PathLossEvent, 1)
+					discObs, discObsErr := StartLossObserver(current, ctx, cfg.LossObserver, discLossCh, log)
+					if discObsErr != nil {
+						log.Warn("supervisor: cannot start loss observer during discovery, staying on fallback",
+							"error", discObsErr)
 					} else {
-						log.Warn("supervisor: discovery did not produce a migration, staying on fallback")
+						discCtx, discCancel := context.WithCancel(ctx)
+						discDone := make(chan *BodyTunnel, 1)
+						go func() {
+							discDone <- runDiscovery(discCtx, current, probeTarget, cfg.PathSelector, discCfg, epoch, log)
+						}()
+
+						select {
+						case <-discLossCh:
+							// Fallback tunnel failed during discovery.
+							discCancel()
+							<-discDone
+							discObs.Cancel()
+							<-discObs.Done
+							log.Warn("supervisor: fallback path lost during discovery, re-entering recovery",
+								"path", result.Path,
+							)
+							continue recoveryLoop
+
+						case newTunnel := <-discDone:
+							discObs.Cancel()
+							<-discObs.Done
+							discCancel()
+							if newTunnel != nil {
+								current = newTunnel
+								log.Info("supervisor: discovery+migration complete, now on preferred path",
+									"path", "direct",
+								)
+							} else {
+								log.Warn("supervisor: discovery did not produce a migration, staying on fallback")
+							}
+
+						case <-ctx.Done():
+							discCancel()
+							<-discDone
+							discObs.Cancel()
+							<-discObs.Done
+							return
+						}
 					}
 				}
 
@@ -367,10 +408,14 @@ func runDiscovery(
 		InitialBackoff: discCfg.MinInterval,
 	}, epoch)
 
+	var pendingGen uint64
 	for {
 		select {
 		case <-ctx.Done():
 			log.Info("supervisor: discovery cancelled")
+			if pendingGen > 0 {
+				epoch.TryCancel(pendingGen)
+			}
 			return nil
 		default:
 		}
@@ -378,6 +423,9 @@ func runDiscovery(
 		now := time.Now()
 		if !scheduler.TryAcquireSlot(now) {
 			log.Warn("supervisor: discovery exhausted attempts, giving up")
+			if pendingGen > 0 {
+				epoch.TryCancel(pendingGen)
+			}
 			return nil
 		}
 
@@ -407,6 +455,7 @@ func runDiscovery(
 			log.Error("supervisor: migration plan failed", "error", err)
 			continue
 		}
+		pendingGen = plan
 
 		active := epoch.Active()
 		cutoverResult := CutoverPath(ctx, active, epoch, candidate, plan, migrateCfg, log)

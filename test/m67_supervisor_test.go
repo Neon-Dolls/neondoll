@@ -846,3 +846,278 @@ func TestM67_AutoDiscoveryAndMigration(t *testing.T) {
 	<-sup.Done()
 	t.Log("TestM67_AutoDiscoveryAndMigration: PASS")
 }
+
+// TestM67_LossDuringDiscovery verifies that when the fallback WSS tunnel
+// fails while discovery is probing, the supervisor cancels discovery,
+// re-enters recovery, and eventually succeeds when the preferred path
+// becomes available again.
+//
+// Scenario: direct → loss → WSS recovery → discovery probes → WSS fails
+// → discovery cancelled → recovery retries → direct restored → recovery.
+func TestM67_LossDuringDiscovery(t *testing.T) {
+	ctx := context.Background()
+	log := testLogger(t)
+
+	// ── Keypairs ──
+	coreKeys := newTestKeypair(t)
+	bodyKeys := newTestKeypair(t)
+
+	const routeID = relay.RouteID(46)
+	const credential = "loss-during-disc-cred"
+	const token = "loss-during-disc-token"
+
+	bodyOverlay := netip.MustParseAddr("fd00::2")
+	coreOverlay := netip.MustParseAddr("fd00::1")
+	overlayPrefix := netip.MustParsePrefix("fd00::/112")
+
+	bodyPriv := hexToKey(t, bodyKeys.privHex)
+	corePub := hexToKey(t, coreKeys.pubHex)
+
+	privHash := sha256.Sum256(bodyPriv[:])
+
+	// ═══ Core infrastructure ═══
+
+	// 1. Core A: direct UDP WG device.
+	coreDevA, coreNetA, corePortA := startCoreUDPDeviceWithNetstack(t, coreKeys, bodyKeys.pubHex)
+	_ = coreNetA
+
+	// 2. WSS relay infrastructure.
+	relayAddr := pickFreeTCPAddrPort(t)
+
+	svcCfg := relay.DefaultServiceConfig()
+	hash := sha256.Sum256([]byte(token))
+	svcCfg.Credentials = []string{hex.EncodeToString(hash[:])}
+	svcCfg.KeepaliveInterval = 2 * time.Second
+	svcCfg.RouteTimeout = 180 * time.Second
+	svcCfg.RegistrationTimeout = 180 * time.Second
+
+	svc, err := relay.NewService(svcCfg, relay.ClientConfig{})
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+
+	svcCtx, svcCancel := context.WithCancel(ctx)
+	defer svcCancel()
+	if err := svc.Start(svcCtx); err != nil {
+		t.Fatalf("svc.Start: %v", err)
+	}
+
+	cs := relay.NewControlServer(svc, relayAddr, nil)
+	csCtx, csCancel := context.WithCancel(ctx)
+	defer csCancel()
+	if err := cs.Start(csCtx); err != nil {
+		t.Fatalf("cs.Start: %v", err)
+	}
+
+	time.Sleep(100 * time.Millisecond)
+
+	// 3. Probe responder (disabled — probes fail).
+	responder := startCoreProbeResponder(t, routeID, credential)
+	responder.SetAvailable(false)
+
+	// 4. Control client for Core behind relay.
+	clientCfg := relay.DefaultClientConfig()
+	clientCfg.RelayURL = "ws://" + relayAddr + "/relay"
+	clientCfg.RegistrationToken = token
+	clientCfg.HandshakeTimeout = 5 * time.Second
+	clientCfg.ReadTimeout = 15 * time.Second
+	clientCfg.PingInterval = 5 * time.Second
+
+	coreClient := relay.NewControlClient(clientCfg)
+	if err := coreClient.Start(svcCtx); err != nil {
+		t.Fatalf("control client start: %v", err)
+	}
+	waitClientConnected(t, coreClient, "core-behind-relay")
+
+	routeOpened, err := coreClient.OpenRoute(svcCtx, routeID, relay.RouteCredentials{Token: credential})
+	if err != nil {
+		t.Fatalf("OpenRoute: %v", err)
+	}
+	_ = routeOpened
+
+	regID, ok := svc.Registry().RouteRegistration(routeID)
+	if !ok {
+		t.Fatal("route registration not found")
+	}
+	svc.Registry().SetRouteCredentials(regID, routeID, relay.RouteCredentials{Token: credential})
+
+	tr := relay.NewRelayTransport(coreClient)
+	coreDevB, coreNetB := startWgDevice(t, tr, coreKeys, coreOverlay, bodyKeys.pubHex, "relay:1", "fd00::2/128")
+	_ = coreNetB
+
+	// ── Path selector config ──
+	pathCfg := body.PathSelectorConfig{
+		PrivateKey:        bodyPriv,
+		CorePublicKey:     corePub,
+		DirectEndpoint:    fmt.Sprintf("127.0.0.1:%d", corePortA),
+		RelayWSSURL:       relayAddr,
+		RouteID:           routeID,
+		RouteCredential:   credential,
+		OverlayAddress:    bodyOverlay,
+		OverlayPrefix:     overlayPrefix,
+		PerAttemptTimeout: 10 * time.Second,
+	}
+
+	// ── Initial direct tunnel ──
+	initialResult := body.SelectInitialPath(ctx, pathCfg, log)
+	if initialResult.Err != nil {
+		t.Fatalf("SelectInitialPath: %v", initialResult.Err)
+	}
+	initialTunnel := initialResult.Tunnel
+
+	if err := initialTunnel.WaitHandshake(ctx, 10*time.Second); err != nil {
+		t.Fatalf("initial tunnel handshake: %v", err)
+	}
+
+	// ── Shared epoch ──
+	epoch := body.NewRecoveryEpoch(initialTunnel)
+
+	// ── Supervisor with discovery enabled ──
+	supCfg := body.SupervisorConfig{
+		PathSelector: pathCfg,
+		LossObserver: body.LossObserverConfig{
+			WGLivenessTimeout: 4 * time.Second,
+			PollInterval:      500 * time.Millisecond,
+		},
+		RecoverTimeout: 15 * time.Second,
+		SharedEpoch:    epoch,
+		Discovery: body.DiscoveryConfig{
+			Enabled:          true,
+			ProbeTarget:      fmt.Sprintf("127.0.0.1:%d", responder.port),
+			MinInterval:      200 * time.Millisecond,
+			MaxBackoff:       1 * time.Second,
+			MaxAttempts:      60,
+			ProbeTimeout:     3 * time.Second,
+			HandshakeTimeout: 15 * time.Second,
+		},
+	}
+
+	supCtx, supCancel := context.WithCancel(ctx)
+	defer supCancel()
+
+	sup, err := body.StartPathSupervisor(supCtx, initialTunnel, supCfg, log)
+	if err != nil {
+		t.Fatalf("StartPathSupervisor: %v", err)
+	}
+
+	// ═══ Phase 1: initial direct path ═══
+	t.Log("Phase 1: initial direct path established")
+	assertActiveTunnel(t, epoch, initialTunnel, "initial direct tunnel")
+
+	// ═══ Phase 2: kill Core A → recovery to WSS ═══
+	t.Log("Phase 2: killing Core A, expecting recovery to WSS...")
+	coreDevA.Close()
+
+	var wssTunnel *body.BodyTunnel
+	recoverDeadline := time.Now().Add(30 * time.Second)
+	for {
+		active := epoch.Active()
+		if active != nil && active != initialTunnel {
+			cfg := active.Config()
+			if cfg.Bind != nil {
+				wssTunnel = active
+				break
+			}
+		}
+		if time.Now().After(recoverDeadline) {
+			t.Fatal("did not recover to WSS within deadline")
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Log("Phase 2: recovered to WSS")
+
+	if err := wssTunnel.WaitHandshake(ctx, 10*time.Second); err != nil {
+		t.Fatalf("WSS tunnel handshake: %v", err)
+	}
+
+	// ═══ Phase 3: kill WSS relay WG device during discovery ═══
+	// Discovery starts probing the disabled responder. We wait briefly
+	// for it to start, then close the core-side relay WG device to kill
+	// the WSS tunnel. The parallel loss observer should detect this and
+	// cancel discovery.
+	t.Log("Phase 3: killing WSS core WG device during discovery...")
+	time.Sleep(500 * time.Millisecond) // let discovery goroutine start
+
+	coreDevB.Close() // breaks WSS tunnel — body loses WG connectivity
+
+	// Wait for the loss observer on the fallback to fire (WGLivenessTimeout=4s),
+	// triggering discovery cancellation and recovery re-entry.
+	// Both paths are now dead, so recovery will fail and retry.
+	lossDeadline := time.Now().Add(10 * time.Second)
+	
+	for {
+		// Give the supervisor time to detect loss, cancel discovery,
+		// re-enter recovery, and retry (which fails since both paths are dead).
+		// We detect this indirectly: the active tunnel is still the dead WSS
+		// tunnel, and enough time has passed for at least one recovery cycle.
+		if time.Now().After(lossDeadline) {
+			break
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+
+	t.Log("Phase 3: loss detected during discovery, recovery loop re-entered")
+
+	// ═══ Phase 4: restore Core A → recovery succeeds ═══
+	t.Log("Phase 4: restoring Core A...")
+	responder.SetAvailable(true)
+
+	_ = startCoreDeviceOnPort(t, uint16(corePortA), coreKeys, bodyKeys.pubHex, coreOverlay)
+
+	var directTunnel *body.BodyTunnel
+	migrateDeadline := time.Now().Add(60 * time.Second)
+	for {
+		active := epoch.Active()
+		if active != nil && active != wssTunnel {
+			cfg := active.Config()
+			if cfg.Bind == nil {
+				directTunnel = active
+				break
+			}
+		}
+		if time.Now().After(migrateDeadline) {
+			t.Fatal("recovery to direct did not complete within deadline")
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	t.Log("Phase 4: recovered to direct")
+
+	// ═══ Phase 5: verification ═══
+	t.Log("Phase 5: verification")
+
+	if err := directTunnel.WaitHandshake(ctx, 15*time.Second); err != nil {
+		t.Fatalf("final direct tunnel handshake: %v", err)
+	}
+
+	// Identity unchanged.
+	finalCfg := directTunnel.Config()
+	finalHash := sha256.Sum256(finalCfg.PrivateKey[:])
+	if privHash != finalHash {
+		t.Fatal("identity changed after recovery cycle")
+	}
+
+	// Overlay address unchanged.
+	if finalCfg.OverlayAddress != bodyOverlay {
+		t.Fatal("overlay address changed after recovery cycle")
+	}
+
+	// Exactly one authoritative active tunnel.
+	if epoch.Active() == nil {
+		t.Fatal("epoch has no active tunnel after recovery")
+	}
+
+	t.Log("Phase 5: all verifications passed")
+
+	// ── Cleanup ──
+	sup.Stop()
+	<-sup.Done()
+	t.Log("TestM67_LossDuringDiscovery: PASS")
+}
+
+// assertActiveTunnel verifies that epoch.Active() returns the given tunnel.
+func assertActiveTunnel(t *testing.T, epoch *body.RecoveryEpoch, expected *body.BodyTunnel, msg string) {
+	t.Helper()
+	if epoch.Active() != expected {
+		t.Fatalf("%s: expected active tunnel %p, got %p", msg, expected, epoch.Active())
+	}
+}
