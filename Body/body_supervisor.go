@@ -30,7 +30,57 @@ type SupervisorConfig struct {
 	//
 	// When nil the supervisor creates a private epoch as before.
 	SharedEpoch *RecoveryEpoch
+
+	// Discovery configures automatic better-path discovery and migration
+	// after the supervisor recovers onto a fallback path.  When enabled,
+	// the supervisor probes the direct endpoint after recovery and
+	// performs controlled migration when the preferred path is reachable.
+	// Zero DiscoveryConfig or DiscoveryConfig.Enabled == false disables
+	// automatic discovery (the default).
+	Discovery DiscoveryConfig
 }
+
+// DiscoveryConfig controls automatic better-path discovery after recovery.
+type DiscoveryConfig struct {
+	// Enabled controls whether the supervisor automatically runs
+	// better-path discovery after recovery onto a fallback path.
+	Enabled bool
+
+	// ProbeTarget is the UDP address to probe for direct-path
+	// reachability.  When empty, PathSelector.DirectEndpoint is used.
+	ProbeTarget string
+
+	// MinInterval is the minimum interval between discovery probes.
+	// Default: 500ms.
+	MinInterval time.Duration
+
+	// MaxBackoff caps the exponential backoff between probe attempts.
+	// Default: 10s.
+	MaxBackoff time.Duration
+
+	// MaxAttempts limits the number of probe attempts before giving up.
+	// Default: 10.
+	MaxAttempts int
+
+	// ProbeTimeout is the per-probe timeout for ReachProbe.
+	// Default: 3s.
+	ProbeTimeout time.Duration
+
+	// HandshakeTimeout is the deadline for each migration handshake attempt.
+	// Default: 10s.
+	HandshakeTimeout time.Duration
+}
+
+// directCandidate is a MigrationCandidate that targets a specific UDP endpoint.
+type directCandidate struct {
+	endpoint string
+}
+
+func (c *directCandidate) Validate(ctx context.Context) (*MigrationTarget, error) {
+	return &MigrationTarget{CoreEndpoint: c.endpoint}, nil
+}
+
+func (c *directCandidate) Stop() {}
 
 // SupervisorHandle controls a running supervisor goroutine.
 type SupervisorHandle struct {
@@ -72,6 +122,12 @@ func (h *SupervisorHandle) ActiveTunnel() *BodyTunnel {
 		return nil
 	}
 	return h.epoch.Active()
+}
+
+// Epoch returns the supervisor's epoch.  Safe for concurrent use.
+// Returns nil when the supervisor has not yet initialised.
+func (h *SupervisorHandle) Epoch() *RecoveryEpoch {
+	return h.epoch
 }
 
 // StartPathSupervisor launches a supervisor goroutine that monitors the
@@ -128,6 +184,27 @@ func isRecoveryTerminal(err error) bool {
 	return errors.Is(err, ErrEpochClosed) || errors.Is(err, ErrRecoverySuperseded)
 }
 
+// getDiscoveryConfig returns a filled DiscoveryConfig, replacing zero-valued
+// Duration or int fields with sensible defaults.
+func getDiscoveryConfig(dc DiscoveryConfig) DiscoveryConfig {
+	if dc.MinInterval <= 0 {
+		dc.MinInterval = 500 * time.Millisecond
+	}
+	if dc.MaxBackoff <= 0 {
+		dc.MaxBackoff = 10 * time.Second
+	}
+	if dc.MaxAttempts <= 0 {
+		dc.MaxAttempts = 10
+	}
+	if dc.ProbeTimeout <= 0 {
+		dc.ProbeTimeout = 3 * time.Second
+	}
+	if dc.HandshakeTimeout <= 0 {
+		dc.HandshakeTimeout = 10 * time.Second
+	}
+	return dc
+}
+
 // runSupervisor implements the core supervisory loop.  See StartPathSupervisor.
 func runSupervisor(
 	ctx context.Context,
@@ -149,7 +226,7 @@ func runSupervisor(
 		}
 
 		// 1. Observe the current tunnel for connectivity loss.
-		log.Debug("supervisor: observing tunnel", "tunnel", current)
+		log.Debug("supervisor: observing tunnel", "tunnel_addr", fmt.Sprintf("%p", current))
 		lossCh := make(chan PathLossEvent, 1)
 		observer, err := StartLossObserver(current, ctx, cfg.LossObserver, lossCh, log)
 		if err != nil {
@@ -203,7 +280,36 @@ func runSupervisor(
 				// RecoverPath.  Start observing the new tunnel.
 				current = epoch.Active()
 				log.Info("supervisor: recovery complete, now observing new tunnel",
-					"path", result.Path)
+					"path", result.Path,
+				)
+
+				// 3. M6.7 slice 2: automatic better-path discovery.
+				//
+				// If recovered onto a fallback path and discovery is
+				// enabled, probe the preferred path.  On success, perform
+				// controlled migration to restore the preferred path.
+				if cfg.Discovery.Enabled && result.Path != "direct" {
+					log.Info("supervisor: recovered onto fallback, starting better-path discovery",
+						"path", result.Path,
+					)
+					discCfg := getDiscoveryConfig(cfg.Discovery)
+
+					probeTarget := discCfg.ProbeTarget
+					if probeTarget == "" {
+						probeTarget = cfg.PathSelector.DirectEndpoint
+					}
+
+					newTunnel := runDiscovery(ctx, current, probeTarget, cfg.PathSelector, discCfg, epoch, log)
+					if newTunnel != nil {
+						current = newTunnel
+						log.Info("supervisor: discovery+migration complete, now on preferred path",
+							"path", "direct",
+						)
+					} else {
+						log.Warn("supervisor: discovery did not produce a migration, staying on fallback")
+					}
+				}
+
 				break recoveryLoop
 			}
 
@@ -231,5 +337,86 @@ func runSupervisor(
 			case <-timer.C:
 			}
 		}
+	}
+}
+
+// runDiscovery performs bounded better-path discovery.  It probes the
+// preferred endpoint using a ProbeScheduler and, on reachability, performs
+// controlled migration to transfer the active tunnel to the preferred path.
+//
+// Returns the new tunnel (after migration) on success, or nil if discovery
+// was cancelled or exhausted.
+func runDiscovery(
+	ctx context.Context,
+	current *BodyTunnel,
+	probeTarget string,
+	selector PathSelectorConfig,
+	discCfg DiscoveryConfig,
+	epoch *RecoveryEpoch,
+	log *slog.Logger,
+) *BodyTunnel {
+	if probeTarget == "" {
+		log.Debug("supervisor: no probe target configured, skipping discovery")
+		return nil
+	}
+
+	scheduler := NewProbeScheduler(ProbeSchedulerConfig{
+		MinInterval:    discCfg.MinInterval,
+		MaxBackoff:     discCfg.MaxBackoff,
+		MaxAttempts:    discCfg.MaxAttempts,
+		InitialBackoff: discCfg.MinInterval,
+	}, epoch)
+
+	for {
+		select {
+		case <-ctx.Done():
+			log.Info("supervisor: discovery cancelled")
+			return nil
+		default:
+		}
+
+		now := time.Now()
+		if !scheduler.TryAcquireSlot(now) {
+			log.Warn("supervisor: discovery exhausted attempts, giving up")
+			return nil
+		}
+
+		log.Debug("supervisor: probing preferred path", "target", probeTarget)
+
+		result := ReachProbe(ctx, ReachProbeConfig{
+			Target:     probeTarget,
+			RouteID:    uint64(selector.RouteID),
+			Credential: selector.RouteCredential,
+			Timeout:    discCfg.ProbeTimeout,
+		})
+
+		scheduler.RecordResult(result.Reachable)
+
+		if !result.Reachable {
+			log.Debug("supervisor: preferred path unreachable", "error", result.Error)
+			continue
+		}
+
+		log.Debug("supervisor: preferred path reachable, beginning migration")
+
+		candidate := &directCandidate{endpoint: selector.DirectEndpoint}
+		migrateCfg := MigrationConfig{ProbeTimeout: discCfg.HandshakeTimeout}
+
+		plan, err := MigratePath(ctx, epoch, candidate, migrateCfg, log)
+		if err != nil {
+			log.Error("supervisor: migration plan failed", "error", err)
+			continue
+		}
+
+		active := epoch.Active()
+		cutoverResult := CutoverPath(ctx, active, epoch, candidate, plan, migrateCfg, log)
+		if cutoverResult.Err != nil {
+			log.Error("supervisor: cutover failed", "error", cutoverResult.Err)
+			continue
+		}
+
+		newTunnel := epoch.Active()
+		log.Info("supervisor: migration to preferred path complete")
+		return newTunnel
 	}
 }
