@@ -40,6 +40,11 @@ func (m *productionMindAPI) Inference() inference.Provider { return m.provider }
 func (m *productionMindAPI) State() *dollstate.DollState   { return m.state }
 func (m *productionMindAPI) Save() error                   { return m.store.SaveDoll(context.Background(), m.state) }
 
+// wireguardListenPort is the stable UDP port the Core's WireGuard tunnel
+// binds. Keeping it stable across reconstructions is what lets a paired Body
+// reconnect to the reconstructed Core without a new endpoint advertisement.
+const wireguardListenPort = 51820
+
 func main() {
 	log := logger.New(logger.InfoLevel, os.Stdout)
 	log.Info(fmt.Sprintf("neondoll v%s starting — Core 1", version.String()))
@@ -118,14 +123,14 @@ func main() {
 	// the persisted Core identity, WireGuard keys, overlay address, and
 	// authorized Body memberships — never generating a replacement identity
 	// while valid state exists.
-	rt, err := runtime.Reconstruct(ctx, nw, ns, nil)
+	rt, err := runtime.Reconstruct(ctx, nw, ns, nil, runtime.WithListenPort(wireguardListenPort))
 	if err != nil {
 		log.Error("network runtime reconstruct error", map[string]any{"error": err.Error()})
 		os.Exit(1)
 	}
 	log.Info("network runtime reconstructed", map[string]any{
 		"overlay_addr": nw.Core.OverlayAddress.String(),
-		"listen_port":  51820,
+		"listen_port":  wireguardListenPort,
 	})
 	defer rt.Stop()
 

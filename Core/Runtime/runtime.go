@@ -47,6 +47,26 @@ type Runtime struct {
 	stopOnce sync.Once
 }
 
+// Option configures a Reconstruct call. Options are backward compatible:
+// omitting them preserves the previous behavior exactly.
+type Option func(*reconstructOptions)
+
+type reconstructOptions struct {
+	listenPort *int
+}
+
+// WithListenPort pins the reconstructed runtime's WireGuard tunnel to a fixed
+// UDP port instead of an ephemeral one. A stable listen port is what lets an
+// existing Body reconnect after Core reconstruction: the Body's durable
+// endpoint (learned at pairing) remains valid, so no new endpoint
+// advertisement is needed.
+func WithListenPort(port int) Option {
+	return func(o *reconstructOptions) {
+		p := port
+		o.listenPort = &p
+	}
+}
+
 // Reconstruct builds and starts a live network runtime from reconstructed
 // network state:
 //
@@ -62,7 +82,10 @@ type Runtime struct {
 //
 // The returned Runtime is already started. Call Stop to shut it down; Done is
 // closed when shutdown completes. Stop is idempotent.
-func Reconstruct(ctx context.Context, nw *network.Network, store MembershipLister, log *slog.Logger) (*Runtime, error) {
+//
+// Options are backward compatible: callers that pass no options get exactly
+// the previous behavior (the tunnel binds an ephemeral WireGuard port).
+func Reconstruct(ctx context.Context, nw *network.Network, store MembershipLister, log *slog.Logger, opts ...Option) (*Runtime, error) {
 	if nw == nil {
 		return nil, errors.New("runtime: nil network")
 	}
@@ -75,6 +98,12 @@ func Reconstruct(ctx context.Context, nw *network.Network, store MembershipListe
 	if log == nil {
 		log = slog.Default()
 	}
+	var o reconstructOptions
+	for _, opt := range opts {
+		if opt != nil {
+			opt(&o)
+		}
+	}
 
 	tun := wireguard.NewRealTunnel(log)
 	r := &Runtime{
@@ -85,6 +114,9 @@ func Reconstruct(ctx context.Context, nw *network.Network, store MembershipListe
 	}
 
 	mgr := wireguard.NewManager(tun, store, log)
+	if o.listenPort != nil {
+		mgr.SetListenPort(*o.listenPort)
+	}
 	if err := mgr.Start(ctx, nw); err != nil {
 		// Best-effort teardown: Manager.Stop would also work here, but the
 		// tunnel has only partially started and Stop alone is not guaranteed

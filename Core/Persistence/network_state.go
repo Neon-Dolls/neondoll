@@ -52,6 +52,7 @@ type membershipRow struct {
 	WireGuardPublicKey []byte                   `json:"wg_public_key,omitempty"`
 	OverlayAddr        string                   `json:"overlay_addr"`
 	Status             network.MembershipStatus `json:"status"`
+	Endpoint           string                   `json:"endpoint,omitempty"`
 }
 
 // SaveNetwork persists the Doll Network identity and Core identity atomically.
@@ -162,6 +163,7 @@ func (s *store) SaveMembership(ctx context.Context, m *network.Membership) error
 		PeerID:      m.PeerID,
 		OverlayAddr: m.OverlayAddress.String(),
 		Status:      m.Status,
+		Endpoint:    m.Endpoint,
 	}
 	if m.WireGuardPublicKey != nil {
 		row.WireGuardPublicKey = m.WireGuardPublicKey[:]
@@ -285,6 +287,7 @@ func unmarshalMembership(data string) (*network.Membership, error) {
 		PeerID:         row.PeerID,
 		OverlayAddress: addr,
 		Status:         row.Status,
+		Endpoint:       row.Endpoint,
 	}
 	switch len(row.WireGuardPublicKey) {
 	case 0:
