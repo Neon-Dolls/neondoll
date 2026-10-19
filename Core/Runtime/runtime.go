@@ -40,6 +40,7 @@ type MembershipLister interface {
 type Runtime struct {
 	nw  *network.Network
 	log *slog.Logger
+	tun wireguard.Tunnel
 	mgr *wireguard.Manager
 
 	done     chan struct{}
@@ -75,13 +76,14 @@ func Reconstruct(ctx context.Context, nw *network.Network, store MembershipListe
 		log = slog.Default()
 	}
 
+	tun := wireguard.NewRealTunnel(log)
 	r := &Runtime{
 		nw:   nw,
 		log:  log,
+		tun:  tun,
 		done: make(chan struct{}),
 	}
 
-	tun := wireguard.NewRealTunnel(log)
 	mgr := wireguard.NewManager(tun, store, log)
 	if err := mgr.Start(ctx, nw); err != nil {
 		// Best-effort teardown: Manager.Stop would also work here, but the
@@ -126,6 +128,13 @@ func (r *Runtime) Network() *network.Network {
 // refreshes.
 func (r *Runtime) Manager() *wireguard.Manager {
 	return r.mgr
+}
+
+// Tunnel exposes the underlying WireGuard tunnel. Callers that need the
+// tunnel's netstack (e.g. the daemon's WebSocket-over-overlay listener) use
+// this accessor.
+func (r *Runtime) Tunnel() wireguard.Tunnel {
+	return r.tun
 }
 
 // RefreshPeers reloads the WireGuard peer configuration from the membership

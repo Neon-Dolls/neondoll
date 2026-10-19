@@ -21,7 +21,7 @@ import (
 	"github.com/Neon-Dolls/neondoll/Core/Network"
 	"github.com/Neon-Dolls/neondoll/Core/Persistence"
 	"github.com/Neon-Dolls/neondoll/Core/Pulse"
-	"github.com/Neon-Dolls/neondoll/Core/WireGuard"
+	"github.com/Neon-Dolls/neondoll/Core/Runtime"
 	"github.com/Neon-Dolls/neondoll/DollLink/WebSocket"
 	"github.com/Neon-Dolls/neondoll/DollState"
 	"github.com/Neon-Dolls/neondoll/pkg/logger"
@@ -114,18 +114,20 @@ func main() {
 	}
 	log.Info("network state loaded", map[string]any{"network_id": string(nw.NetworkID)})
 
-	// Create and start the WireGuard tunnel manager.
-	realTunnel := wireguard.NewRealTunnel(nil)
-	wgManager := wireguard.NewManager(realTunnel, ns, nil)
-	if err := wgManager.Start(ctx, nw); err != nil {
-		log.Error("wireguard manager start error", map[string]any{"error": err.Error()})
+	// Reconstruct the network runtime from durable state (M7.3). This loads
+	// the persisted Core identity, WireGuard keys, overlay address, and
+	// authorized Body memberships — never generating a replacement identity
+	// while valid state exists.
+	rt, err := runtime.Reconstruct(ctx, nw, ns, nil)
+	if err != nil {
+		log.Error("network runtime reconstruct error", map[string]any{"error": err.Error()})
 		os.Exit(1)
 	}
-	log.Info("wireguard tunnel started", map[string]any{
+	log.Info("network runtime reconstructed", map[string]any{
 		"overlay_addr": nw.Core.OverlayAddress.String(),
 		"listen_port":  51820,
 	})
-	defer wgManager.Stop()
+	defer rt.Stop()
 
 	// Create the inference provider.
 	inferenceProvider := inference.NewOpenAIProvider(
@@ -152,7 +154,7 @@ func main() {
 	log.Info("ws transport created", map[string]any{"listen": listenAddr})
 
 	// If the tunnel provides a netstack Net, serve WS through the overlay.
-	if tnet := realTunnel.Netstack(); tnet != nil {
+	if tnet := rt.Tunnel().Netstack(); tnet != nil {
 		// Parse port from the configured listen address.
 		_, portStr, err := net.SplitHostPort(listenAddr)
 		port := 8080
