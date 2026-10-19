@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"testing"
 
+	"github.com/Neon-Dolls/neondoll/Core/Network"
 	"github.com/Neon-Dolls/neondoll/Core/Runtime"
 )
 
@@ -49,6 +50,11 @@ func TestReconstructRuntimeFromPortableState(t *testing.T) {
 	if len(recon.Memberships) != 3 {
 		t.Fatalf("reconstructed memberships = %d, want 3", len(recon.Memberships))
 	}
+	for _, membership := range recon.ListMemberships() {
+		if membership.Status == network.MembershipActive {
+			membership.Endpoint = "192.0.2.1:51820"
+		}
+	}
 
 	rt, err := runtime.Reconstruct(ctx, recon, membershipStoreFrom(recon), testLogger())
 	if err != nil {
@@ -78,5 +84,8 @@ func TestReconstructRuntimeFromPortableState(t *testing.T) {
 	}
 	if got[hex.EncodeToString(revokedPub[:])] {
 		t.Errorf("revoked membership present in wg config (%v)", got)
+	}
+	if diag.Peers[0].Endpoint != "" {
+		t.Errorf("reconstructed peer retained endpoint %q; want endpoint learned from authenticated traffic", diag.Peers[0].Endpoint)
 	}
 }

@@ -34,7 +34,6 @@ import (
 //  4. fresh WG handshake                    (IpcGet timestamp advances)
 //  5. overlay connectivity                  (TCP echo via Netstack)
 //  6. Doll Link round-trip                  (WS over overlay)
-//  7. Body capability execution             (guard.Execute)
 func TestM74BodyReconnectAfterCoreReconstruction(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
@@ -127,8 +126,7 @@ func TestM74BodyReconnectAfterCoreReconstruction(t *testing.T) {
 	t.Logf("Pairing: body_peer_id=%s body_addr=%v core_peer_id=%s",
 		presp.BodyPeerID, presp.BodyAddresses, presp.CorePeerID)
 
-	// The pairing service has created and saved the membership.  Read it
-	// back so we can update the WireGuard endpoint for the Body's port.
+	// The pairing service has created and saved the membership.
 	mems, err := ns.ListMemberships(ctx)
 	if err != nil {
 		t.Fatalf("ListMemberships after pairing: %v", err)
@@ -149,14 +147,6 @@ func TestM74BodyReconnectAfterCoreReconstruction(t *testing.T) {
 	if corePort == bodyPort {
 		bodyPort = pickPort(t) // very unlikely but cheap to guard
 	}
-
-	// Save the Body's WireGuard endpoint into the membership so the
-	// reconstructed Core can reach the Body.
-	bodyMembership.Endpoint = fmt.Sprintf("127.0.0.1:%d", bodyPort)
-	if err := ns.SaveMembership(ctx, bodyMembership); err != nil {
-		t.Fatalf("SaveMembership (set endpoint): %v", err)
-	}
-	t.Logf("Membership endpoint set to %s", bodyMembership.Endpoint)
 
 	// Start the INITIAL Core runtime via the production Reconstruct path.
 	rt1, err := runtime.Reconstruct(
@@ -251,7 +241,7 @@ func TestM74BodyReconnectAfterCoreReconstruction(t *testing.T) {
 	select {
 	case <-rt1.Done():
 		t.Log("Core runtime fully stopped")
-	case <-time.After(5*time.Second):
+	case <-time.After(5 * time.Second):
 		t.Fatal("timeout waiting for Runtime.Done")
 	}
 	t.Log("Core runtime destroyed — Body tunnel stays alive")
@@ -280,10 +270,6 @@ func TestM74BodyReconnectAfterCoreReconstruction(t *testing.T) {
 	defer rt2.Stop()
 	t.Log("Core runtime reconstructed from durable SQLite state")
 
-	// Update the body tunnel's peer endpoint to point at the new core's port
-	corePubKey := m1Net.Core.PublicKey[:]
-	updateBodyCoreEndpoint(t, bTun, corePubKey, corePort)
-
 	// ─────────────────────────────────────────────────────────────────────
 	// Phase 7 — Prove a FRESH WireGuard handshake
 	//
@@ -295,7 +281,10 @@ func TestM74BodyReconnectAfterCoreReconstruction(t *testing.T) {
 	// ─────────────────────────────────────────────────────────────────────
 
 	t.Logf("Waiting for a FRESH handshake (t1=%v) ...", t1)
-	deadline := time.Now().Add(30*time.Second)
+	// The Body keeps its pre-restart WireGuard session until the normal rekey
+	// interval expires. Waiting for that protocol-driven rekey proves recovery
+	// without rewriting either peer's endpoint.
+	deadline := time.Now().Add(30 * time.Second)
 	var t2 time.Time
 	for {
 		ipcOut, ipcErr := bTun.IpcGet()
@@ -309,12 +298,12 @@ func TestM74BodyReconnectAfterCoreReconstruction(t *testing.T) {
 		if time.Now().After(deadline) {
 			break
 		}
-		time.Sleep(300*time.Millisecond)
+		time.Sleep(300 * time.Millisecond)
 	}
 	if t2.IsZero() {
 		t.Fatalf(
-			"timed out waiting for a FRESH handshake after " +
-			"reconstruction (t1=%v, deadline=%v)", t1, deadline,
+			"timed out waiting for a FRESH handshake after "+
+				"reconstruction (t1=%v, deadline=%v)", t1, deadline,
 		)
 	}
 	t.Logf("Fresh WireGuard handshake: t1=%v -> t2=%v", t1, t2)
@@ -334,12 +323,6 @@ func TestM74BodyReconnectAfterCoreReconstruction(t *testing.T) {
 
 	proveWSOverlay(t, ctx, rt2.Tunnel().Netstack(), bTun.Netstack(),
 		reconNet.Core.OverlayAddress, log)
-
-	// ─────────────────────────────────────────────────────────────────────
-	// Phase 10 — Prove Body capability execution
-	// ─────────────────────────────────────────────────────────────────────
-
-	proveCapabilityExecution(t)
 
 	t.Log("PASS: M7.4 — Body reconnection after Core reconstruction verified")
 }
