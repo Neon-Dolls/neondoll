@@ -133,6 +133,11 @@ func (s *store) LoadNetwork(ctx context.Context) (*network.Network, error) {
 		Memberships: make(map[network.PeerID]*network.Membership),
 	}
 
+	// Reconstruct the deterministic overlay prefix derived from the NetworkID.
+	// It is not persisted because it is fully derived; the WireGuard manager
+	// consumes Core.OverlayPrefix at runtime for address validation.
+	n.Core.OverlayPrefix = network.NewIPv6Allocator(row.NetworkID).Prefix()
+
 	// Populate persisted memberships so the reconstructed Network
 	// is immediately usable and knows about existing/revoked Bodies.
 	mems, err := s.ListMemberships(ctx)
