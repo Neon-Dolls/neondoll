@@ -32,7 +32,7 @@ func (e *ToolExecutor) Tools() []inference.Tool {
 	return inference.ProjectToolsFromCapabilities(e.localBody, e.localBody.ID())
 }
 
-// ExecuteCall executes a single ToolCall against the Body via Guard.Execute.
+// ExecuteCall executes a single ToolCall against the Body via Guard.ExecuteContext.
 // It returns a correlated ToolResult for every call. Errors never crash the
 // loop — they produce truthful failure ToolResults.
 func (e *ToolExecutor) ExecuteCall(ctx context.Context, call inference.ToolCall, toolDef *inference.Tool) inference.ToolResult {
@@ -52,7 +52,7 @@ func (e *ToolExecutor) ExecuteCall(ctx context.Context, call inference.ToolCall,
 		Arguments:   call.Arguments,
 	}
 
-	result := e.guard.Execute(execReq)
+	result := e.guard.ExecuteContext(ctx, execReq)
 
 	switch result.Status {
 	case body.StatusSuccess:
@@ -67,6 +67,10 @@ func (e *ToolExecutor) ExecuteCall(ctx context.Context, call inference.ToolCall,
 		return executionFailureResult(call.ID, result, "unavailable", fmt.Sprintf("capability unavailable: %s", result.Error))
 	case body.StatusFailed:
 		return executionFailureResult(call.ID, result, "execution_failed", fmt.Sprintf("body execution failed: %s", result.Error))
+	case body.StatusCancelled:
+		return executionFailureResult(call.ID, result, "cancelled", "body execution was cancelled")
+	case body.StatusExpired:
+		return executionFailureResult(call.ID, result, "expired", "body execution expired")
 	default:
 		return failureResult(call.ID, "unknown_status", fmt.Sprintf("unexpected execution status: %s", result.Status))
 	}

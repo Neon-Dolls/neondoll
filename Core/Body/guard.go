@@ -1,6 +1,7 @@
 package body
 
 import (
+	"context"
 	"errors"
 	"fmt"
 )
@@ -140,12 +141,24 @@ func (g *Guard) Authorize(req AuthorityRequest) (GuardResult, error) {
 //	unavailable  — known capability/operation currently not available
 //	denied       — authority refused (default-deny)
 //	failed       — authorized invocation failed during execution
+//	cancelled    — execution was cancelled through its context or by the Body
+//	expired      — execution exceeded its deadline or expired on the Body
 //	success      — authorized execution completed
 //
 // Denied, unsupported, invalid, and unavailable requests never reach
 // Body.Execute. Authorized invocation that fails is never confused with
 // denial, unsupported, or unavailable.
 func (g *Guard) Execute(req ExecutionRequest) ExecutionResult {
+	return g.ExecuteContext(context.Background(), req)
+}
+
+// ExecuteContext runs the same guarded execution path as Execute and carries
+// cancellation and deadlines to Bodies that support context-aware execution.
+// Authority, resolution, and correlation semantics are otherwise identical.
+func (g *Guard) ExecuteContext(ctx context.Context, req ExecutionRequest) ExecutionResult {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	// 1. Structural validation. Invalid never reaches authority or
 	// invocation; the execution ID is always correlated into the result.
 	if req.ExecutionID == "" || req.Doll == "" || req.Body == "" ||
@@ -195,7 +208,15 @@ func (g *Guard) Execute(req ExecutionRequest) ExecutionResult {
 
 	// 5. Invoke the Body operation with the same request that was
 	// authorized. The Arguments are the same map — no mutation.
-	bodyRes, err := b.Execute(req)
+	var bodyRes *ExecutionResult
+	var err error
+	if contextBody, ok := b.(interface {
+		ExecuteContext(context.Context, ExecutionRequest) (*ExecutionResult, error)
+	}); ok {
+		bodyRes, err = contextBody.ExecuteContext(ctx, req)
+	} else {
+		bodyRes, err = b.Execute(req)
+	}
 	if err != nil {
 		return terminal(req, StatusFailed, "invocation_failed", err.Error())
 	}
