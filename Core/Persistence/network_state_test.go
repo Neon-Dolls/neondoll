@@ -328,6 +328,10 @@ func TestNetworkStore_ReconstructNetwork(t *testing.T) {
 		t.Fatalf("core overlay address mismatch: got %s, want %s",
 			loaded.Core.OverlayAddress, n.Core.OverlayAddress)
 	}
+	if loaded.Core.OverlayPrefix != n.Core.OverlayPrefix {
+		t.Fatalf("core overlay prefix mismatch after reconstruction: got %s, want %s",
+			loaded.Core.OverlayPrefix, n.Core.OverlayPrefix)
+	}
 
 	// Load memberships.
 	memberships, err := ns2.ListMemberships(ctx)
