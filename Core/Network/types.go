@@ -92,9 +92,9 @@ type Membership struct {
 	// Core is the address authority.
 	OverlayAddress netip.Addr
 
-	// Endpoint is the canonical direct UDP endpoint for the Body
-	// ("ip:port"), if known. Set during pairing or explicitly configured.
-	// This is the endpoint used by Core to reach Body's WG tunnel.
+	// Endpoint is a runtime location hint for the Body's direct UDP endpoint
+	// ("ip:port"), if currently known. It is not portable identity or
+	// authority state and must not be assumed valid after reconstruction.
 	Endpoint string
 
 	// Status is the current membership lifecycle state.

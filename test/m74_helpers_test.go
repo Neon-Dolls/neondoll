@@ -4,7 +4,6 @@ package integration
 
 import (
 	"context"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -17,9 +16,6 @@ import (
 
 	"golang.zx2c4.com/wireguard/tun/netstack"
 
-	"github.com/Neon-Dolls/neondoll/Body"
-	corebody "github.com/Neon-Dolls/neondoll/Core/Body"
-
 	"github.com/Neon-Dolls/neondoll/DollLink/Events"
 	ws "github.com/Neon-Dolls/neondoll/DollLink/WebSocket"
 )
@@ -30,24 +26,34 @@ import (
 // ─────────────────────────────────────────────────────────────────────
 
 func parseHandshakeTimestamp(dump string) (time.Time, error) {
+	var sec, nsec int64
+	var foundSec, foundNsec bool
 	for _, line := range strings.Split(dump, "\n") {
 		line = strings.TrimSpace(line)
-		if !strings.HasPrefix(line, "last_handshake_time_nsec=") {
-			continue
+		if strings.HasPrefix(line, "last_handshake_time_sec=") {
+			raw := strings.TrimPrefix(line, "last_handshake_time_sec=")
+			parsed, err := strconv.ParseInt(strings.TrimSpace(raw), 10, 64)
+			if err != nil {
+				return time.Time{}, fmt.Errorf("parse last_handshake_time_sec %q: %w", raw, err)
+			}
+			sec, foundSec = parsed, true
 		}
-		raw := strings.TrimPrefix(line, "last_handshake_time_nsec=")
-		nsec, err := strconv.ParseInt(strings.TrimSpace(raw), 10, 64)
-		if err != nil {
-			return time.Time{}, fmt.Errorf("parse last_handshake_time_nsec %q: %w", raw, err)
+		if strings.HasPrefix(line, "last_handshake_time_nsec=") {
+			raw := strings.TrimPrefix(line, "last_handshake_time_nsec=")
+			parsed, err := strconv.ParseInt(strings.TrimSpace(raw), 10, 64)
+			if err != nil {
+				return time.Time{}, fmt.Errorf("parse last_handshake_time_nsec %q: %w", raw, err)
+			}
+			nsec, foundNsec = parsed, true
 		}
-		if nsec == 0 {
-			return time.Time{}, nil
-		}
-		sec := nsec / 1_000_000_000
-		nsecRem := nsec % 1_000_000_000
-		return time.Unix(sec, nsecRem), nil
 	}
-	return time.Time{}, fmt.Errorf("last_handshake_time_nsec not found in IpcGet output")
+	if !foundSec || !foundNsec {
+		return time.Time{}, fmt.Errorf("complete last handshake timestamp not found in IpcGet output")
+	}
+	if sec == 0 && nsec == 0 {
+		return time.Time{}, nil
+	}
+	return time.Unix(sec, nsec), nil
 }
 
 // ── proveDirectOverlayEcho ───────────────────────────────────────────
@@ -96,20 +102,6 @@ func proveDirectOverlayEcho(t *testing.T, ctx context.Context, listenStack, dial
 		t.Fatalf("%s echo mismatch: got %q, want %q", prefix, got, "ping")
 	}
 	t.Logf("%s overlay TCP echo OK", prefix)
-}
-
-// ── updateBodyCoreEndpoint ─────────────────────────────────────────────
-//
-// updateBodyCoreEndpoint updates the body tunnel's peer endpoint to
-// point at the new core's stable listen port after reconstruction.
-func updateBodyCoreEndpoint(t *testing.T, bodyTun *body.BodyTunnel, corePubKey []byte, port int) {
-	t.Helper()
-	pubHex := hex.EncodeToString(corePubKey)
-	uapiCmd := fmt.Sprintf("public_key=%s\nendpoint=127.0.0.1:%d\n", pubHex, port)
-	if err := bodyTun.IpcSet(uapiCmd); err != nil {
-		t.Fatalf("update body core endpoint: %v", err)
-	}
-	t.Logf("Body tunnel peer endpoint updated to 127.0.0.1:%d", port)
 }
 
 // ── proveWSOverlay ───────────────────────────────────────────────────
@@ -219,50 +211,7 @@ func proveWSOverlay(t *testing.T, ctx context.Context, listenStack, dialStack *n
 	t.Log("proveWSOverlay: WS round-trip OK (ping -> response_ping)")
 }
 
-// ── proveCapabilityExecution ─────────────────────────────────────────
-//
-// proveCapabilityExecution proves the core capability system works
-// after reconstruction by executing runtime.info:read through the
-// guard for the local body.
-
-func proveCapabilityExecution(t *testing.T) {
-	t.Helper()
-	t.Log("proveCapabilityExecution: proving guard.Execute(local, runtime.info:read) ...")
-
-	registry := corebody.NewRegistry()
-
-	// The local body already has "runtime.info" registered. We just need
-	// an authority rule that allows the local body to execute it.
-	guard := corebody.NewGuard(
-		registry,
-		corebody.NewRuleEvaluator(
-			corebody.AuthorityRule{
-				Doll:       "m74-test-doll",
-				Body:       corebody.LocalBodyID,
-				Capability: "runtime.info",
-				Operation:  "read",
-				Decision:   corebody.AuthorityAllow,
-				Reason:     "allow for m7.4 test",
-			},
-		),
-	)
-
-	res := guard.Execute(corebody.ExecutionRequest{
-		ExecutionID: "m74-e2e-prove-001",
-		Doll:        "m74-test-doll",
-		Body:        corebody.LocalBodyID,
-		Capability:  "runtime.info",
-		Operation:   "read",
-	})
-	if res.Status != corebody.StatusSuccess {
-		t.Fatalf("guard.Execute(runtime.info:read) = status %q, want %q", res.Status, corebody.StatusSuccess)
-	}
-	t.Logf("proveCapabilityExecution: OK — status=%q", res.Status)
-}
-
 // ── WebSocket frame helpers (from m3_e2e_test.go) ────────────────────
 //
 // buildWSTextFrame and parseWSFrame are defined in m3_e2e_test.go
 // in the same package integration — they are available here.
-
-

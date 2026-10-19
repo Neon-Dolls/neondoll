@@ -32,6 +32,31 @@ type MembershipLister interface {
 	ListMemberships(ctx context.Context) ([]*network.Membership, error)
 }
 
+// endpointlessMemberships keeps runtime location hints out of reconstruction.
+// WireGuard learns a peer's current endpoint from authenticated incoming
+// traffic, so a reconstructed Core does not need to trust a persisted address.
+type endpointlessMemberships struct {
+	MembershipLister
+}
+
+func (s endpointlessMemberships) ListMemberships(ctx context.Context) ([]*network.Membership, error) {
+	memberships, err := s.MembershipLister.ListMemberships(ctx)
+	if err != nil {
+		return nil, err
+	}
+	withoutEndpoints := make([]*network.Membership, 0, len(memberships))
+	for _, membership := range memberships {
+		if membership == nil {
+			withoutEndpoints = append(withoutEndpoints, nil)
+			continue
+		}
+		copy := *membership
+		copy.Endpoint = ""
+		withoutEndpoints = append(withoutEndpoints, &copy)
+	}
+	return withoutEndpoints, nil
+}
+
 // Runtime is a reconstructed, running network runtime. It composes the
 // existing WireGuard pieces — a RealTunnel and the wireguard.Manager — around
 // reconstructed network state, and provides clean lifecycle management.
@@ -113,7 +138,7 @@ func Reconstruct(ctx context.Context, nw *network.Network, store MembershipListe
 		done: make(chan struct{}),
 	}
 
-	mgr := wireguard.NewManager(tun, store, log)
+	mgr := wireguard.NewManager(tun, endpointlessMemberships{MembershipLister: store}, log)
 	if o.listenPort != nil {
 		mgr.SetListenPort(*o.listenPort)
 	}
