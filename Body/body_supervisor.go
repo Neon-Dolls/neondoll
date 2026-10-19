@@ -72,6 +72,14 @@ type DiscoveryConfig struct {
 	// HandshakeTimeout is the deadline for each migration handshake attempt.
 	// Default: 10s.
 	HandshakeTimeout time.Duration
+
+	// Cooldown is how long the supervisor waits before restarting
+	// discovery on a fallback path after an unsuccessful discovery
+	// cycle (probes exhausted without a migration).  Discovery is
+	// paused, not permanently disabled, so a healthy Body keeps
+	// re-probing for the preferred path once it becomes available.
+	// Default: 60s.
+	Cooldown time.Duration
 }
 
 // directCandidate is a MigrationCandidate that targets a specific UDP endpoint.
@@ -205,6 +213,9 @@ func getDiscoveryConfig(dc DiscoveryConfig) DiscoveryConfig {
 	if dc.HandshakeTimeout <= 0 {
 		dc.HandshakeTimeout = 10 * time.Second
 	}
+	if dc.Cooldown <= 0 {
+		dc.Cooldown = 60 * time.Second
+	}
 	return dc
 }
 
@@ -221,12 +232,15 @@ func runSupervisor(
 
 	var current *BodyTunnel = initial
 
-	// fallbackDiscExhausted is set when initial-fallback or post-recovery
-	// discovery exhausts all probe attempts, preventing the outer loop
-	// from restarting discovery unnecessarily on the same tunnel.  It
-	// does not gate the post-recovery discovery block, which runs
-	// independently after each recovery event.
-	var fallbackDiscExhausted bool
+	// nextDiscoveryAfter bounds when discovery may restart on the same
+	// fallback tunnel after an unsuccessful cycle.  Rather than
+	// permanently disabling discovery after MaxAttempts, the supervisor
+	// pauses for Discovery.Cooldown and then retries, so a healthy Body
+	// on a fallback path keeps re-probing for the preferred path when it
+	// becomes available.  The zero value means discovery may start
+	// immediately.  It does not gate the post-recovery discovery block,
+	// which runs independently after each recovery event.
+	var nextDiscoveryAfter time.Time
 
 	for {
 		select {
@@ -250,7 +264,7 @@ func runSupervisor(
 		//     is enabled, probe the preferred path in parallel while keeping
 		//     the loss observer running, so loss during discovery is handled.
 		isFallback := current.Config().Bind != nil
-		shouldDiscover := cfg.Discovery.Enabled && isFallback && !fallbackDiscExhausted
+		shouldDiscover := cfg.Discovery.Enabled && isFallback && time.Now().After(nextDiscoveryAfter)
 
 		if shouldDiscover {
 			discCfg := getDiscoveryConfig(cfg.Discovery)
@@ -315,9 +329,13 @@ func runSupervisor(
 					}
 
 					// Discovery exhausted — keep observing on fallback.
-					fallbackDiscExhausted = true
-					log.Warn("supervisor: initial fallback discovery exhausted, staying on fallback")
-					continue // restart outer loop without discovery for this tunnel
+					// Pause before the next discovery cycle so probes stay
+					// bounded, but retry: the preferred path may come up.
+					nextDiscoveryAfter = time.Now().Add(discCfg.Cooldown)
+					log.Warn("supervisor: initial fallback discovery exhausted, retrying after cooldown",
+						"cooldown", discCfg.Cooldown,
+					)
+					continue // restart outer loop; discovery resumes after cooldown
 
 				case <-ctx.Done():
 					observer.Cancel()
@@ -332,6 +350,14 @@ func runSupervisor(
 			}
 		} else {
 			// Normal observation: direct path or discovery disabled.
+			// If we are inside a fallback discovery cooldown, wake when
+			// it expires so the outer loop restarts discovery even though
+			// the tunnel is healthy and no loss event has fired
+			// (continuous path supervision).
+			var wakeCh <-chan time.Time
+			if isFallback && time.Now().Before(nextDiscoveryAfter) {
+				wakeCh = time.After(time.Until(nextDiscoveryAfter))
+			}
 			select {
 			case <-lossCh:
 				// Loss detected — proceed to recovery.
@@ -344,6 +370,11 @@ func runSupervisor(
 				<-observer.Done
 				log.Warn("supervisor: context cancelled, shutting down")
 				return
+
+			case <-wakeCh:
+				// Discovery cooldown expired — re-evaluate at the top
+				// of the loop.
+				continue
 			}
 		}
 
@@ -438,7 +469,7 @@ func runSupervisor(
 								)
 							} else {
 								log.Warn("supervisor: discovery did not produce a migration, staying on fallback")
-								fallbackDiscExhausted = true
+								nextDiscoveryAfter = time.Now().Add(discCfg.Cooldown)
 							}
 
 						case <-ctx.Done():

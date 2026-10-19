@@ -235,6 +235,225 @@ func TestM68_InitialWSS_DiscoveryAndMigration(t *testing.T) {
 	t.Log("body identity preserved across migration")
 }
 
+// TestM68_DiscoveryResumesAfterExhaustion verifies that discovery on an
+// initial WSS fallback path is paused — not permanently disabled — after
+// exhausting its probe attempts: once Discovery.Cooldown elapses, the
+// supervisor restarts discovery on its own and migrates when the
+// preferred direct path is available.  This guards against the previous
+// fallbackDiscExhausted behavior, which starved a healthy Body on WSS
+// of any further better-path discovery.
+//
+// Scenario:
+//  1. Body connects on WSS fallback; responder down → probes exhaust
+//  2. During the cooldown window: still on the same WSS tunnel (no loss)
+//  3. Core A + responder come online (path never lost, no recovery)
+//  4. Supervisor retries discovery after cooldown and migrates to direct
+//  5. Verify direct handshake and preserved identity
+func TestM68_DiscoveryResumesAfterExhaustion(t *testing.T) {
+	ctx := context.Background()
+	log := testLogger(t)
+
+	// ── Keys and identities ──
+	bodyKeys := newTestKeypair(t)
+	coreKeys := newTestKeypair(t)
+	bodyPriv := hexToKey(t, bodyKeys.privHex)
+	corePub := hexToKey(t, coreKeys.pubHex)
+
+	const routeID = relay.RouteID(45)
+	const credential = "m68-exhaust-cred"
+	const token = "m68-exhaust-token"
+
+	bodyOverlay := netip.MustParseAddr("fd00::2")
+	coreOverlay := netip.MustParseAddr("fd00::1")
+	overlayPrefix := netip.MustParsePrefix("fd00::/112")
+
+	// ── 1. WSS relay infrastructure ──
+	relayAddr := pickFreeTCPAddrPort(t)
+
+	svcCfg := relay.DefaultServiceConfig()
+	hash := sha256.Sum256([]byte(token))
+	svcCfg.Credentials = []string{hex.EncodeToString(hash[:])}
+	svcCfg.KeepaliveInterval = 2 * time.Second
+	svcCfg.RouteTimeout = 180 * time.Second
+	svcCfg.RegistrationTimeout = 180 * time.Second
+
+	svc, err := relay.NewService(svcCfg, relay.ClientConfig{})
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+
+	svcCtx, svcCancel := context.WithCancel(ctx)
+	defer svcCancel()
+	if err := svc.Start(svcCtx); err != nil {
+		t.Fatalf("svc.Start: %v", err)
+	}
+
+	cs := relay.NewControlServer(svc, relayAddr, nil)
+	csCtx, csCancel := context.WithCancel(ctx)
+	defer csCancel()
+	if err := cs.Start(csCtx); err != nil {
+		t.Fatalf("cs.Start: %v", err)
+	}
+
+	time.Sleep(100 * time.Millisecond)
+
+	// ── 2. Probe responder — stays UNAVAILABLE through the first
+	// discovery cycle so its attempts exhaust. ──
+	responder := startCoreProbeResponder(t, routeID, credential)
+	probeAddr := fmt.Sprintf("127.0.0.1:%d", responder.port)
+	responder.SetAvailable(false)
+
+	// ── 3. Core behind relay (always available, WSS fallback target) ──
+	clientCfg := relay.DefaultClientConfig()
+	clientCfg.RelayURL = "ws://" + relayAddr + "/relay"
+	clientCfg.RegistrationToken = token
+	clientCfg.HandshakeTimeout = 5 * time.Second
+	clientCfg.ReadTimeout = 15 * time.Second
+	clientCfg.PingInterval = 5 * time.Second
+
+	coreClient := relay.NewControlClient(clientCfg)
+	if err := coreClient.Start(svcCtx); err != nil {
+		t.Fatalf("control client start: %v", err)
+	}
+	waitClientConnected(t, coreClient, "core-behind-relay")
+
+	routeOpened, err := coreClient.OpenRoute(svcCtx, routeID, relay.RouteCredentials{
+		Token: credential,
+	})
+	if err != nil {
+		t.Fatalf("OpenRoute: %v", err)
+	}
+	_ = routeOpened
+
+	regID, ok := svc.Registry().RouteRegistration(routeID)
+	if !ok {
+		t.Fatal("route registration not found after OpenRoute")
+	}
+	svc.Registry().SetRouteCredentials(regID, routeID, relay.RouteCredentials{Token: credential})
+
+	tr := relay.NewRelayTransport(coreClient)
+	defer tr.Close()
+	_, _ = startWgDevice(t, tr, coreKeys, coreOverlay, bodyKeys.pubHex, "relay:1", "fd00::2/128")
+
+	// ── 4. Reserve the direct endpoint (not listening yet) ──
+	freePort := allocateFreeUDPPort(t)
+	directEndpoint := fmt.Sprintf("127.0.0.1:%d", freePort)
+
+	pathCfg := body.PathSelectorConfig{
+		PrivateKey:        bodyPriv,
+		CorePublicKey:     corePub,
+		OverlayAddress:    bodyOverlay,
+		OverlayPrefix:     overlayPrefix,
+		DirectEndpoint:    directEndpoint,
+		RelayWSSURL:       relayAddr,
+		RouteID:           routeID,
+		RouteCredential:   credential,
+		PerAttemptTimeout: 5 * time.Second,
+	}
+
+	// ── 5. Select initial path → WSS fallback ──
+	initialResult := body.SelectInitialPath(ctx, pathCfg, log)
+	if initialResult.Err != nil {
+		t.Fatalf("SelectInitialPath: %v", initialResult.Err)
+	}
+	initialTunnel := initialResult.Tunnel
+	if initialTunnel.Config().Bind == nil {
+		t.Fatal("expected WSS fallback tunnel (Bind should be non-nil)")
+	}
+	if err := initialTunnel.WaitHandshake(ctx, 15*time.Second); err != nil {
+		t.Fatalf("WSS tunnel handshake: %v", err)
+	}
+
+	// ── 6. Supervisor: discovery with a short worst-case cycle
+	// (MaxAttempts=2, MinInterval=200ms) and a short cooldown, so the
+	// test observes exhaustion and the post-cooldown restart quickly. ──
+	epoch := body.NewRecoveryEpoch(initialTunnel)
+
+	const discCooldown = 2 * time.Second
+	supCfg := body.SupervisorConfig{
+		PathSelector: pathCfg,
+		LossObserver: body.LossObserverConfig{
+			// Long enough that the WSS tunnel's WG handshake cannot go
+			// stale before cooldown-expired discovery migrates us: if
+			// migration happens at all it MUST be discovery-driven, not
+			// loss-recovery (asserted below with a hard deadline).
+			WGLivenessTimeout: 10 * time.Second,
+			PollInterval:      500 * time.Millisecond,
+		},
+		RecoverTimeout: 10 * time.Second,
+		SharedEpoch:    epoch,
+		Discovery: body.DiscoveryConfig{
+			Enabled:          true,
+			ProbeTarget:      probeAddr,
+			MinInterval:      200 * time.Millisecond,
+			MaxBackoff:       1 * time.Second,
+			MaxAttempts:      2, // exhaust the first discovery cycle quickly
+			ProbeTimeout:     1 * time.Second,
+			HandshakeTimeout: 5 * time.Second,
+			Cooldown:         discCooldown,
+		},
+	}
+
+	handle, err := body.StartPathSupervisor(ctx, initialTunnel, supCfg, log)
+	if err != nil {
+		t.Fatalf("StartPathSupervisor: %v", err)
+	}
+	defer handle.Stop()
+
+	// ── 7. Wait past the first discovery cycle (exhausted by ~0.5s),
+	// then confirm we are inside the cooldown window: still on the SAME
+	// WSS tunnel, no migration despite a quiet preferred path. ──
+	time.Sleep(1500 * time.Millisecond)
+	assertActiveTunnel(t, epoch, initialTunnel, "still on WSS during discovery cooldown")
+	t.Log("still on WSS during cooldown — first discovery cycle exhausted")
+
+	// ── 8. Now make the preferred direct path available.  The WSS path
+	// was never lost, so no recovery runs: the supervisor must restart
+	// discovery by itself after the cooldown expires. ──
+	responder.SetAvailable(true)
+	coreDevA := startCoreDeviceOnPort(t, uint16(freePort), coreKeys, bodyKeys.pubHex, coreOverlay)
+	defer coreDevA.Close()
+	t.Log("Core A direct + responder available; waiting for rediscovery after cooldown")
+
+	var directTunnel *body.BodyTunnel
+	migrateStart := time.Now()
+	migrateDeadline := time.Now().Add(30 * time.Second)
+	// The WSS liveness window is 10s from the last handshake (≈8.5s from
+	// here). A discovery-driven migration lands within ~1-2s of cooldown
+	// expiry. If we exceed the guard below the only other way to migrate
+	// is loss-recovery, which would make this test a false pass.
+	const migrateGuard = 6 * time.Second
+	for {
+		active := epoch.Active()
+		if active != nil && active != initialTunnel {
+			if cfg := active.Config(); cfg.Bind == nil {
+				directTunnel = active
+				break
+			}
+		}
+		if time.Since(migrateStart) > migrateGuard {
+			t.Fatal("migration did not happen via discovery: took longer than the WSS liveness window, so any migration now would be loss-recovery")
+		}
+		if time.Now().After(migrateDeadline) {
+			t.Fatal("discovery did not resume after cooldown — no migration to direct")
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	t.Logf("migrated to direct path in %.1fs after cooldown (guard %.0fs)", time.Since(migrateStart).Seconds(), migrateGuard.Seconds())
+
+	// ── 9. Verify the migrated tunnel ──
+	if directTunnel == nil {
+		t.Fatal("expected non-nil direct tunnel after rediscovery")
+	}
+	if err := directTunnel.WaitHandshake(ctx, 15*time.Second); err != nil {
+		t.Fatalf("direct tunnel handshake: %v", err)
+	}
+	if directTunnel.Config().PrivateKey != bodyPriv {
+		t.Fatal("body private key changed after rediscovery migration")
+	}
+	t.Log("identity preserved; discovery resumed after exhaustion cooldown")
+}
+
 // allocateFreeUDPPort finds a free UDP port by opening a listener.
 func allocateFreeUDPPort(t *testing.T) int {
 	t.Helper()
