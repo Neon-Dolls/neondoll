@@ -8,11 +8,6 @@ import (
 	"time"
 )
 
-// DollLinkVersion is the integer Doll Link version implemented by this wire
-// contract. The version is negotiated before execution messages are exchanged;
-// it is not duplicated in each message envelope.
-const DollLinkVersion int = 1
-
 // Type is a canonical Body Protocol message type.
 type Type string
 
@@ -76,18 +71,20 @@ type Result struct {
 
 // ResultPayload is a terminal execution outcome. Result remains a JSON object
 // whose semantics belong to the capability operation.
+//
+// Body Protocol v1 does not define a wire field or shape for the structured
+// error details required semantically by body-contract.md. Do not infer one
+// here; that specification gap must be resolved before error details are added.
 type ResultPayload struct {
 	ExecutionID string         `json:"execution_id"`
 	Status      Status         `json:"status"`
 	Result      map[string]any `json:"result,omitempty"`
 }
 
-// Validate verifies an execution request against the negotiated Doll Link
-// version and canonical sender direction.
-func (r Request) Validate(negotiatedVersion int, sender Sender) error {
-	if err := validateVersion(negotiatedVersion); err != nil {
-		return err
-	}
+// Validate verifies an execution request and its canonical sender direction.
+// Doll Link version negotiation happens before these messages are exchanged;
+// these passive wire types do not advertise a supported version range.
+func (r Request) Validate(sender Sender) error {
 	if sender != SenderCore {
 		return fmt.Errorf("execution: execution.request must be sent by Core")
 	}
@@ -109,12 +106,10 @@ func (r Request) Validate(negotiatedVersion int, sender Sender) error {
 	return nil
 }
 
-// Validate verifies an execution result against the negotiated Doll Link
-// version and canonical sender direction.
-func (r Result) Validate(negotiatedVersion int, sender Sender) error {
-	if err := validateVersion(negotiatedVersion); err != nil {
-		return err
-	}
+// Validate verifies an execution result and its canonical sender direction.
+// Doll Link version negotiation happens before these messages are exchanged;
+// these passive wire types do not advertise a supported version range.
+func (r Result) Validate(sender Sender) error {
 	if sender != SenderBody {
 		return fmt.Errorf("execution: execution.result must be sent by Body")
 	}
@@ -150,13 +145,6 @@ func (r Result) ValidateResponseTo(request Request) error {
 	}
 	if request.DollID != "" && r.DollID != request.DollID {
 		return fmt.Errorf("execution: result doll_id %q, want %q", r.DollID, request.DollID)
-	}
-	return nil
-}
-
-func validateVersion(version int) error {
-	if version != DollLinkVersion {
-		return fmt.Errorf("execution: unsupported negotiated Doll Link version %d", version)
 	}
 	return nil
 }

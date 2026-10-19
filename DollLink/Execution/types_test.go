@@ -54,7 +54,7 @@ func TestRequestCanonicalJSONRoundTrip(t *testing.T) {
 	if err := json.Unmarshal(data, &decoded); err != nil {
 		t.Fatalf("Unmarshal: %v", err)
 	}
-	if err := decoded.Validate(DollLinkVersion, SenderCore); err != nil {
+	if err := decoded.Validate(SenderCore); err != nil {
 		t.Fatalf("Validate: %v", err)
 	}
 }
@@ -72,7 +72,7 @@ func TestResultCanonicalJSONRoundTrip(t *testing.T) {
 	if err := json.Unmarshal(data, &decoded); err != nil {
 		t.Fatalf("Unmarshal: %v", err)
 	}
-	if err := decoded.Validate(DollLinkVersion, SenderBody); err != nil {
+	if err := decoded.Validate(SenderBody); err != nil {
 		t.Fatalf("Validate: %v", err)
 	}
 	if err := decoded.ValidateResponseTo(validRequest()); err != nil {
@@ -87,23 +87,74 @@ func TestCanonicalTerminalStatuses(t *testing.T) {
 		t.Run(string(status), func(t *testing.T) {
 			result := validResult()
 			result.Payload.Status = status
-			if err := result.Validate(DollLinkVersion, SenderBody); err != nil {
+			if err := result.Validate(SenderBody); err != nil {
 				t.Fatalf("Validate: %v", err)
 			}
 		})
 	}
 }
 
-func TestValidationRejectsWrongVersionAndSender(t *testing.T) {
-	request := validRequest()
-	if err := request.Validate(2, SenderCore); err == nil {
-		t.Fatal("request accepted unnegotiated Doll Link version")
+func TestWireTypesDoNotAdvertiseOrEmbedProtocolVersion(t *testing.T) {
+	for name, message := range map[string]any{
+		"request": validRequest(),
+		"result":  validResult(),
+	} {
+		t.Run(name, func(t *testing.T) {
+			data, err := json.Marshal(message)
+			if err != nil {
+				t.Fatalf("Marshal: %v", err)
+			}
+			var envelope map[string]any
+			if err := json.Unmarshal(data, &envelope); err != nil {
+				t.Fatalf("Unmarshal envelope: %v", err)
+			}
+			for _, field := range []string{"version", "doll_link", "min_version", "max_version"} {
+				if _, ok := envelope[field]; ok {
+					t.Errorf("wire message unexpectedly advertises %q: %s", field, data)
+				}
+			}
+		})
 	}
-	if err := request.Validate(DollLinkVersion, SenderBody); err == nil {
+}
+
+func TestUnspecifiedStructuredErrorDetailsAreNotInvented(t *testing.T) {
+	for _, status := range []Status{StatusDenied, StatusFailed, StatusUnavailable} {
+		t.Run(string(status), func(t *testing.T) {
+			result := validResult()
+			result.Payload.Status = status
+			result.Payload.Result = nil
+			if err := result.Validate(SenderBody); err != nil {
+				t.Fatalf("Validate: %v", err)
+			}
+			data, err := json.Marshal(result)
+			if err != nil {
+				t.Fatalf("Marshal: %v", err)
+			}
+			var wire struct {
+				Payload map[string]json.RawMessage `json:"payload"`
+			}
+			if err := json.Unmarshal(data, &wire); err != nil {
+				t.Fatalf("Unmarshal: %v", err)
+			}
+			if _, ok := wire.Payload["result"]; ok {
+				t.Errorf("absent result object was emitted: %s", data)
+			}
+			for _, invented := range []string{"error", "error_code", "message", "details"} {
+				if _, ok := wire.Payload[invented]; ok {
+					t.Errorf("invented unspecified error field %q: %s", invented, data)
+				}
+			}
+		})
+	}
+}
+
+func TestValidationRejectsWrongSender(t *testing.T) {
+	request := validRequest()
+	if err := request.Validate(SenderBody); err == nil {
 		t.Fatal("request accepted Body sender")
 	}
 	result := validResult()
-	if err := result.Validate(DollLinkVersion, SenderCore); err == nil {
+	if err := result.Validate(SenderCore); err == nil {
 		t.Fatal("result accepted Core sender")
 	}
 }
@@ -128,7 +179,7 @@ func TestValidationRejectsMalformedMessages(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			request := validRequest()
 			tt.edit(&request)
-			if err := request.Validate(DollLinkVersion, SenderCore); err == nil {
+			if err := request.Validate(SenderCore); err == nil {
 				t.Fatal("Validate accepted malformed request")
 			}
 		})
@@ -136,12 +187,12 @@ func TestValidationRejectsMalformedMessages(t *testing.T) {
 
 	result := validResult()
 	result.Payload.Status = "pending"
-	if err := result.Validate(DollLinkVersion, SenderBody); err == nil {
+	if err := result.Validate(SenderBody); err == nil {
 		t.Fatal("Validate accepted non-terminal status")
 	}
 	result = validResult()
 	result.CorrelationID = ""
-	if err := result.Validate(DollLinkVersion, SenderBody); err == nil {
+	if err := result.Validate(SenderBody); err == nil {
 		t.Fatal("Validate accepted result without correlation_id")
 	}
 }
@@ -164,7 +215,7 @@ func TestForwardCompatibleUnknownFields(t *testing.T) {
 	if err := json.Unmarshal([]byte(wire), &request); err != nil {
 		t.Fatalf("Unmarshal with additive fields: %v", err)
 	}
-	if err := request.Validate(DollLinkVersion, SenderCore); err != nil {
+	if err := request.Validate(SenderCore); err != nil {
 		t.Fatalf("Validate with additive fields: %v", err)
 	}
 	data, err := json.Marshal(request)
