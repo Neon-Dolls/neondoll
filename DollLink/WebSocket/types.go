@@ -3,6 +3,7 @@ package ws
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -13,7 +14,10 @@ import (
 
 	"github.com/Neon-Dolls/neondoll/DollLink/Actions"
 	"github.com/Neon-Dolls/neondoll/DollLink/Events"
+	"github.com/Neon-Dolls/neondoll/DollLink/Execution"
 )
+
+var ErrNoAuthenticatedSession = errors.New("ws: no authenticated execution session")
 
 // Logger is the minimal logging interface used by the WebSocket transport.
 // DollLink defines its own to avoid importing Core's logger.
@@ -40,14 +44,16 @@ const writeTimeout = 10 * time.Second
 
 // Server is a WebSocket transport for Doll Link.
 type Server struct {
-	mu           sync.Mutex
-	conns        map[string]*clientConn
-	log          Logger
-	listen       string
-	mux          *http.ServeMux
-	httpSrv      *http.Server
-	handler      Handler
-	listenerAddr string
+	mu                    sync.Mutex
+	conns                 map[string]*clientConn
+	execution             map[string]*clientConn
+	log                   Logger
+	listen                string
+	mux                   *http.ServeMux
+	httpSrv               *http.Server
+	handler               Handler
+	listenerAddr          string
+	authenticateExecution func(*http.Request) (string, error)
 
 	// listener is an optional pre-created net.Listener.
 	// When set (typically via SetListener before Start), the server
@@ -63,25 +69,41 @@ type Server struct {
 
 // clientConn tracks a single WebSocket connection.
 type clientConn struct {
-	id     string
-	conn   *websocket.Conn
-	remote string
+	id        string
+	conn      *websocket.Conn
+	remote    string
+	writeMu   sync.Mutex
+	bodyID    string
+	execution *execution.Client
+	done      chan struct{}
 }
 
 // Config for the WS server.
 type Config struct {
 	Listen string
+
+	// AuthenticateExecution may bind a stable, authenticated Body identity to
+	// a connection. The callback is a trust boundary: it must authenticate the
+	// request using a mechanism outside this transport and must never trust an
+	// overlay address, membership record, or unverified body_id field. When nil
+	// or unsuccessful, the connection remains usable for Events/Actions but is
+	// ineligible for execution.
+	AuthenticateExecution func(*http.Request) (string, error)
 }
 
 // New creates a WS Server with the given config, logger, and event handler.
 func New(cfg Config, log Logger, handler Handler) *Server {
 	mux := http.NewServeMux()
 	s := &Server{
-		conns:   make(map[string]*clientConn),
-		log:     log,
-		listen:  cfg.Listen,
-		mux:     mux,
-		handler: handler,
+		conns:     make(map[string]*clientConn),
+		execution: make(map[string]*clientConn),
+		log:       log,
+		listen:    cfg.Listen,
+		mux:       mux,
+		handler:   handler,
+	}
+	if cfg.AuthenticateExecution != nil {
+		s.authenticateExecution = cfg.AuthenticateExecution
 	}
 
 	s.mux.HandleFunc("/ws", s.handleWS)
@@ -143,16 +165,33 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	srv := s.httpSrv
 	conns := s.conns
 	s.conns = make(map[string]*clientConn)
+	s.execution = make(map[string]*clientConn)
 	s.mu.Unlock()
 
-	for id, cc := range conns {
+	for _, cc := range conns {
+		if cc.execution != nil {
+			cc.execution.Close(execution.ErrDisconnected)
+		}
 		cc.conn.Close()
-		_ = id
 	}
+	var shutdownErr error
 	if srv != nil {
-		return srv.Shutdown(ctx)
+		shutdownErr = srv.Shutdown(ctx)
 	}
-	return nil
+	for _, cc := range conns {
+		if cc.done == nil {
+			continue
+		}
+		select {
+		case <-cc.done:
+		case <-ctx.Done():
+			if shutdownErr != nil {
+				return shutdownErr
+			}
+			return ctx.Err()
+		}
+	}
+	return shutdownErr
 }
 
 // ConnCount returns the number of tracked connections.
@@ -163,6 +202,18 @@ func (s *Server) ConnCount() int {
 }
 
 func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
+	var authenticatedBodyID string
+	if s.authenticateExecution != nil {
+		bodyID, err := s.authenticateExecution(r)
+		if err != nil {
+			s.log.Warn("ws execution authentication failed", map[string]any{"error": err.Error(), "remote": r.RemoteAddr})
+		} else if bodyID == "" {
+			s.log.Warn("ws execution authentication returned empty Body identity", map[string]any{"remote": r.RemoteAddr})
+		} else {
+			authenticatedBodyID = bodyID
+		}
+	}
+
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		s.log.Error("ws upgrade failed", map[string]any{"error": err.Error(), "remote": r.RemoteAddr})
@@ -173,12 +224,31 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		id:     fmt.Sprintf("conn-%d", time.Now().UnixNano()),
 		conn:   conn,
 		remote: r.RemoteAddr,
+		done:   make(chan struct{}),
+	}
+	if authenticatedBodyID != "" {
+		cc.bodyID = authenticatedBodyID
+		cc.execution, err = execution.NewClient(authenticatedBodyID, executionSender{cc: cc})
+		if err != nil {
+			conn.Close()
+			s.log.Error("ws execution session setup failed", map[string]any{"error": err.Error(), "remote": r.RemoteAddr})
+			return
+		}
 	}
 
 	s.mu.Lock()
 	s.conns[cc.id] = cc
+	var replaced *clientConn
+	if cc.execution != nil {
+		replaced = s.execution[cc.bodyID]
+		s.execution[cc.bodyID] = cc
+	}
 	count := len(s.conns)
 	s.mu.Unlock()
+	if replaced != nil {
+		replaced.execution.Close(execution.ErrDisconnected)
+		replaced.conn.Close()
+	}
 
 	s.log.Info("ws client connected", map[string]any{
 		"id":     cc.id,
@@ -193,14 +263,21 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 func (s *Server) readLoop(cc *clientConn) {
 	defer func() {
 		cc.conn.Close()
+		if cc.execution != nil {
+			cc.execution.Close(execution.ErrDisconnected)
+		}
 		s.mu.Lock()
 		delete(s.conns, cc.id)
+		if s.execution[cc.bodyID] == cc {
+			delete(s.execution, cc.bodyID)
+		}
 		count := len(s.conns)
 		s.mu.Unlock()
 		s.log.Info("ws client disconnected", map[string]any{
 			"id":    cc.id,
 			"total": count,
 		})
+		close(cc.done)
 	}()
 
 	for {
@@ -210,6 +287,35 @@ func (s *Server) readLoop(cc *clientConn) {
 				s.log.Warn("ws read error", map[string]any{"id": cc.id, "error": err.Error()})
 			}
 			return
+		}
+
+		var envelope struct {
+			Type string `json:"type"`
+		}
+		if err := json.Unmarshal(message, &envelope); err != nil {
+			s.log.Warn("ws invalid message", map[string]any{"id": cc.id, "error": err.Error()})
+			errResp := events.NewErrorResponse("", "", fmt.Sprintf("invalid message: %v", err))
+			s.writeJSON(cc, errResp)
+			continue
+		}
+		if envelope.Type == string(execution.TypeResult) {
+			if cc.execution == nil {
+				s.log.Warn("ws execution result on unauthenticated connection", map[string]any{"id": cc.id})
+				continue
+			}
+			var result execution.Result
+			if err := json.Unmarshal(message, &result); err != nil {
+				s.log.Warn("ws invalid execution result", map[string]any{"id": cc.id, "error": err.Error()})
+				continue
+			}
+			if err := cc.execution.HandleResult(result); err != nil {
+				s.log.Warn("ws rejected execution result", map[string]any{"id": cc.id, "error": err.Error()})
+			}
+			continue
+		}
+		if envelope.Type == string(execution.TypeRequest) {
+			s.log.Warn("ws rejected execution request from Body connection", map[string]any{"id": cc.id})
+			continue
 		}
 
 		// Parse the incoming event.
@@ -251,11 +357,45 @@ func (s *Server) readLoop(cc *clientConn) {
 
 // writeJSON sends a JSON-encoded event to a client connection.
 func (s *Server) writeJSON(cc *clientConn, event events.Event) error {
+	cc.writeMu.Lock()
+	defer cc.writeMu.Unlock()
 	if s.writeJSONFn != nil {
 		return s.writeJSONFn(cc, event)
 	}
+	return writeJSON(cc, event)
+}
+
+func writeJSON(cc *clientConn, value any) error {
 	cc.conn.SetWriteDeadline(time.Now().Add(writeTimeout))
-	return cc.conn.WriteJSON(event)
+	return cc.conn.WriteJSON(value)
+}
+
+type executionSender struct {
+	cc *clientConn
+}
+
+func (sender executionSender) SendExecutionRequest(ctx context.Context, request execution.Request) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+	}
+	sender.cc.writeMu.Lock()
+	defer sender.cc.writeMu.Unlock()
+	return writeJSON(sender.cc, request)
+}
+
+// Execute sends an execution request to the connection authenticated as
+// bodyID. bodyID only selects a session that was established by the configured
+// authentication boundary; it is not accepted as authentication evidence.
+func (s *Server) Execute(ctx context.Context, bodyID, dollID string, payload execution.RequestPayload) (execution.Result, error) {
+	s.mu.Lock()
+	cc := s.execution[bodyID]
+	s.mu.Unlock()
+	if cc == nil || cc.execution == nil {
+		return execution.Result{}, fmt.Errorf("%w for Body %q", ErrNoAuthenticatedSession, bodyID)
+	}
+	return cc.execution.Execute(ctx, dollID, payload)
 }
 
 // SendAction delivers an outbound action to all connected WebSocket clients.
