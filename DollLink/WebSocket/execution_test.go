@@ -169,6 +169,84 @@ func TestExecutionDisconnectReleasesPendingRequest(t *testing.T) {
 	}
 }
 
+func TestExecutionAuthenticatedBodyCannotCompleteAnotherSessionRequest(t *testing.T) {
+	authenticator := func(request *http.Request) (string, error) {
+		switch request.Header.Get(testAuthHeader) {
+		case "token-a":
+			return "body-a", nil
+		case "token-b":
+			return "body-b", nil
+		default:
+			return "", errors.New("test credential missing")
+		}
+	}
+	server, url := startWSTestServer(t, Config{AuthenticateExecution: authenticator}, nil)
+	bodyA := dialTestBody(t, url, "token-a")
+	bodyB := dialTestBody(t, url, "token-b")
+
+	deadline := time.Now().Add(time.Second)
+	for {
+		server.mu.Lock()
+		ready := server.execution["body-a"] != nil && server.execution["body-b"] != nil
+		server.mu.Unlock()
+		if ready {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("authenticated Body sessions were not registered")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	type outcome struct {
+		result execution.Result
+		err    error
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		result, err := server.Execute(context.Background(), "body-b", "doll-1", execution.RequestPayload{
+			ExecutionID: "shared-execution-id", Capability: "test", Operation: "run", Arguments: map[string]any{},
+		})
+		done <- outcome{result: result, err: err}
+	}()
+
+	var request execution.Request
+	if err := bodyB.ReadJSON(&request); err != nil {
+		t.Fatal(err)
+	}
+	forged := execution.Result{
+		Type: execution.TypeResult, ID: "forged", Timestamp: time.Now().UTC(),
+		DollID: request.DollID, BodyID: "body-b", CorrelationID: request.ID,
+		Payload: execution.ResultPayload{
+			ExecutionID: request.Payload.ExecutionID, Status: execution.StatusSuccess,
+			Result: map[string]any{"body": "body-a"},
+		},
+	}
+	if err := bodyA.WriteJSON(forged); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case outcome := <-done:
+		t.Fatalf("Body A completed Body B request: %#v, %v", outcome.result, outcome.err)
+	case <-time.After(20 * time.Millisecond):
+	}
+
+	actual := forged
+	actual.ID = "actual"
+	actual.Payload.Result = map[string]any{"body": "body-b"}
+	if err := bodyB.WriteJSON(actual); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case outcome := <-done:
+		if outcome.err != nil || outcome.result.Payload.Result["body"] != "body-b" {
+			t.Fatalf("Body B result = %#v, %v", outcome.result, outcome.err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("authenticated Body B result did not complete its request")
+	}
+}
+
 func TestUnauthenticatedConnectionCannotExecute(t *testing.T) {
 	server, url := startWSTestServer(t, Config{}, nil)
 	_ = dialTestBody(t, url, "")
