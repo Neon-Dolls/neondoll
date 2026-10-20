@@ -32,6 +32,10 @@ const (
 	// BodyKindLocal identifies the in-process Local Body. Exactly one
 	// exists in every running Core.
 	BodyKindLocal BodyKind = "local"
+
+	// BodyKindRemote identifies a Body reached through an authenticated
+	// Doll Link execution session.
+	BodyKindRemote BodyKind = "remote"
 )
 
 // Sentinel errors for capability resolution.
@@ -116,7 +120,8 @@ type ExecutionRequest struct {
 // ExecutionStatus represents the terminal state of a capability execution.
 // M4 defines the Core 2 terminal outcome vocabulary:
 //
-//	success | denied | unsupported | invalid | unavailable | failed
+//	success | denied | unsupported | invalid | unavailable | failed |
+//	cancelled | expired
 //
 // These outcomes stay distinct. Denial is not failure, an unsupported
 // capability/operation is not failure, an unavailable capability is not
@@ -150,6 +155,13 @@ const (
 	// failed during execution.
 	StatusFailed ExecutionStatus = "failed"
 
+	// StatusCancelled is the terminal outcome when execution was cancelled.
+	StatusCancelled ExecutionStatus = "cancelled"
+
+	// StatusExpired is the terminal outcome when execution exceeded its
+	// deadline or the remote Body reported expiration.
+	StatusExpired ExecutionStatus = "expired"
+
 	// StatusPending and StatusRunning are the pre-terminal M1/M2 lifecycle
 	// states. M4 execution is synchronous from the Core caller's
 	// perspective; these are retained for vocabulary compatibility.
@@ -164,7 +176,8 @@ const (
 // ExecutionResult represents the outcome of a capability execution.
 // It carries the execution ID of the request it answers and a terminal
 // status from the M4 outcome vocabulary:
-// success | denied | unsupported | invalid | unavailable | failed.
+// success | denied | unsupported | invalid | unavailable | failed |
+// cancelled | expired.
 type ExecutionResult struct {
 	// ExecutionID correlates this result with the request that produced it.
 	ExecutionID string `json:"execution_id"`
