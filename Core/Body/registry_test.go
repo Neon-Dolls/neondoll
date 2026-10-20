@@ -3,6 +3,7 @@ package body
 import (
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -62,6 +63,39 @@ func TestRegistry_RegisterAddsBody(t *testing.T) {
 	}
 	if b.Name() != "test" {
 		t.Errorf("expected name 'test', got %q", b.Name())
+	}
+}
+
+func TestRegistry_ConcurrentRegistrationAndLookup(t *testing.T) {
+	r := NewRegistry()
+	const bodyCount = 64
+	errs := make(chan error, bodyCount)
+	var wg sync.WaitGroup
+	for i := 0; i < bodyCount; i++ {
+		id := BodyID(fmt.Sprintf("remote::concurrent-%d", i))
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			if err := r.Register(NewCustomBody(id, BodyKindRemote, string(id))); err != nil {
+				errs <- err
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 10; j++ {
+				_, _ = r.Get(id)
+				_ = r.All()
+				_ = r.Count()
+			}
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Fatal(err)
+	}
+	if r.Count() != bodyCount+1 {
+		t.Fatalf("registry count = %d, want %d", r.Count(), bodyCount+1)
 	}
 }
 
