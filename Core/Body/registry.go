@@ -1,6 +1,9 @@
 package body
 
-import "fmt"
+import (
+	"fmt"
+	"sync"
+)
 
 // Registry holds all registered Bodies for a running Core. In Core 2 M1,
 // exactly one mandatory Local Body is always present — the Registry enforces
@@ -11,6 +14,7 @@ import "fmt"
 // in M1 it exists solely to prove that Core startup produces exactly
 // one Local Body with a stable identity.
 type Registry struct {
+	mu     sync.RWMutex
 	bodies map[BodyID]Body
 }
 
@@ -34,16 +38,21 @@ func NewRegistry() *Registry {
 // (LocalBodyID) is always protected: any attempt to register another
 // Body with its ID is rejected.
 func (r *Registry) Register(b Body) error {
-	if _, exists := r.bodies[b.ID()]; exists {
-		return fmt.Errorf("body %q already registered", b.ID())
+	id := b.ID()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, exists := r.bodies[id]; exists {
+		return fmt.Errorf("body %q already registered", id)
 	}
-	r.bodies[b.ID()] = b
+	r.bodies[id] = b
 	return nil
 }
 
 // Get retrieves a Body by its stable identity. Returns false if no
 // Body with that ID is registered.
 func (r *Registry) Get(id BodyID) (Body, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	b, ok := r.bodies[id]
 	return b, ok
 }
@@ -56,6 +65,8 @@ func (r *Registry) Local() (Body, bool) {
 
 // All returns all registered Bodies. The order is non-deterministic.
 func (r *Registry) All() []Body {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	bodies := make([]Body, 0, len(r.bodies))
 	for _, b := range r.bodies {
 		bodies = append(bodies, b)
@@ -65,13 +76,15 @@ func (r *Registry) All() []Body {
 
 // Count returns the number of registered Bodies.
 func (r *Registry) Count() int {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	return len(r.bodies)
 }
 
 // GetCapabilities returns the capabilities declared by the Body with the
 // given ID. Returns an error if no Body with that ID is registered.
 func (r *Registry) GetCapabilities(id BodyID) ([]Capability, error) {
-	b, ok := r.bodies[id]
+	b, ok := r.Get(id)
 	if !ok {
 		return nil, fmt.Errorf("body %q not found", id)
 	}
@@ -88,7 +101,7 @@ func (r *Registry) GetCapabilities(id BodyID) ([]Capability, error) {
 //   - ErrUnsupportedOperation if the capability exists but operation is not declared
 //   - ErrUnavailable if the capability and operation are known but not available
 func (r *Registry) ResolveCapability(bodyID BodyID, capID string, operation string) error {
-	b, ok := r.bodies[bodyID]
+	b, ok := r.Get(bodyID)
 	if !ok {
 		return fmt.Errorf("body %q not found", bodyID)
 	}
@@ -99,7 +112,7 @@ func (r *Registry) ResolveCapability(bodyID BodyID, capID string, operation stri
 // enforcing the M2 registry invariants. Delegates to the Body's own
 // RegisterCapability method.
 func (r *Registry) RegisterCapability(bodyID BodyID, cap Capability) error {
-	b, ok := r.bodies[bodyID]
+	b, ok := r.Get(bodyID)
 	if !ok {
 		return fmt.Errorf("body %q not found", bodyID)
 	}
@@ -110,8 +123,15 @@ func (r *Registry) RegisterCapability(bodyID BodyID, cap Capability) error {
 // grouped by BodyID. A Body with no capabilities contributes an entry
 // with an empty slice.
 func (r *Registry) AllCapabilities() map[BodyID][]Capability {
-	result := make(map[BodyID][]Capability, len(r.bodies))
+	r.mu.RLock()
+	bodies := make(map[BodyID]Body, len(r.bodies))
 	for id, b := range r.bodies {
+		bodies[id] = b
+	}
+	r.mu.RUnlock()
+
+	result := make(map[BodyID][]Capability, len(bodies))
+	for id, b := range bodies {
 		result[id] = b.Describe()
 	}
 	return result

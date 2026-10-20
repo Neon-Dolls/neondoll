@@ -20,30 +20,30 @@ import (
 // the probe endpoint — although the probe port is dedicated, the magic
 // provides an additional guard against stray datagrams.
 const (
-	ProbeMagicReq  = "NLPR"           // Non-Disruptive Path Probe Request
-	ProbeMagicResp = "NLPS"           // Non-Disruptive Path Probe Response
-	ProbeNonceSize = 8               // bytes
-	ProbeHMACSize  = 32              // HMAC-SHA256
-	ProbeDatagramSize = 4 +          // magic
-		8 +          // route ID
+	ProbeMagicReq     = "NLPR" // Non-Disruptive Path Probe Request
+	ProbeMagicResp    = "NLPS" // Non-Disruptive Path Probe Response
+	ProbeNonceSize    = 8      // bytes
+	ProbeHMACSize     = 32     // HMAC-SHA256
+	ProbeDatagramSize = 4 +    // magic
+		8 + // route ID
 		ProbeNonceSize + // nonce
-		ProbeHMACSize  // HMAC
+		ProbeHMACSize // HMAC
 )
 
 // ProbeDatagramSize == 52 bytes total.
 
 // Defaults for ProbeListenerConfig.
 const (
-	DefaultProbePort    = 0 // dynamically allocated if 0
+	DefaultProbePort                = 0     // dynamically allocated if 0
 	DefaultProbeRateLim             = 100   // probes/second per source IP
 	DefaultProbeRateLimitMaxEntries = 10000 // hard cap on tracked source IPs
-	DefaultProbeTimeout = 5 * time.Second
+	DefaultProbeTimeout             = 5 * time.Second
 )
 
 // ProbeListenerConfig configures a relay's probe listener.
 type ProbeListenerConfig struct {
-	Enabled  bool // set to true to start the probe listener
-	Port     int  // 0 = pick ephemeral port
+	Enabled bool // set to true to start the probe listener
+	Port    int  // 0 = pick ephemeral port
 
 	// RateLimit is the max probes/second from a single source IP; 0 = default
 	// (DefaultProbeRateLim).
@@ -83,6 +83,7 @@ type ProbeListener struct {
 
 	mu        sync.Mutex
 	rateLimit map[string]time.Time // IP → last probe time
+	now       func() time.Time
 
 	stopped atomic.Bool
 	doneCh  chan struct{}
@@ -96,6 +97,7 @@ func NewProbeListener(cfg ProbeListenerConfig, reg *Registry, log *slog.Logger) 
 		reg:       reg,
 		log:       log.With("component", "probe-listener"),
 		rateLimit: make(map[string]time.Time),
+		now:       time.Now,
 		doneCh:    make(chan struct{}),
 	}
 }
@@ -186,7 +188,7 @@ func (pl *ProbeListener) runLoop() {
 func (pl *ProbeListener) pruneRateLimit() {
 	pl.mu.Lock()
 	defer pl.mu.Unlock()
-	limit := time.Now().Add(-10 * time.Minute)
+	limit := pl.now().Add(-10 * time.Minute)
 	for ip, t := range pl.rateLimit {
 		if t.Before(limit) {
 			delete(pl.rateLimit, ip)
@@ -207,7 +209,7 @@ func (pl *ProbeListener) allowProbe(srcIP string) bool {
 	}
 
 	last, ok := pl.rateLimit[srcIP]
-	now := time.Now()
+	now := pl.now()
 	if ok && now.Sub(last) < time.Second/time.Duration(pl.config.RateLimit) {
 		return false
 	}

@@ -205,6 +205,8 @@ func TestProbeListenerRateLimitMapBound(t *testing.T) {
 	}
 	cfg.ApplyDefaults()
 	pl := NewProbeListener(cfg, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	now := time.Unix(1_000_000, 0)
+	pl.now = func() time.Time { return now }
 
 	// First 3 unique IPs should be allowed.
 	for i := 0; i < 3; i++ {
@@ -218,8 +220,17 @@ func TestProbeListenerRateLimitMapBound(t *testing.T) {
 	if pl.allowProbe(net.IP{10, 0, 0, 4}.String()) {
 		t.Fatal("4th unique IP should be rejected when map is at capacity")
 	}
+	if got := len(pl.rateLimit); got != cfg.RateLimitMaxEntries {
+		t.Fatalf("rate-limit map size = %d, want hard bound %d", got, cfg.RateLimitMaxEntries)
+	}
 
-	// Existing IP should still be allowed.
+	// Capacity must not bypass the independent per-IP rate limit.
+	if pl.allowProbe(net.IP{10, 0, 0, 1}.String()) {
+		t.Fatal("Existing IP should remain rate limited at capacity")
+	}
+	// Once its rate-limit interval has elapsed, an existing entry is allowed
+	// without consuming another map slot.
+	now = now.Add(time.Second / time.Duration(cfg.RateLimit))
 	if !pl.allowProbe(net.IP{10, 0, 0, 1}.String()) {
 		t.Fatal("Existing IP should be allowed even at capacity")
 	}
