@@ -4,20 +4,26 @@ package integration
 
 import (
 	"context"
+	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/netip"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/Neon-Dolls/neondoll/Body"
+	corebody "github.com/Neon-Dolls/neondoll/Core/Body"
 	"github.com/Neon-Dolls/neondoll/Core/Invitation"
 	"github.com/Neon-Dolls/neondoll/Core/Network"
 	"github.com/Neon-Dolls/neondoll/Core/Pairing"
 	"github.com/Neon-Dolls/neondoll/Core/Persistence"
 	runtime "github.com/Neon-Dolls/neondoll/Core/Runtime"
+	"github.com/Neon-Dolls/neondoll/DollLink/Execution"
+	ws "github.com/Neon-Dolls/neondoll/DollLink/WebSocket"
 	dollnetwork "github.com/Neon-Dolls/neondoll/DollNetwork"
 )
 
@@ -33,7 +39,7 @@ import (
 //  3. Core reconstruction from durable SQL  (Runtime.Reconstruct)
 //  4. fresh WG handshake                    (IpcGet timestamp advances)
 //  5. overlay connectivity                  (TCP echo via Netstack)
-//  6. Doll Link round-trip                  (WS over overlay)
+//  6. authorized remote execution           (Guard through Body dispatcher)
 func TestM74BodyReconnectAfterCoreReconstruction(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
@@ -208,6 +214,12 @@ func TestM74BodyReconnectAfterCoreReconstruction(t *testing.T) {
 		t.Fatalf("WaitHandshake (initial): %v", err)
 	}
 	t.Log("Initial WireGuard handshake established")
+	// Drive endpoint rediscovery from authenticated Body traffic rather than
+	// waiting on the production 25-second keepalive boundary. This changes no
+	// identity or endpoint and makes reconstruction recovery deterministic.
+	if err := bTun.IpcSet(fmt.Sprintf("public_key=%s\npersistent_keepalive_interval=1\n", hex.EncodeToString(corePub[:]))); err != nil {
+		t.Fatalf("set migration-test keepalive: %v", err)
+	}
 
 	// Capture the handshake timestamp FOR the initial tunnel
 	ipcOut, ipcErr := bTun.IpcGet()
@@ -229,11 +241,84 @@ func TestM74BodyReconnectAfterCoreReconstruction(t *testing.T) {
 		m1Net.Core.OverlayAddress, "initial-connectivity",
 	)
 
+	// Prove the complete authorized execution path before migration. The
+	// explicit credential callback is a trusted test fixture; membership is
+	// verified independently and is never used as authentication evidence.
+	blockStarted := make(chan struct{})
+	blockCancelled := make(chan struct{})
+	var blockStartOnce sync.Once
+	var blockCancelOnce sync.Once
+	dispatcher, err := execution.NewDispatcher(string(bID.Identity.BodyID), execution.LocalPermissionFunc(
+		func(context.Context, execution.Request) bool { return true },
+	), execution.CapabilityExecutorFunc(func(capCtx context.Context, capability, operation string, arguments map[string]any) (map[string]any, error) {
+		if capability != "test.echo" {
+			return nil, execution.ErrUnsupported
+		}
+		if operation == "block" {
+			blockStartOnce.Do(func() { close(blockStarted) })
+			<-capCtx.Done()
+			blockCancelOnce.Do(func() { close(blockCancelled) })
+			return nil, capCtx.Err()
+		}
+		return map[string]any{"message": arguments["message"]}, nil
+	}))
+	if err != nil {
+		t.Fatalf("execution dispatcher: %v", err)
+	}
+	link1 := startM7ExecutionLink(t, rt1.Tunnel().Netstack(), bTun.Netstack(), m1Net.Core.OverlayAddress, string(bID.Identity.BodyID), dispatcher, log)
+	link1Running := true
+	defer func() {
+		if link1Running {
+			_ = link1.stop(5 * time.Second)
+		}
+	}()
+	guard1 := newM7RemoteGuard(t, string(bID.Identity.BodyID), link1.server)
+	initialExecution := guard1.ExecuteContext(ctx, m7ExecutionRequest(string(bID.Identity.BodyID), "m7-before-migration", "run"))
+	if initialExecution.Status != corebody.StatusSuccess || initialExecution.ExecutionID != "m7-before-migration" || initialExecution.Output != `{"message":"migration-ok"}` {
+		t.Fatalf("initial remote execution = %#v", initialExecution)
+	}
+	t.Log("Initial authorized remote execution succeeded")
+
 	// ─────────────────────────────────────────────────────────────────────
 	// Phase 5 — Destroy the Core runtime
 	// ─────────────────────────────────────────────────────────────────────
 
+	// Leave one execution pending while Core A shuts down. Its stale session
+	// must release the Core waiter and cancel Body-side work.
+	pendingResult := make(chan corebody.ExecutionResult, 1)
+	go func() {
+		pendingResult <- guard1.ExecuteContext(context.Background(), m7ExecutionRequest(string(bID.Identity.BodyID), "m7-stale-pending", "block"))
+	}()
+	select {
+	case <-blockStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("pending Body execution did not start")
+	}
+
 	t.Log("Destroying Core runtime ...")
+	if err := link1.stop(5 * time.Second); err != nil {
+		t.Fatalf("Core A Doll Link shutdown: %v", err)
+	}
+	link1Running = false
+	select {
+	case result := <-pendingResult:
+		if result.Status != corebody.StatusFailed || result.ExecutionID != "m7-stale-pending" {
+			t.Fatalf("stale pending execution = %#v", result)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Core A shutdown did not release pending execution")
+	}
+	select {
+	case <-blockCancelled:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Core A shutdown did not cancel Body-side execution")
+	}
+	_, staleErr := link1.server.Execute(ctx, string(bID.Identity.BodyID), "doll-m7", execution.RequestPayload{
+		ExecutionID: "stale-session", Capability: "test.echo", Operation: "run", Arguments: map[string]any{},
+	})
+	if !errors.Is(staleErr, ws.ErrNoAuthenticatedSession) {
+		t.Fatalf("stale Core A session remained eligible: %v", staleErr)
+	}
 	if err := rt1.Stop(); err != nil {
 		t.Fatalf("Runtime stop: %v", err)
 	}
@@ -259,6 +344,21 @@ func TestM74BodyReconnectAfterCoreReconstruction(t *testing.T) {
 		reconNet.NetworkID, reconNet.Core.PeerID,
 		reconNet.Core.OverlayAddress,
 	)
+	if reconNet.NetworkID != m1Net.NetworkID || reconNet.Core.PeerID != m1Net.Core.PeerID || reconNet.Core.PublicKey != m1Net.Core.PublicKey {
+		t.Fatal("reconstructed Core identity differs from persisted Core A identity")
+	}
+	reconMembership := reconNet.GetMembership(bodyMembership.PeerID)
+	if reconMembership == nil {
+		t.Fatalf("reconstructed membership %q missing", bodyMembership.PeerID)
+	}
+	keysMatch := reconMembership.WireGuardPublicKey != nil && bodyMembership.WireGuardPublicKey != nil &&
+		*reconMembership.WireGuardPublicKey == *bodyMembership.WireGuardPublicKey
+	if reconMembership.BodyID != bodyMembership.BodyID || reconMembership.Status != network.MembershipActive || !keysMatch {
+		t.Fatalf("reconstructed membership differs: got %#v, want identity/status/key from %#v", reconMembership, bodyMembership)
+	}
+	if reconMembership.Endpoint != "" {
+		t.Fatalf("reconstructed membership retained stale endpoint %q", reconMembership.Endpoint)
+	}
 
 	rt2, err := runtime.Reconstruct(
 		ctx, reconNet, ns, log,
@@ -318,11 +418,24 @@ func TestM74BodyReconnectAfterCoreReconstruction(t *testing.T) {
 	)
 
 	// ─────────────────────────────────────────────────────────────────────
-	// Phase 9 — Prove Doll Link (WebSocket round-trip over overlay)
+	// Phase 9 — Reconnect Doll Link and execute through the reconstructed Core
 	// ─────────────────────────────────────────────────────────────────────
 
-	proveWSOverlay(t, ctx, rt2.Tunnel().Netstack(), bTun.Netstack(),
-		reconNet.Core.OverlayAddress, log)
+	link2 := startM7ExecutionLink(t, rt2.Tunnel().Netstack(), bTun.Netstack(), reconNet.Core.OverlayAddress, string(bID.Identity.BodyID), dispatcher, log)
+	defer func() {
+		if err := link2.stop(5 * time.Second); err != nil {
+			t.Errorf("Core B Doll Link shutdown: %v", err)
+		}
+	}()
+	guard2 := newM7RemoteGuard(t, string(bID.Identity.BodyID), link2.server)
+	migratedExecution := guard2.ExecuteContext(ctx, m7ExecutionRequest(string(bID.Identity.BodyID), "m7-after-migration", "run"))
+	if migratedExecution.Status != corebody.StatusSuccess || migratedExecution.ExecutionID != "m7-after-migration" || migratedExecution.Output != `{"message":"migration-ok"}` {
+		t.Fatalf("post-migration remote execution = %#v", migratedExecution)
+	}
+	if link1.server.ConnCount() != 0 {
+		t.Fatalf("Core A retained %d stale Doll Link connections", link1.server.ConnCount())
+	}
+	t.Log("Body reconnected without re-pairing and authorized remote execution succeeded")
 
-	t.Log("PASS: M7.4 — Body reconnection after Core reconstruction verified")
+	t.Log("PASS: M7 — Body reconnection and remote execution after Core migration verified")
 }
