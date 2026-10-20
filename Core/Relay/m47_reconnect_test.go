@@ -131,7 +131,6 @@ func TestM47_TunnelReconnect(t *testing.T) {
 	}
 	defer client.Shutdown()
 
-	waitConnected(t, client, "initial")
 	relayIDBefore := client.RelayID()
 	if relayIDBefore == "" {
 		t.Fatal("identity not captured: RelayID empty after registration")
@@ -147,8 +146,11 @@ func TestM47_TunnelReconnect(t *testing.T) {
 		t.Fatalf("OpenRoute before interruption: %v", err)
 	}
 
-	// The watchdog must reconnect and restore the route.
-	waitConnected(t, client, "reconnected")
+	// Route restoration is the completion boundary for this reconnect. A
+	// registered replacement socket becomes connected before its routes have
+	// finished restoring, so waiting on IsConnected alone can observe an
+	// intermediate state.
+	waitForRestore(t, client, 1)
 
 	metrics := client.Metrics()
 	t.Logf("after reconnect: reconnects=%d routesRestored=%d frameErrors=%d",
@@ -242,8 +244,6 @@ func TestM47_TunnelReconnect_IdentityPersistsAcrossCycles(t *testing.T) {
 	}
 	defer client.Shutdown()
 
-	waitConnected(t, client, "cycle-0")
-
 	snap := identitySnapshot{RelayID: client.RelayID()}
 	if snap.RelayID == "" {
 		t.Fatal("identity not captured: RelayID empty")
@@ -259,7 +259,7 @@ func TestM47_TunnelReconnect_IdentityPersistsAcrossCycles(t *testing.T) {
 		t.Fatalf("OpenRoute before drop: %v", err)
 	}
 
-	waitConnected(t, client, "cycle-reconnect")
+	waitForRestore(t, client, 1)
 
 	if got := client.RelayID(); got != snap.RelayID {
 		t.Fatalf("identity changed after reconnect: got %q want %q", got, snap.RelayID)
