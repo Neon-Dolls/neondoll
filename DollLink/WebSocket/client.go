@@ -18,6 +18,7 @@ import (
 // connection; configuring a handler does not authenticate that connection.
 type ExecutionRequestHandler interface {
 	HandleExecutionRequest(context.Context, execution.Request) (execution.Result, error)
+	UnavailableExecutionResult(execution.Request) (execution.Result, error)
 }
 
 // EventReceiver observes non-execution Doll Link events delivered to a Body.
@@ -39,7 +40,16 @@ type ClientConfig struct {
 	// execution requests are never dispatched.
 	AuthenticatedExecutionHandler ExecutionRequestHandler
 	EventReceiver                 EventReceiver
+
+	// MaxConcurrentExecutions bounds in-flight Body capability invocations.
+	// Additional correlatable requests receive an immediate unavailable result.
+	// Values less than one use DefaultMaxConcurrentExecutions.
+	MaxConcurrentExecutions int
 }
+
+// DefaultMaxConcurrentExecutions bounds Body-side capability work when the
+// caller does not provide a limit.
+const DefaultMaxConcurrentExecutions = 16
 
 // Client owns the single read loop and all serialized writes for one
 // Body-side Doll Link WebSocket connection.
@@ -48,6 +58,7 @@ type Client struct {
 	log       Logger
 	execution ExecutionRequestHandler
 	events    EventReceiver
+	slots     chan struct{}
 
 	writeMu sync.Mutex
 	runMu   sync.Mutex
@@ -62,11 +73,16 @@ func NewClient(conn *websocket.Conn, cfg ClientConfig, log Logger) (*Client, err
 	if conn == nil {
 		return nil, fmt.Errorf("ws: Body client connection is required")
 	}
+	maxConcurrent := cfg.MaxConcurrentExecutions
+	if maxConcurrent < 1 {
+		maxConcurrent = DefaultMaxConcurrentExecutions
+	}
 	return &Client{
 		conn:      conn,
 		log:       log,
 		execution: cfg.AuthenticatedExecutionHandler,
 		events:    cfg.EventReceiver,
+		slots:     make(chan struct{}, maxConcurrent),
 		done:      make(chan struct{}),
 	}, nil
 }
@@ -142,8 +158,20 @@ func (c *Client) readLoop(ctx context.Context) error {
 				c.warn("ws Body client invalid execution request", err)
 				continue
 			}
-			c.workers.Add(1)
-			go c.handleExecution(ctx, request)
+			select {
+			case c.slots <- struct{}{}:
+				c.workers.Add(1)
+				go c.handleExecution(ctx, request)
+			default:
+				result, err := c.execution.UnavailableExecutionResult(request)
+				if err != nil {
+					c.warn("ws Body client could not correlate saturated execution request", err)
+					continue
+				}
+				if err := c.write(ctx, result); err != nil {
+					c.warn("ws Body client unavailable result write failed", err)
+				}
+			}
 		case string(execution.TypeResult):
 			c.warn("ws Body client rejected execution result from Core connection", nil)
 		default:
@@ -164,6 +192,7 @@ func (c *Client) readLoop(ctx context.Context) error {
 
 func (c *Client) handleExecution(ctx context.Context, request execution.Request) {
 	defer c.workers.Done()
+	defer func() { <-c.slots }()
 	result, err := c.execution.HandleExecutionRequest(ctx, request)
 	if err != nil {
 		c.warn("ws Body client execution request rejected", err)

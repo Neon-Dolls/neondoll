@@ -14,9 +14,13 @@ import (
 )
 
 func startBodyExecutionClient(t *testing.T, url string, dispatcher *execution.Dispatcher, receiver EventReceiver) (*Client, context.CancelFunc) {
+	return startBodyExecutionClientWithLimit(t, url, dispatcher, receiver, 0)
+}
+
+func startBodyExecutionClientWithLimit(t *testing.T, url string, dispatcher *execution.Dispatcher, receiver EventReceiver, maxConcurrent int) (*Client, context.CancelFunc) {
 	t.Helper()
 	conn := dialTestBody(t, url, "fixture-token")
-	config := ClientConfig{EventReceiver: receiver}
+	config := ClientConfig{EventReceiver: receiver, MaxConcurrentExecutions: maxConcurrent}
 	if dispatcher != nil {
 		config.AuthenticatedExecutionHandler = dispatcher
 	}
@@ -37,6 +41,71 @@ func startBodyExecutionClient(t *testing.T, url string, dispatcher *execution.Di
 		}
 	})
 	return client, cancel
+}
+
+func TestBodyExecutionSaturationReturnsUnavailableWithoutQueuing(t *testing.T) {
+	server, url := startWSTestServer(t, Config{AuthenticateExecution: trustedTestAuthenticator}, nil)
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var invoked atomic.Int32
+	dispatcher, err := execution.NewDispatcher("body-1", allowAllLocalExecution(), execution.CapabilityExecutorFunc(
+		func(ctx context.Context, _, _ string, _ map[string]any) (map[string]any, error) {
+			invoked.Add(1)
+			close(started)
+			select {
+			case <-release:
+				return map[string]any{"done": true}, nil
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		},
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	startBodyExecutionClientWithLimit(t, url, dispatcher, nil, 1)
+	waitForConnection(t, server, true)
+
+	firstDone := make(chan error, 1)
+	go func() {
+		_, err := server.Execute(context.Background(), "body-1", "", execution.RequestPayload{
+			ExecutionID: "first", Capability: "test", Operation: "run", Arguments: map[string]any{},
+		})
+		firstDone <- err
+	}()
+	<-started
+
+	secondDone := make(chan struct {
+		result execution.Result
+		err    error
+	}, 1)
+	go func() {
+		result, err := server.Execute(context.Background(), "body-1", "", execution.RequestPayload{
+			ExecutionID: "second", Capability: "test", Operation: "run", Arguments: map[string]any{},
+		})
+		secondDone <- struct {
+			result execution.Result
+			err    error
+		}{result, err}
+	}()
+	select {
+	case second := <-secondDone:
+		if second.err != nil {
+			t.Fatal(second.err)
+		}
+		if second.result.Payload.ExecutionID != "second" || second.result.Payload.Status != execution.StatusUnavailable {
+			t.Fatalf("saturation result = %#v", second.result)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("saturated request queued instead of returning unavailable")
+	}
+	if invoked.Load() != 1 {
+		t.Fatalf("capability invoked %d times, want 1", invoked.Load())
+	}
+	close(release)
+	if err := <-firstDone; err != nil {
+		t.Fatal(err)
+	}
 }
 
 func allowAllLocalExecution() execution.LocalPermission {

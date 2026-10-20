@@ -55,6 +55,19 @@ type Dispatcher struct {
 	executor   CapabilityExecutor
 }
 
+// UnavailableExecutionResult builds a correlated saturation response without
+// running permission checks or invoking the capability. Requests that cannot
+// be safely correlated, or that target another Body, are rejected.
+func (d *Dispatcher) UnavailableExecutionResult(request Request) (Result, error) {
+	if request.ID == "" || request.BodyID == "" || request.Payload.ExecutionID == "" {
+		return Result{}, fmt.Errorf("execution: cannot correlate malformed request")
+	}
+	if request.BodyID != d.bodyID {
+		return Result{}, fmt.Errorf("execution: request Body %q does not match local Body %q", request.BodyID, d.bodyID)
+	}
+	return d.result(request, StatusUnavailable, nil), nil
+}
+
 // NewDispatcher binds a dispatcher to the stable local Body identity.
 func NewDispatcher(bodyID string, permission LocalPermission, executor CapabilityExecutor) (*Dispatcher, error) {
 	if bodyID == "" {
