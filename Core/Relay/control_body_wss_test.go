@@ -595,6 +595,7 @@ func TestBodyAttach_Replacement(t *testing.T) {
 	if _, ok := resp1.(*BodyAttached); !ok {
 		t.Fatalf("first attach response not BodyAttached")
 	}
+	defer bodyWS1.Close()
 
 	// Second Body attaches with same credential — replaces first
 	bodyWS2, resp2, err := makeBodyWS(addr, RouteID(1), "test-cred")
@@ -604,8 +605,7 @@ func TestBodyAttach_Replacement(t *testing.T) {
 	if _, ok := resp2.(*BodyAttached); !ok {
 		t.Fatalf("second attach response not BodyAttached")
 	}
-
-	time.Sleep(300 * time.Millisecond)
+	defer bodyWS2.Close()
 
 	// New attachment exists
 	cs.mu.RLock()
@@ -616,12 +616,12 @@ func TestBodyAttach_Replacement(t *testing.T) {
 	}
 
 	// Old body WS should be closed (read returns error)
+	_ = bodyWS1.SetReadDeadline(time.Now().Add(time.Second))
 	_, _, readErr := bodyWS1.ReadMessage()
 	if readErr == nil {
 		t.Error("old body WS not closed after replacement")
 	}
 
-	_ = bodyWS2
 }
 
 // TestBodyAttach_ReconnectRequiresAuth proves that reconnecting after
