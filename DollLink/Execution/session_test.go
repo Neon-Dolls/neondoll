@@ -110,6 +110,26 @@ func TestClientRejectsMismatchedResultsWithoutConsumingRequest(t *testing.T) {
 	}
 }
 
+func TestClientRejectsReplayedResult(t *testing.T) {
+	client, recorder := newTestClient(t)
+	done := make(chan error, 1)
+	go func() {
+		_, err := client.Execute(context.Background(), "doll-1", testPayload("exec-replay"))
+		done <- err
+	}()
+	request := <-recorder.requests
+	result := resultFor(request)
+	if err := client.HandleResult(result); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if err := client.HandleResult(result); err == nil {
+		t.Fatal("replayed terminal result was accepted")
+	}
+}
+
 func TestClientCancellationTimeoutAndDisconnectCleanup(t *testing.T) {
 	client, recorder := newTestClient(t)
 
