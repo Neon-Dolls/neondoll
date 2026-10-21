@@ -56,6 +56,7 @@ const writeTimeout = 10 * time.Second
 // Server is a WebSocket transport for Doll Link.
 type Server struct {
 	mu                    sync.Mutex
+	activationMu          sync.Mutex
 	conns                 map[string]*clientConn
 	execution             map[string]*clientConn
 	log                   Logger
@@ -253,6 +254,11 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		done:   make(chan struct{}),
 	}
 	if authenticatedBodyID != "" {
+		// Keep lifecycle generation changes and transport ownership changes in
+		// one activation critical section. Execute takes the same lock while
+		// selecting a session, so it can never observe a newly registered
+		// generation with the previous generation's transport.
+		s.activationMu.Lock()
 		s.mu.Lock()
 		lifecycle := s.executionLifecycle
 		s.mu.Unlock()
@@ -266,26 +272,41 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 			cc.bodyID = authenticatedBodyID
 			cc.execution, err = execution.NewClient(authenticatedBodyID, executionSender{cc: cc})
 			if err != nil {
+				s.activationMu.Unlock()
 				conn.Close()
 				s.log.Error("ws execution session setup failed", map[string]any{"error": err.Error(), "remote": r.RemoteAddr})
 				return
 			}
 		}
+
+		s.mu.Lock()
+		s.conns[cc.id] = cc
+		var replaced *clientConn
+		if cc.execution != nil {
+			replaced = s.execution[cc.bodyID]
+			s.execution[cc.bodyID] = cc
+		}
+		count := len(s.conns)
+		s.mu.Unlock()
+		s.activationMu.Unlock()
+		if replaced != nil {
+			replaced.execution.Close(execution.ErrDisconnected)
+			replaced.conn.Close()
+		}
+
+		s.log.Info("ws client connected", map[string]any{
+			"id":     cc.id,
+			"remote": cc.remote,
+			"total":  count,
+		})
+		s.readLoop(cc)
+		return
 	}
 
 	s.mu.Lock()
 	s.conns[cc.id] = cc
-	var replaced *clientConn
-	if cc.execution != nil {
-		replaced = s.execution[cc.bodyID]
-		s.execution[cc.bodyID] = cc
-	}
 	count := len(s.conns)
 	s.mu.Unlock()
-	if replaced != nil {
-		replaced.execution.Close(execution.ErrDisconnected)
-		replaced.conn.Close()
-	}
 
 	s.log.Info("ws client connected", map[string]any{
 		"id":     cc.id,
@@ -456,9 +477,11 @@ func (sender executionSender) SendExecutionRequest(ctx context.Context, request 
 // bodyID. bodyID only selects a session that was established by the configured
 // authentication boundary; it is not accepted as authentication evidence.
 func (s *Server) Execute(ctx context.Context, bodyID, dollID string, payload execution.RequestPayload) (execution.Result, error) {
+	s.activationMu.Lock()
 	s.mu.Lock()
 	cc := s.execution[bodyID]
 	s.mu.Unlock()
+	s.activationMu.Unlock()
 	if cc == nil || cc.execution == nil {
 		return execution.Result{}, fmt.Errorf("%w for Body %q", ErrNoAuthenticatedSession, bodyID)
 	}

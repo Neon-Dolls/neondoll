@@ -5,15 +5,71 @@ import (
 	"errors"
 	"net"
 	"net/http"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/gorilla/websocket"
 
 	"github.com/Neon-Dolls/neondoll/DollLink/Actions"
+	"github.com/Neon-Dolls/neondoll/DollLink/Capabilities"
 	"github.com/Neon-Dolls/neondoll/DollLink/Events"
 	"github.com/Neon-Dolls/neondoll/DollLink/Execution"
 )
+
+type activationAdvertisement struct {
+	sessionID string
+	accepted  bool
+}
+
+type blockingActivationLifecycle struct {
+	mu            sync.Mutex
+	connections   int
+	current       string
+	secondEntered chan struct{}
+	releaseSecond chan struct{}
+	advertised    chan activationAdvertisement
+}
+
+func newBlockingActivationLifecycle() *blockingActivationLifecycle {
+	return &blockingActivationLifecycle{
+		secondEntered: make(chan struct{}),
+		releaseSecond: make(chan struct{}),
+		advertised:    make(chan activationAdvertisement, 2),
+	}
+}
+
+func (l *blockingActivationLifecycle) SessionConnected(_ context.Context, sessionID, _ string) error {
+	l.mu.Lock()
+	l.connections++
+	connection := l.connections
+	l.current = sessionID
+	l.mu.Unlock()
+	if connection == 2 {
+		close(l.secondEntered)
+		<-l.releaseSecond
+	}
+	return nil
+}
+
+func (l *blockingActivationLifecycle) CapabilitiesAdvertised(_ context.Context, sessionID, _ string, _ []capabilities.Capability) error {
+	l.mu.Lock()
+	accepted := l.current == sessionID
+	l.mu.Unlock()
+	l.advertised <- activationAdvertisement{sessionID: sessionID, accepted: accepted}
+	if !accepted {
+		return errors.New("stale session")
+	}
+	return nil
+}
+
+func (l *blockingActivationLifecycle) SessionDisconnected(sessionID, _ string) {
+	l.mu.Lock()
+	if l.current == sessionID {
+		l.current = ""
+	}
+	l.mu.Unlock()
+}
 
 const testAuthHeader = "X-Neondoll-Test-Credential"
 
@@ -135,6 +191,118 @@ func TestExecutionRoundTripOverRealWebSocket(t *testing.T) {
 	}
 	if err := <-bodyDone; err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestConnectionActivationKeepsRegistrarAndExecutionGenerationOrdered(t *testing.T) {
+	lifecycle := newBlockingActivationLifecycle()
+	server, url := startWSTestServer(t, Config{
+		AuthenticateExecution:     trustedTestAuthenticator,
+		ExecutionSessionLifecycle: lifecycle,
+	}, nil)
+	first := dialTestBody(t, url, "fixture-token")
+	waitForConnection(t, server, true)
+
+	second := dialTestBody(t, url, "fixture-token")
+	select {
+	case <-lifecycle.secondEntered:
+	case <-time.After(time.Second):
+		t.Fatal("replacement activation did not reach lifecycle barrier")
+	}
+
+	// The lifecycle has made the replacement generation current, but its
+	// transport is deliberately not installed yet. The previous generation
+	// must already be stale for capability updates.
+	staleAdvertisement := capabilities.NewAdvertisement("body-1", []capabilities.Capability{{
+		ID: "stale", Operations: []string{"run"}, Available: true,
+	}})
+	if err := first.WriteJSON(staleAdvertisement); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case advertised := <-lifecycle.advertised:
+		if advertised.accepted {
+			t.Fatal("previous generation capability advertisement was accepted")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("previous generation capability advertisement was not dispatched")
+	}
+
+	firstRequest := make(chan error, 1)
+	go func() {
+		var request execution.Request
+		firstRequest <- first.ReadJSON(&request)
+	}()
+	type outcome struct {
+		result execution.Result
+		err    error
+	}
+	executed := make(chan outcome, 1)
+	go func() {
+		result, err := server.Execute(context.Background(), "body-1", "doll-1", execution.RequestPayload{
+			ExecutionID: "replacement-generation", Capability: "current", Operation: "run", Arguments: map[string]any{},
+		})
+		executed <- outcome{result: result, err: err}
+	}()
+
+	select {
+	case err := <-firstRequest:
+		t.Fatalf("execution reached previous generation during replacement activation: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	close(lifecycle.releaseSecond)
+	var request execution.Request
+	if err := second.ReadJSON(&request); err != nil {
+		t.Fatal(err)
+	}
+	result := execution.Result{
+		Type: execution.TypeResult, ID: "replacement-result", Timestamp: time.Now().UTC(),
+		DollID: request.DollID, BodyID: request.BodyID, CorrelationID: request.ID,
+		Payload: execution.ResultPayload{
+			ExecutionID: request.Payload.ExecutionID,
+			Status:      execution.StatusSuccess,
+			Result:      map[string]any{"generation": "current"},
+		},
+	}
+	if err := second.WriteJSON(result); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case outcome := <-executed:
+		if outcome.err != nil {
+			t.Fatal(outcome.err)
+		}
+		if outcome.result.Payload.ExecutionID != "replacement-generation" {
+			t.Fatalf("unexpected execution result: %#v", outcome.result)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("execution did not complete through replacement generation")
+	}
+
+	currentAdvertisement := capabilities.NewAdvertisement("body-1", []capabilities.Capability{{
+		ID: "current", Operations: []string{"run"}, Available: true,
+	}})
+	if err := second.WriteJSON(currentAdvertisement); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case advertised := <-lifecycle.advertised:
+		if !advertised.accepted {
+			t.Fatal("current generation capability advertisement was rejected")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("current generation capability advertisement was not dispatched")
+	}
+
+	lifecycle.mu.Lock()
+	current := lifecycle.current
+	lifecycle.mu.Unlock()
+	server.mu.Lock()
+	transport := server.execution["body-1"]
+	server.mu.Unlock()
+	if transport == nil || transport.id != current {
+		t.Fatalf("registrar generation %q and transport generation disagree", current)
 	}
 }
 
