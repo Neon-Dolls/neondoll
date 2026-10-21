@@ -369,6 +369,12 @@ func TestM74BodyReconnectAfterCoreReconstruction(t *testing.T) {
 	}
 	defer rt2.Stop()
 	t.Log("Core runtime reconstructed from durable SQLite state")
+	// The closed Doll Link tells the Body that the remote Core session is gone.
+	// Reset only WireGuard's transient peer session so it initiates a fresh
+	// handshake using the same configured endpoint; no endpoint is rewritten.
+	if err := bTun.Reconnect(); err != nil {
+		t.Fatalf("Body tunnel reconnect: %v", err)
+	}
 
 	// ─────────────────────────────────────────────────────────────────────
 	// Phase 7 — Prove a FRESH WireGuard handshake
@@ -381,30 +387,16 @@ func TestM74BodyReconnectAfterCoreReconstruction(t *testing.T) {
 	// ─────────────────────────────────────────────────────────────────────
 
 	t.Logf("Waiting for a FRESH handshake (t1=%v) ...", t1)
-	// The Body keeps its pre-restart WireGuard session until the normal rekey
-	// interval expires. Waiting for that protocol-driven rekey proves recovery
-	// without rewriting either peer's endpoint.
-	deadline := time.Now().Add(30 * time.Second)
-	var t2 time.Time
-	for {
-		ipcOut, ipcErr := bTun.IpcGet()
-		if ipcErr == nil {
-			ts, err := parseHandshakeTimestamp(ipcOut)
-			if err == nil && ts.After(t1) {
-				t2 = ts
-				break
-			}
-		}
-		if time.Now().After(deadline) {
-			break
-		}
-		time.Sleep(300 * time.Millisecond)
+	if err := bTun.WaitHandshake(ctx, 15*time.Second); err != nil {
+		t.Fatalf("fresh handshake after reconstruction: %v", err)
 	}
-	if t2.IsZero() {
-		t.Fatalf(
-			"timed out waiting for a FRESH handshake after "+
-				"reconstruction (t1=%v, deadline=%v)", t1, deadline,
-		)
+	ipcOut, err = bTun.IpcGet()
+	if err != nil {
+		t.Fatalf("IpcGet (reconnected): %v", err)
+	}
+	t2, err := parseHandshakeTimestamp(ipcOut)
+	if err != nil || !t2.After(t1) {
+		t.Fatalf("fresh handshake timestamp = %v, want after %v (parse error: %v)", t2, t1, err)
 	}
 	t.Logf("Fresh WireGuard handshake: t1=%v -> t2=%v", t1, t2)
 

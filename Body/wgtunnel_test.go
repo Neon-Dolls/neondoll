@@ -2,9 +2,11 @@ package body
 
 import (
 	"context"
+	"encoding/hex"
 	"fmt"
 	"log/slog"
 	"net/netip"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -114,6 +116,32 @@ func TestBodyTunnel_DefaultBindStartStop(t *testing.T) {
 
 	if bt.started {
 		t.Fatal("expected started=false after Stop")
+	}
+}
+
+func TestBodyTunnelReconnectPreservesConfiguration(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	cfg, _, _ := testTunnelConfig()
+	_, cfg.CorePublicKey = newTestKeys()
+	bt := NewBodyTunnel(cfg, slog.Default())
+	if err := bt.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer bt.Stop()
+	if err := bt.Reconnect(); err != nil {
+		t.Fatal(err)
+	}
+	got := bt.Config()
+	if got.CoreEndpoint != cfg.CoreEndpoint || got.CorePublicKey != cfg.CorePublicKey || got.OverlayPrefix != cfg.OverlayPrefix {
+		t.Fatalf("Reconnect changed durable peer configuration: got %#v, want %#v", got, cfg)
+	}
+	ipc, err := bt.IpcGet()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(ipc, "public_key="+hex.EncodeToString(cfg.CorePublicKey[:])) {
+		t.Fatalf("Reconnect did not restore the Core peer: %s", ipc)
 	}
 }
 

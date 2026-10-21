@@ -119,13 +119,7 @@ func (bt *BodyTunnel) Start(ctx context.Context) error {
 	}
 
 	// Configure the single peer: Core.
-	pubHex := hex.EncodeToString(bt.cfg.CorePublicKey[:])
-	peerCfg := fmt.Sprintf(
-		"public_key=%s\nendpoint=%s\npersistent_keepalive_interval=25\nallowed_ip=%s\n",
-		pubHex,
-		bt.cfg.CoreEndpoint,
-		bt.cfg.OverlayPrefix.String(),
-	)
+	peerCfg := bt.peerConfig()
 	if err := dev.IpcSet(peerCfg); err != nil {
 		dev.Close()
 		return fmt.Errorf("body-wg: ipc set peer: %w", err)
@@ -142,6 +136,34 @@ func (bt *BodyTunnel) Start(ctx context.Context) error {
 		"endpoint", bt.cfg.CoreEndpoint,
 		"overlay", bt.cfg.OverlayAddress.String(),
 	)
+	return nil
+}
+
+func (bt *BodyTunnel) peerConfig() string {
+	return fmt.Sprintf(
+		"public_key=%s\nendpoint=%s\npersistent_keepalive_interval=25\nallowed_ip=%s\n",
+		hex.EncodeToString(bt.cfg.CorePublicKey[:]),
+		bt.cfg.CoreEndpoint,
+		bt.cfg.OverlayPrefix.String(),
+	)
+}
+
+// Reconnect discards only the transient WireGuard peer session and starts a
+// fresh handshake using the already-configured Core key, endpoint, and overlay
+// routes. It does not mutate or rediscover identity or endpoint state. Bodies
+// use this after an application connection reports that Core restarted while
+// the UDP address remained unchanged.
+func (bt *BodyTunnel) Reconnect() error {
+	bt.mu.Lock()
+	defer bt.mu.Unlock()
+	if !bt.started {
+		return fmt.Errorf("body-wg: tunnel not started")
+	}
+	publicKey := hex.EncodeToString(bt.cfg.CorePublicKey[:])
+	configuration := fmt.Sprintf("public_key=%s\nremove=true\n", publicKey) + bt.peerConfig()
+	if err := bt.dev.IpcSet(configuration); err != nil {
+		return fmt.Errorf("body-wg: replace stale peer session: %w", err)
+	}
 	return nil
 }
 

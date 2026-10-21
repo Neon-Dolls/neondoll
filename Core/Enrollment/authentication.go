@@ -1,6 +1,7 @@
 package enrollment
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"time"
@@ -18,6 +19,7 @@ type authenticationChallenge struct {
 	connectionID string
 	body         *BodyRecord
 	value        authentication.Challenge
+	timer        *time.Timer
 }
 
 func (s *Service) BeginAuthentication(ctx context.Context, connectionID string, hello authentication.Hello) (authentication.Challenge, error) {
@@ -45,17 +47,30 @@ func (s *Service) BeginAuthentication(ctx context.Context, connectionID string, 
 		return authentication.Challenge{}, err
 	}
 	s.authMu.Lock()
-	delete(s.challenges, connectionID)
-	s.challenges[connectionID] = authenticationChallenge{connectionID: connectionID, body: body, value: challenge}
+	if previous := s.challenges[connectionID]; previous.timer != nil {
+		previous.timer.Stop()
+	}
+	pending := authenticationChallenge{connectionID: connectionID, body: body, value: challenge}
+	pending.timer = time.AfterFunc(authenticationChallengeLifetime, func() {
+		s.authMu.Lock()
+		if current, ok := s.challenges[connectionID]; ok && current.value.SessionID == challenge.SessionID {
+			delete(s.challenges, connectionID)
+		}
+		s.authMu.Unlock()
+	})
+	s.challenges[connectionID] = pending
 	s.authMu.Unlock()
 	return challenge, nil
 }
 
-func (s *Service) CompleteAuthentication(_ context.Context, connectionID string, proof authentication.Proof) (authentication.Accept, string, error) {
+func (s *Service) CompleteAuthentication(ctx context.Context, connectionID string, proof authentication.Proof) (authentication.Accept, string, error) {
 	s.authMu.Lock()
 	pending, ok := s.challenges[connectionID]
 	delete(s.challenges, connectionID) // every proof attempt consumes the challenge
 	s.authMu.Unlock()
+	if pending.timer != nil {
+		pending.timer.Stop()
+	}
 	if !ok || proof.Version != 1 || proof.Type != authentication.TypeProof {
 		return authentication.Accept{}, "", ErrUnauthorized
 	}
@@ -64,13 +79,20 @@ func (s *Service) CompleteAuthentication(_ context.Context, connectionID string,
 		proof.SessionID != challenge.SessionID || proof.BodyNonce != challenge.BodyNonce || proof.CoreNonce != challenge.CoreNonce || proof.Algorithm != challenge.Algorithm {
 		return authentication.Accept{}, "", ErrUnauthorized
 	}
-	if pending.body.RevokedAt != nil || !s.activeMembership(pending.body) {
+	body, err := s.store.GetBody(ctx, pending.body.BodyID)
+	if err != nil || body == nil {
+		return authentication.Accept{}, "", ErrUnauthorized
+	}
+	if body.RevokedAt != nil || !s.activeMembership(body) {
 		return authentication.Accept{}, "", ErrRevoked
 	}
-	if err := authentication.VerifyProof(pending.body.PublicKey, proof); err != nil {
+	if body.KeyVersion != pending.body.KeyVersion || body.MembershipRef != pending.body.MembershipRef || !bytes.Equal(body.PublicKey, pending.body.PublicKey) {
+		return authentication.Accept{}, "", ErrUnauthorized
+	}
+	if err := authentication.VerifyProof(body.PublicKey, proof); err != nil {
 		return authentication.Accept{}, "", ErrInvalidProof
 	}
-	accept := authentication.Accept{Version: 1, Type: authentication.TypeAccept, CoreID: s.identity.CoreID, BodyID: pending.body.BodyID, SessionID: challenge.SessionID, Status: "authenticated"}
+	accept := authentication.Accept{Version: 1, Type: authentication.TypeAccept, CoreID: s.identity.CoreID, BodyID: body.BodyID, SessionID: challenge.SessionID, Status: "authenticated"}
 	if err := authentication.SignAccept(s.identity.PrivateKey, &accept); err != nil {
 		return authentication.Accept{}, "", err
 	}
@@ -79,6 +101,9 @@ func (s *Service) CompleteAuthentication(_ context.Context, connectionID string,
 
 func (s *Service) CancelAuthentication(connectionID string) {
 	s.authMu.Lock()
+	if pending := s.challenges[connectionID]; pending.timer != nil {
+		pending.timer.Stop()
+	}
 	delete(s.challenges, connectionID)
 	s.authMu.Unlock()
 }

@@ -4,10 +4,12 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"database/sql"
 	"errors"
 	"net"
 	"net/http"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -108,20 +110,74 @@ func TestAuthenticationServiceRejectsForgeryExpiryReplayAndRevocation(t *testing
 	}
 }
 
+func TestAuthenticationReloadsDurableCredentialBeforeAccept(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		mutate func(*testing.T, *sql.DB, string)
+	}{
+		{"missing", func(t *testing.T, db *sql.DB, bodyID string) {
+			if _, err := db.Exec(`DELETE FROM body_credentials WHERE body_id = ?`, bodyID); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"rotated", func(t *testing.T, db *sql.DB, bodyID string) {
+			publicKey, _, err := ed25519.GenerateKey(rand.Reader)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.Exec(`UPDATE body_credentials SET public_key = ?, key_version = key_version + 1 WHERE body_id = ?`, publicKey, bodyID); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"replaced-membership", func(t *testing.T, db *sql.DB, bodyID string) {
+			if _, err := db.Exec(`UPDATE body_credentials SET membership_reference = ? WHERE body_id = ?`, "replacement-membership", bodyID); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"revoked", func(t *testing.T, db *sql.DB, bodyID string) {
+			if _, err := db.Exec(`UPDATE body_credentials SET revoked_at = ? WHERE body_id = ?`, time.Now().UTC().Format(time.RFC3339Nano), bodyID); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "core.db")
+			fx := newFixture(t, path)
+			bodyID, privateKey := enrollBody(t, fx, "durable-"+test.name)
+			challenge, err := fx.service.BeginAuthentication(context.Background(), "connection", hello(t, bodyID))
+			if err != nil {
+				t.Fatal(err)
+			}
+			db, err := sql.Open("sqlite", path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			test.mutate(t, db, bodyID)
+			if _, _, err := fx.service.CompleteAuthentication(context.Background(), "connection", proof(t, challenge, privateKey)); err == nil {
+				t.Fatal("proof was accepted after durable credential changed")
+			}
+		})
+	}
+}
+
 type authTestLogger struct{}
 
 func (authTestLogger) Info(string, ...map[string]any)  {}
 func (authTestLogger) Warn(string, ...map[string]any)  {}
 func (authTestLogger) Error(string, ...map[string]any) {}
 
-func startAuthServer(t *testing.T, fx *fixture) (*ws.Server, string, *body.Registry) {
+func startAuthServer(t *testing.T, fx *fixture, authenticationTimeout time.Duration, authenticator ws.BodyAuthenticator) (*ws.Server, string, *body.Registry) {
 	t.Helper()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
 	registry := body.NewRegistry()
-	server := ws.New(ws.Config{BodyAuthenticator: fx.service}, authTestLogger{}, nil)
+	if authenticator == nil {
+		authenticator = fx.service
+	}
+	server := ws.New(ws.Config{BodyAuthenticator: authenticator, AuthenticationTimeout: authenticationTimeout}, authTestLogger{}, nil)
 	registrar, err := body.NewRemoteRegistrar(registry, fx.store.(network.NetworkStore), server)
 	if err != nil {
 		t.Fatal(err)
@@ -179,7 +235,7 @@ func authenticateClient(t *testing.T, url, bodyID string, key ed25519.PrivateKey
 func TestAuthenticatedWebSocketRegistrationExecutionReplacementAndPreAuthRejection(t *testing.T) {
 	fx := newFixture(t, filepath.Join(t.TempDir(), "core.db"))
 	bodyID, privateKey := enrollBody(t, fx, "ws-auth-body")
-	server, url, registry := startAuthServer(t, fx)
+	server, url, registry := startAuthServer(t, fx, 0, nil)
 	if _, err := server.Execute(context.Background(), bodyID, "doll", execution.RequestPayload{ExecutionID: "pre-auth", Capability: "echo", Operation: "run", Arguments: map[string]any{}}); !errors.Is(err, ws.ErrNoAuthenticatedSession) {
 		t.Fatalf("pre-authentication execution error = %v", err)
 	}
@@ -243,4 +299,72 @@ func TestAuthenticatedWebSocketRegistrationExecutionReplacementAndPreAuthRejecti
 	if _, _, err := first.ReadMessage(); err == nil {
 		t.Fatal("replaced connection remained active")
 	}
+}
+
+func TestAuthenticationTimeoutClosesIdleAndAbandonedHandshakes(t *testing.T) {
+	fx := newFixture(t, filepath.Join(t.TempDir(), "core.db"))
+	bodyID, privateKey := enrollBody(t, fx, "timeout-body")
+	recorder := &recordingAuthenticator{delegate: fx.service}
+	_, url, _ := startAuthServer(t, fx, 50*time.Millisecond, recorder)
+
+	idle, _, err := websocket.DefaultDialer.Dial(url, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	idle.SetReadDeadline(time.Now().Add(time.Second))
+	if _, _, err := idle.ReadMessage(); err == nil {
+		t.Fatal("idle unauthenticated connection remained open")
+	}
+	idle.Close()
+
+	abandoned, _, err := websocket.DefaultDialer.Dial(url, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := abandoned.WriteJSON(hello(t, bodyID)); err != nil {
+		t.Fatal(err)
+	}
+	var challenge authentication.Challenge
+	if err := abandoned.ReadJSON(&challenge); err != nil {
+		t.Fatal(err)
+	}
+	abandoned.SetReadDeadline(time.Now().Add(time.Second))
+	if _, _, err := abandoned.ReadMessage(); err == nil {
+		t.Fatal("abandoned challenge connection remained open")
+	}
+	abandoned.Close()
+	if _, _, err := fx.service.CompleteAuthentication(context.Background(), recorder.connectionID(), proof(t, challenge, privateKey)); !errors.Is(err, enrollment.ErrUnauthorized) {
+		t.Fatalf("timed-out pending challenge was not cleaned up: %v", err)
+	}
+
+	// Timeout cleanup must allow a fresh connection for the same identity.
+	reconnected, _ := authenticateClient(t, url, bodyID, privateKey, fx.service.CoreIdentity().PublicKey)
+	reconnected.Close()
+}
+
+type recordingAuthenticator struct {
+	delegate *enrollment.Service
+	mu       sync.Mutex
+	lastID   string
+}
+
+func (r *recordingAuthenticator) BeginAuthentication(ctx context.Context, connectionID string, value authentication.Hello) (authentication.Challenge, error) {
+	r.mu.Lock()
+	r.lastID = connectionID
+	r.mu.Unlock()
+	return r.delegate.BeginAuthentication(ctx, connectionID, value)
+}
+
+func (r *recordingAuthenticator) CompleteAuthentication(ctx context.Context, connectionID string, value authentication.Proof) (authentication.Accept, string, error) {
+	return r.delegate.CompleteAuthentication(ctx, connectionID, value)
+}
+
+func (r *recordingAuthenticator) CancelAuthentication(connectionID string) {
+	r.delegate.CancelAuthentication(connectionID)
+}
+
+func (r *recordingAuthenticator) connectionID() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.lastID
 }

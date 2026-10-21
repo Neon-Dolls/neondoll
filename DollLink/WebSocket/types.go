@@ -59,6 +59,7 @@ var upgrader = websocket.Upgrader{
 
 // writeTimeout for sending messages.
 const writeTimeout = 10 * time.Second
+const defaultAuthenticationTimeout = 30 * time.Second
 
 // Server is a WebSocket transport for Doll Link.
 type Server struct {
@@ -80,6 +81,7 @@ type Server struct {
 	listenerAddr          string
 	authenticateExecution func(*http.Request) (string, error)
 	bodyAuthenticator     BodyAuthenticator
+	authenticationTimeout time.Duration
 	executionLifecycle    ExecutionSessionLifecycle
 
 	// listener is an optional pre-created net.Listener.
@@ -126,6 +128,10 @@ type Config struct {
 	// When configured, every connection remains nonprivileged until it
 	// completes that handshake.
 	BodyAuthenticator BodyAuthenticator
+
+	// AuthenticationTimeout bounds the complete in-band handshake, including
+	// clients that connect and send nothing. Zero uses 30 seconds.
+	AuthenticationTimeout time.Duration
 }
 
 // New creates a WS Server with the given config, logger, and event handler.
@@ -144,6 +150,10 @@ func New(cfg Config, log Logger, handler Handler) *Server {
 	}
 	s.executionLifecycle = cfg.ExecutionSessionLifecycle
 	s.bodyAuthenticator = cfg.BodyAuthenticator
+	s.authenticationTimeout = cfg.AuthenticationTimeout
+	if s.authenticationTimeout <= 0 {
+		s.authenticationTimeout = defaultAuthenticationTimeout
+	}
 
 	s.mux.HandleFunc("/ws", s.handleWS)
 	s.mux.HandleFunc("/ws/status", s.handleStatus)
@@ -290,6 +300,12 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		remote: r.RemoteAddr,
 		done:   make(chan struct{}),
 	}
+	if s.bodyAuthenticator != nil {
+		if err := conn.SetReadDeadline(time.Now().Add(s.authenticationTimeout)); err != nil {
+			conn.Close()
+			return
+		}
+	}
 	if authenticatedBodyID != "" {
 		if err := s.activateAuthenticated(r.Context(), cc, authenticatedBodyID, nil); err != nil {
 			s.log.Warn("ws execution registration rejected", map[string]any{"error": err.Error(), "remote": r.RemoteAddr})
@@ -335,6 +351,13 @@ func (s *Server) activateAuthenticated(ctx context.Context, cc *clientConn, body
 		}
 	}
 	cc.bodyID, cc.execution = bodyID, client
+	if err := cc.conn.SetReadDeadline(time.Time{}); err != nil {
+		client.Close(execution.ErrDisconnected)
+		if lifecycle != nil {
+			lifecycle.SessionDisconnected(cc.id, bodyID)
+		}
+		return err
+	}
 	s.mu.Lock()
 	s.conns[cc.id] = cc
 	replaced := s.execution[bodyID]
