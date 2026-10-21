@@ -46,7 +46,9 @@ type ExecutionSessionLifecycle interface {
 
 type BodyAuthenticator interface {
 	BeginAuthentication(context.Context, string, authentication.Hello) (authentication.Challenge, error)
-	CompleteAuthentication(context.Context, string, authentication.Proof) (authentication.Accept, string, error)
+	// ActivateAuthentication must keep proof acceptance and activate within
+	// the authenticator's revocation lifecycle boundary.
+	ActivateAuthentication(context.Context, string, authentication.Proof, func(authentication.Accept, string) error) error
 	CancelAuthentication(string)
 }
 
@@ -440,12 +442,9 @@ func (s *Server) readLoop(cc *clientConn) {
 				if err := json.Unmarshal(message, &proof); err != nil {
 					return
 				}
-				accept, bodyID, err := s.bodyAuthenticator.CompleteAuthentication(context.Background(), cc.id, proof)
-				if err != nil {
-					s.log.Warn("ws Body authentication proof rejected", map[string]any{"id": cc.id})
-					return
-				}
-				if err := s.activateAuthenticated(context.Background(), cc, bodyID, func() error { return s.writeValue(cc, accept) }); err != nil {
+				if err := s.bodyAuthenticator.ActivateAuthentication(context.Background(), cc.id, proof, func(accept authentication.Accept, bodyID string) error {
+					return s.activateAuthenticated(context.Background(), cc, bodyID, func() error { return s.writeValue(cc, accept) })
+				}); err != nil {
 					s.log.Warn("ws authenticated Body activation rejected", map[string]any{"id": cc.id, "error": err.Error()})
 					return
 				}
@@ -592,6 +591,24 @@ func (s *Server) Execute(ctx context.Context, bodyID, dollID string, payload exe
 		return execution.Result{}, fmt.Errorf("%w for Body %q", ErrNoAuthenticatedSession, bodyID)
 	}
 	return cc.execution.Execute(ctx, dollID, payload)
+}
+
+// DisconnectBody immediately invalidates the current authenticated session
+// for bodyID. Closing the execution client releases pending requests; closing
+// the socket causes the normal generation-aware disconnect lifecycle to run.
+func (s *Server) DisconnectBody(bodyID string) {
+	s.activationMu.Lock()
+	s.mu.Lock()
+	cc := s.execution[bodyID]
+	if cc != nil {
+		delete(s.execution, bodyID)
+	}
+	s.mu.Unlock()
+	if cc != nil {
+		cc.execution.Close(execution.ErrDisconnected)
+		_ = cc.conn.Close()
+	}
+	s.activationMu.Unlock()
 }
 
 // SendAction delivers an outbound action to all connected WebSocket clients.

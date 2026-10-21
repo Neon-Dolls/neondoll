@@ -17,7 +17,9 @@ import (
 
 	"github.com/Neon-Dolls/neondoll/Core/Body"
 	"github.com/Neon-Dolls/neondoll/Core/Enrollment"
+	"github.com/Neon-Dolls/neondoll/Core/Invitation"
 	"github.com/Neon-Dolls/neondoll/Core/Network"
+	"github.com/Neon-Dolls/neondoll/Core/Persistence"
 	"github.com/Neon-Dolls/neondoll/DollLink/Authentication"
 	"github.com/Neon-Dolls/neondoll/DollLink/Capabilities"
 	"github.com/Neon-Dolls/neondoll/DollLink/Execution"
@@ -342,6 +344,220 @@ func TestAuthenticationTimeoutClosesIdleAndAbandonedHandshakes(t *testing.T) {
 	reconnected.Close()
 }
 
+type recordingPeerRefresher struct {
+	mu    sync.Mutex
+	calls int
+}
+
+type blockingActivationAuthenticator struct {
+	delegate  *enrollment.Service
+	entered   chan struct{}
+	release   chan struct{}
+	activated chan struct{}
+	once      sync.Once
+}
+
+func (a *blockingActivationAuthenticator) BeginAuthentication(ctx context.Context, connectionID string, value authentication.Hello) (authentication.Challenge, error) {
+	return a.delegate.BeginAuthentication(ctx, connectionID, value)
+}
+
+func (a *blockingActivationAuthenticator) CompleteAuthentication(ctx context.Context, connectionID string, value authentication.Proof) (authentication.Accept, string, error) {
+	return a.delegate.CompleteAuthentication(ctx, connectionID, value)
+}
+
+func (a *blockingActivationAuthenticator) ActivateAuthentication(ctx context.Context, connectionID string, value authentication.Proof, activate func(authentication.Accept, string) error) error {
+	return a.delegate.ActivateAuthentication(ctx, connectionID, value, func(accept authentication.Accept, bodyID string) error {
+		a.once.Do(func() { close(a.entered) })
+		<-a.release
+		err := activate(accept, bodyID)
+		close(a.activated)
+		return err
+	})
+}
+
+func (a *blockingActivationAuthenticator) CancelAuthentication(connectionID string) {
+	a.delegate.CancelAuthentication(connectionID)
+}
+
+type blockingRevokeAuthorizer struct {
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (a *blockingRevokeAuthorizer) AuthorizeEnrollment(_ context.Context, _ string, action enrollment.OwnerAction) error {
+	if action.Operation == "revoke" {
+		close(a.entered)
+		<-a.release
+	}
+	return nil
+}
+
+func TestAuthenticationActivationIsAtomicWithRevocation(t *testing.T) {
+	fx := newFixture(t, filepath.Join(t.TempDir(), "core.db"))
+	bodyID, privateKey := enrollBody(t, fx, "activation-revocation-race")
+
+	owner := &blockingRevokeAuthorizer{entered: make(chan struct{}), release: make(chan struct{})}
+	service, err := enrollment.NewService(context.Background(), fx.store.(enrollment.Store), fx.network, fx.invitations, owner, fx.clock, enrollment.DefaultConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	fx.service = service
+	authenticator := &blockingActivationAuthenticator{
+		delegate: service, entered: make(chan struct{}), release: make(chan struct{}), activated: make(chan struct{}),
+	}
+	server, url, _ := startAuthServer(t, fx, 0, authenticator)
+	service.SetRevocationLifecycle(server, nil)
+
+	conn, _, err := websocket.DefaultDialer.Dial(url, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if err := conn.WriteJSON(hello(t, bodyID)); err != nil {
+		t.Fatal(err)
+	}
+	var challenge authentication.Challenge
+	if err := conn.ReadJSON(&challenge); err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.WriteJSON(proof(t, challenge, privateKey)); err != nil {
+		t.Fatal(err)
+	}
+	<-authenticator.entered
+
+	revoked := make(chan error, 1)
+	go func() { revoked <- service.Revoke(context.Background(), bodyID, "owner") }()
+	select {
+	case <-owner.entered:
+		t.Fatal("revocation crossed the lifecycle boundary while activation was paused")
+	default:
+	}
+
+	close(authenticator.release)
+	<-authenticator.activated
+	<-owner.entered // the exclusive lifecycle transition now owns the boundary
+	close(owner.release)
+	if err := <-revoked; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := server.Execute(context.Background(), bodyID, "doll", execution.RequestPayload{
+		ExecutionID: "after-revocation", Capability: "test", Operation: "run", Arguments: map[string]any{},
+	}); !errors.Is(err, ws.ErrNoAuthenticatedSession) {
+		t.Fatalf("execution after revocation error = %v", err)
+	}
+}
+
+func (r *recordingPeerRefresher) RefreshPeers(context.Context) error {
+	r.mu.Lock()
+	r.calls++
+	r.mu.Unlock()
+	return nil
+}
+
+func TestRevocationDisconnectsActiveSessionCancelsExecutionAndPersists(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "core.db")
+	fx := newFixture(t, path)
+	bodyID, privateKey := enrollBody(t, fx, "revoked-active")
+	server, url, _ := startAuthServer(t, fx, 0, nil)
+	peers := &recordingPeerRefresher{}
+	fx.service.SetRevocationLifecycle(server, peers)
+	conn, _ := authenticateClient(t, url, bodyID, privateKey, fx.service.CoreIdentity().PublicKey)
+	defer conn.Close()
+
+	received := make(chan struct{})
+	go func() {
+		var request execution.Request
+		if conn.ReadJSON(&request) == nil {
+			close(received)
+		}
+	}()
+	executionDone := make(chan error, 1)
+	go func() {
+		_, err := server.Execute(context.Background(), bodyID, "doll", execution.RequestPayload{ExecutionID: "pending-revocation", Capability: "test", Operation: "run", Arguments: map[string]any{}})
+		executionDone <- err
+	}()
+	select {
+	case <-received:
+	case <-time.After(time.Second):
+		t.Fatal("execution request was not delivered")
+	}
+	if err := fx.service.Revoke(context.Background(), bodyID, "owner"); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-executionDone:
+		if !errors.Is(err, execution.ErrDisconnected) {
+			t.Fatalf("pending execution error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("revocation did not release pending execution")
+	}
+	body, err := fx.store.(enrollment.Store).GetBody(context.Background(), bodyID)
+	if err != nil || body.RevokedAt == nil {
+		t.Fatalf("durable revoked Body = %#v, %v", body, err)
+	}
+	membership := fx.network.GetMembership(network.PeerID(body.MembershipRef))
+	if membership == nil || membership.Status != network.MembershipRevoked {
+		t.Fatalf("revoked membership = %#v", membership)
+	}
+	peers.mu.Lock()
+	refreshes := peers.calls
+	peers.mu.Unlock()
+	if refreshes != 1 {
+		t.Fatalf("peer refreshes = %d, want 1", refreshes)
+	}
+	if err := fx.service.Revoke(context.Background(), bodyID, "owner"); err != nil {
+		t.Fatalf("idempotent revocation: %v", err)
+	}
+	peers.mu.Lock()
+	refreshes = peers.calls
+	peers.mu.Unlock()
+	if refreshes != 2 {
+		t.Fatalf("idempotent revocation did not reconcile peers: calls = %d", refreshes)
+	}
+
+	reconnect, _, err := websocket.DefaultDialer.Dial(url, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reconnect.Close()
+	if err := reconnect.WriteJSON(hello(t, bodyID)); err != nil {
+		t.Fatal(err)
+	}
+	reconnect.SetReadDeadline(time.Now().Add(time.Second))
+	if _, _, err := reconnect.ReadMessage(); err == nil {
+		t.Fatal("revoked Body reauthenticated")
+	}
+
+	if err := fx.store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := persistence.NewStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	restoredBody, err := reopened.(enrollment.Store).GetBody(context.Background(), bodyID)
+	if err != nil || restoredBody.RevokedAt == nil {
+		t.Fatalf("restart Body revocation = %#v, %v", restoredBody, err)
+	}
+	restoredMembership, err := reopened.(network.NetworkStore).LoadMembership(context.Background(), network.PeerID(body.MembershipRef))
+	if err != nil || restoredMembership.Status != network.MembershipRevoked {
+		t.Fatalf("restart membership = %#v, %v", restoredMembership, err)
+	}
+	restoredNetwork, err := reopened.(network.NetworkStore).LoadNetwork(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	restarted, err := enrollment.NewService(context.Background(), reopened.(enrollment.Store), restoredNetwork, invitation.NewService(reopened.(invitation.Store), fx.clock), enrollment.AllowOwnerAuthorizer{}, fx.clock, enrollment.DefaultConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := restarted.BeginAuthentication(context.Background(), "restart-reconnect", hello(t, bodyID)); !errors.Is(err, enrollment.ErrUnauthorized) {
+		t.Fatalf("revoked Body authentication after restart error = %v", err)
+	}
+}
+
 type recordingAuthenticator struct {
 	delegate *enrollment.Service
 	mu       sync.Mutex
@@ -357,6 +573,10 @@ func (r *recordingAuthenticator) BeginAuthentication(ctx context.Context, connec
 
 func (r *recordingAuthenticator) CompleteAuthentication(ctx context.Context, connectionID string, value authentication.Proof) (authentication.Accept, string, error) {
 	return r.delegate.CompleteAuthentication(ctx, connectionID, value)
+}
+
+func (r *recordingAuthenticator) ActivateAuthentication(ctx context.Context, connectionID string, value authentication.Proof, activate func(authentication.Accept, string) error) error {
+	return r.delegate.ActivateAuthentication(ctx, connectionID, value, activate)
 }
 
 func (r *recordingAuthenticator) CancelAuthentication(connectionID string) {
