@@ -262,6 +262,21 @@ func TestUnauthenticatedConnectionCannotExecute(t *testing.T) {
 	}
 }
 
+func TestRejectedAuthenticationCannotExecute(t *testing.T) {
+	server, url := startWSTestServer(t, Config{AuthenticateExecution: trustedTestAuthenticator}, nil)
+	_ = dialTestBody(t, url, "revoked-or-unknown-token")
+	waitForConnection(t, server, false)
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	_, err := server.Execute(ctx, "body-1", "", execution.RequestPayload{
+		ExecutionID: "blocked", Capability: "lights", Operation: "set", Arguments: map[string]any{},
+	})
+	if !errors.Is(err, ErrNoAuthenticatedSession) {
+		t.Fatalf("Execute error = %v, want ErrNoAuthenticatedSession", err)
+	}
+}
+
 func TestAuthenticatedConnectionPreservesEventsAndActions(t *testing.T) {
 	server, url := startWSTestServer(t, Config{AuthenticateExecution: trustedTestAuthenticator}, echoEventHandler{})
 	body := dialTestBody(t, url, "fixture-token")

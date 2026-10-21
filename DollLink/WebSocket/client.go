@@ -192,8 +192,18 @@ func (c *Client) readLoop(ctx context.Context) error {
 
 func (c *Client) handleExecution(ctx context.Context, request execution.Request) {
 	defer c.workers.Done()
-	defer func() { <-c.slots }()
+	slotHeld := true
+	defer func() {
+		if slotHeld {
+			<-c.slots
+		}
+	}()
 	result, err := c.execution.HandleExecutionRequest(ctx, request)
+	// The limit bounds capability execution, not serialized result delivery.
+	// Release the slot before publishing the terminal result so a Core that
+	// immediately sends its next request cannot observe phantom saturation.
+	<-c.slots
+	slotHeld = false
 	if err != nil {
 		c.warn("ws Body client execution request rejected", err)
 		return

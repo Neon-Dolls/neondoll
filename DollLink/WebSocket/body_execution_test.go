@@ -3,6 +3,7 @@ package ws
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -105,6 +106,32 @@ func TestBodyExecutionSaturationReturnsUnavailableWithoutQueuing(t *testing.T) {
 	close(release)
 	if err := <-firstDone; err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestBodyExecutionCompletedRequestReleasesConcurrencySlot(t *testing.T) {
+	server, url := startWSTestServer(t, Config{AuthenticateExecution: trustedTestAuthenticator}, nil)
+	dispatcher, err := execution.NewDispatcher("body-1", allowAllLocalExecution(), execution.CapabilityExecutorFunc(
+		func(_ context.Context, _, _ string, _ map[string]any) (map[string]any, error) {
+			return map[string]any{"done": true}, nil
+		},
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	startBodyExecutionClientWithLimit(t, url, dispatcher, nil, 1)
+	waitForConnection(t, server, true)
+
+	for i := 0; i < 100; i++ {
+		result, err := server.Execute(context.Background(), "body-1", "", execution.RequestPayload{
+			ExecutionID: fmt.Sprintf("sequential-%d", i), Capability: "test", Operation: "run", Arguments: map[string]any{},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if result.Payload.Status != execution.StatusSuccess {
+			t.Fatalf("completed request %d left slot saturated: %#v", i, result)
+		}
 	}
 }
 
