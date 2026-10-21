@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -257,7 +258,10 @@ func (s *Service) newPending(requestID string, mode Mode, bodyKey, wgKey, nonce,
 	}
 	var networkKey network.WireGuardPublicKey
 	copy(networkKey[:], wg)
-	now := s.clock.Now().UTC()
+	// Wire timestamps are signed as their exact RFC3339 field. Restrict them
+	// to whole seconds so JSON transport cannot introduce a fractional form
+	// different from the transcript string.
+	now := s.clock.Now().UTC().Truncate(time.Second)
 	return &PendingEnrollment{
 		RequestID: requestID, Mode: mode, CoreID: s.identity.CoreID, BodyPublicKey: publicKey,
 		WGPublicKey: networkKey, BodyNonce: bodyNonce, CodeVerifier: verifier, InvitationID: invitationID,
@@ -289,7 +293,7 @@ func (s *Service) completeLocked(ctx context.Context, pending *PendingEnrollment
 		rollback()
 		return nil, err
 	}
-	now := s.clock.Now().UTC()
+	now := s.clock.Now().UTC().Truncate(time.Second)
 	body := &BodyRecord{
 		BodyID: bodyID, PublicKey: append(ed25519.PublicKey(nil), pending.BodyPublicKey...), KeyVersion: 1,
 		OwnerID: ownerID, Permissions: append([]string(nil), permissions...), MembershipRef: string(membership.PeerID),
