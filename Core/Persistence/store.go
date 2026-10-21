@@ -262,6 +262,13 @@ func createSchema(db *sql.DB) error {
 			receipt_json TEXT NOT NULL,
 			FOREIGN KEY (request_id) REFERENCES pending_enrollments(request_id)
 		);
+		CREATE TABLE IF NOT EXISTS enrollment_result_nonces (
+			request_id TEXT NOT NULL,
+			nonce BLOB NOT NULL,
+			consumed_at TEXT NOT NULL DEFAULT (datetime('now')),
+			PRIMARY KEY (request_id, nonce),
+			FOREIGN KEY (request_id) REFERENCES pending_enrollments(request_id)
+		);
 	`)
 	if err != nil {
 		return fmt.Errorf("body enrollment tables: %v", err)

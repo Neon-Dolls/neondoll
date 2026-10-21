@@ -95,10 +95,14 @@ func (s *Service) Redeem(ctx context.Context, request dollnetwork.EnrollmentRede
 		if decodeErr != nil || !hmac.Equal(existing.BodyPublicKey, publicKey) || existing.Mode != ModeInvitation || existing.InvitationID != request.InvitationID {
 			return nil, ErrReplayed
 		}
+		inv, err := s.invitations.ValidateAuthorization(ctx, request.InvitationID, request.InvitationSecret)
+		if err != nil {
+			return nil, ErrUnauthorized
+		}
 		if existing.Status == StatusEnrolled {
 			return s.store.GetReceipt(ctx, request.RequestID)
 		}
-		inv, err := s.invitations.Validate(ctx, request.InvitationID, request.InvitationSecret)
+		inv, err = s.invitations.Validate(ctx, request.InvitationID, request.InvitationSecret)
 		if err != nil {
 			return nil, ErrUnauthorized
 		}
@@ -176,6 +180,17 @@ func (s *Service) Result(ctx context.Context, request dollnetwork.EnrollmentResu
 	if err := dollnetwork.VerifyEnrollmentResult(request); err != nil || !hmac.Equal(pending.BodyPublicKey, mustPublicKey(request.BodyPublicKey)) {
 		_ = s.store.IncrementAttempts(ctx, request.RequestID)
 		return nil, ErrInvalidProof
+	}
+	nonce, err := dollnetwork.DecodeNonce(request.BodyNonce)
+	if err != nil {
+		return nil, ErrInvalidProof
+	}
+	consumed, err := s.store.ConsumeResultNonce(ctx, request.RequestID, nonce)
+	if err != nil {
+		return nil, err
+	}
+	if !consumed {
+		return nil, ErrReplayed
 	}
 	status := pending.Status
 	if status == StatusPending && !s.clock.Now().Before(pending.ExpiresAt) {

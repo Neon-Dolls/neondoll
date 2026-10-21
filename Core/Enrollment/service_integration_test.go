@@ -120,7 +120,8 @@ func TestBodyInitiatedEnrollmentPersistsIdentityMembershipAndRecoverableReceipt(
 	if receipt.BodyID == "" || receipt.MembershipReference == "" {
 		t.Fatalf("incomplete receipt: %#v", receipt)
 	}
-	result, err := fx.service.Result(context.Background(), resultRequest(t, fx.service, "request-body", publicKey, privateKey))
+	recoveryRequest := resultRequest(t, fx.service, "request-body", publicKey, privateKey)
+	result, err := fx.service.Result(context.Background(), recoveryRequest)
 	if err != nil || result.Receipt == nil || result.Receipt.BodyID != receipt.BodyID {
 		t.Fatalf("recover result = %#v, %v", result, err)
 	}
@@ -156,6 +157,9 @@ func TestBodyInitiatedEnrollmentPersistsIdentityMembershipAndRecoverableReceipt(
 	if service2.CoreIdentity().CoreID != coreID.CoreID || !service2.CoreIdentity().PublicKey.Equal(coreID.PublicKey) {
 		t.Fatal("Core signing identity changed across restart")
 	}
+	if _, err := service2.Result(context.Background(), recoveryRequest); !errors.Is(err, enrollment.ErrReplayed) {
+		t.Fatalf("persisted result nonce replay error = %v", err)
+	}
 	recovered, err := service2.Result(context.Background(), resultRequest(t, service2, "request-body", publicKey, privateKey))
 	if err != nil || recovered.Receipt.BodyID != receipt.BodyID {
 		t.Fatalf("restart recovery = %#v, %v", recovered, err)
@@ -182,6 +186,18 @@ func TestInvitationEnrollmentIsSingleUseAndProofBound(t *testing.T) {
 	receipt, err := fx.service.Redeem(context.Background(), request)
 	if err != nil {
 		t.Fatal(err)
+	}
+	retried, err := fx.service.Redeem(context.Background(), request)
+	if err != nil || retried.BodyID != receipt.BodyID {
+		t.Fatalf("authorized retry = %#v, %v", retried, err)
+	}
+	wrongSecret := request
+	wrongSecret.InvitationSecret = "different-secret"
+	if err := dollnetwork.SignEnrollmentRedeem(privateKey, &wrongSecret); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fx.service.Redeem(context.Background(), wrongSecret); !errors.Is(err, enrollment.ErrUnauthorized) {
+		t.Fatalf("wrong-secret enrolled retry error = %v", err)
 	}
 	request.RequestID = "replay-with-new-request"
 	if err := dollnetwork.SignEnrollmentRedeem(privateKey, &request); err != nil {

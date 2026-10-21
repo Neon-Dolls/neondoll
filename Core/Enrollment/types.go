@@ -90,6 +90,7 @@ type Store interface {
 	GetPendingByCodeVerifier(context.Context, []byte) (*PendingEnrollment, error)
 	CountPending(context.Context, time.Time) (int, error)
 	IncrementAttempts(context.Context, string) error
+	ConsumeResultNonce(context.Context, string, []byte) (bool, error)
 	Deny(context.Context, string, string) error
 	Complete(context.Context, *Completion) error
 	GetReceipt(context.Context, string) (*dollnetwork.EnrollmentReceipt, error)

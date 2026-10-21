@@ -130,6 +130,18 @@ func (s *store) IncrementAttempts(ctx context.Context, requestID string) error {
 	return err
 }
 
+func (s *store) ConsumeResultNonce(ctx context.Context, requestID string, nonce []byte) (bool, error) {
+	result, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO enrollment_result_nonces(request_id, nonce) VALUES(?, ?)`, requestID, nonce)
+	if err != nil {
+		return false, fmt.Errorf("consume enrollment result nonce: %w", err)
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("consume enrollment result nonce rows: %w", err)
+	}
+	return rows == 1, nil
+}
+
 func (s *store) Deny(ctx context.Context, requestID, ownerID string) error {
 	result, err := s.db.ExecContext(ctx, `UPDATE pending_enrollments SET status = ?, approved_owner_id = ? WHERE request_id = ? AND status = ?`, enrollment.StatusDenied, ownerID, requestID, enrollment.StatusPending)
 	if err != nil {
