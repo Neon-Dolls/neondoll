@@ -153,6 +153,12 @@ func main() {
 		"local_id": string(body.LocalBodyID),
 		"count":    bodyRegistry.Count(),
 	})
+	acceptanceControl, err := startAcceptanceControl(bodyRegistry)
+	if err != nil {
+		log.Error("acceptance control setup error", map[string]any{"error": err.Error()})
+		os.Exit(1)
+	}
+	defer acceptanceControl()
 
 	// Create the Interaction service (Doll Link ↔ Persistence bridge).
 	interactionSvc := interaction.New(store, inferenceProvider, log)
@@ -204,8 +210,11 @@ func main() {
 	}()
 	log.Info("owner control ready", map[string]any{"socket": adminSocket})
 
-	// If the tunnel provides a netstack Net, serve WS through the overlay.
-	if tnet := rt.Tunnel().Netstack(); tnet != nil {
+	// HTTP-enabled deployments expose the configured host listener for initial
+	// enrollment as well as authenticated Doll Link traffic. An unenrolled Body
+	// cannot reach an overlay-only endpoint. Overlay-only deployments retain the
+	// existing netstack listener when HTTP exposure is explicitly disabled.
+	if tnet := rt.Tunnel().Netstack(); !cfg.HTTP.Enabled && tnet != nil {
 		// Parse port from the configured listen address.
 		_, portStr, err := net.SplitHostPort(listenAddr)
 		port := 8080
@@ -384,7 +393,7 @@ func main() {
 	fmt.Fprintf(os.Stderr, "neondoll started: %s\n", string(b))
 
 	// Start the WS server (blocking).
-	if err := wsServer.Start(ctx); err != nil {
+	if err := wsServer.Start(ctx); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Error("ws server error", map[string]any{"error": err.Error()})
 		os.Exit(1)
 	}
