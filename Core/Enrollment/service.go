@@ -21,7 +21,11 @@ import (
 )
 
 type Service struct {
-	mu          sync.Mutex
+	mu sync.Mutex
+	// lifecycleMu keeps proof acceptance plus transport activation atomic with
+	// revocation. The lifecycle lock is acquired before mu; authentication
+	// challenge state is independently protected by authMu.
+	lifecycleMu sync.RWMutex
 	authMu      sync.Mutex
 	challenges  map[string]authenticationChallenge
 	store       Store
@@ -84,7 +88,12 @@ func (s *Service) ListBodies(ctx context.Context, ownerID string) ([]*BodyRecord
 }
 
 func (s *Service) Revoke(ctx context.Context, bodyID, ownerID string) error {
-	if bodyID == "" || ownerID == "" || s.owners.AuthorizeEnrollment(ctx, ownerID, OwnerAction{Operation: "revoke", RequestID: bodyID}) != nil {
+	if bodyID == "" || ownerID == "" {
+		return ErrUnauthorized
+	}
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
+	if s.owners.AuthorizeEnrollment(ctx, ownerID, OwnerAction{Operation: "revoke", RequestID: bodyID}) != nil {
 		return ErrUnauthorized
 	}
 	s.mu.Lock()

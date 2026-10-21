@@ -349,6 +349,104 @@ type recordingPeerRefresher struct {
 	calls int
 }
 
+type blockingActivationAuthenticator struct {
+	delegate  *enrollment.Service
+	entered   chan struct{}
+	release   chan struct{}
+	activated chan struct{}
+	once      sync.Once
+}
+
+func (a *blockingActivationAuthenticator) BeginAuthentication(ctx context.Context, connectionID string, value authentication.Hello) (authentication.Challenge, error) {
+	return a.delegate.BeginAuthentication(ctx, connectionID, value)
+}
+
+func (a *blockingActivationAuthenticator) CompleteAuthentication(ctx context.Context, connectionID string, value authentication.Proof) (authentication.Accept, string, error) {
+	return a.delegate.CompleteAuthentication(ctx, connectionID, value)
+}
+
+func (a *blockingActivationAuthenticator) ActivateAuthentication(ctx context.Context, connectionID string, value authentication.Proof, activate func(authentication.Accept, string) error) error {
+	return a.delegate.ActivateAuthentication(ctx, connectionID, value, func(accept authentication.Accept, bodyID string) error {
+		a.once.Do(func() { close(a.entered) })
+		<-a.release
+		err := activate(accept, bodyID)
+		close(a.activated)
+		return err
+	})
+}
+
+func (a *blockingActivationAuthenticator) CancelAuthentication(connectionID string) {
+	a.delegate.CancelAuthentication(connectionID)
+}
+
+type blockingRevokeAuthorizer struct {
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (a *blockingRevokeAuthorizer) AuthorizeEnrollment(_ context.Context, _ string, action enrollment.OwnerAction) error {
+	if action.Operation == "revoke" {
+		close(a.entered)
+		<-a.release
+	}
+	return nil
+}
+
+func TestAuthenticationActivationIsAtomicWithRevocation(t *testing.T) {
+	fx := newFixture(t, filepath.Join(t.TempDir(), "core.db"))
+	bodyID, privateKey := enrollBody(t, fx, "activation-revocation-race")
+
+	owner := &blockingRevokeAuthorizer{entered: make(chan struct{}), release: make(chan struct{})}
+	service, err := enrollment.NewService(context.Background(), fx.store.(enrollment.Store), fx.network, fx.invitations, owner, fx.clock, enrollment.DefaultConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	fx.service = service
+	authenticator := &blockingActivationAuthenticator{
+		delegate: service, entered: make(chan struct{}), release: make(chan struct{}), activated: make(chan struct{}),
+	}
+	server, url, _ := startAuthServer(t, fx, 0, authenticator)
+	service.SetRevocationLifecycle(server, nil)
+
+	conn, _, err := websocket.DefaultDialer.Dial(url, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if err := conn.WriteJSON(hello(t, bodyID)); err != nil {
+		t.Fatal(err)
+	}
+	var challenge authentication.Challenge
+	if err := conn.ReadJSON(&challenge); err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.WriteJSON(proof(t, challenge, privateKey)); err != nil {
+		t.Fatal(err)
+	}
+	<-authenticator.entered
+
+	revoked := make(chan error, 1)
+	go func() { revoked <- service.Revoke(context.Background(), bodyID, "owner") }()
+	select {
+	case <-owner.entered:
+		t.Fatal("revocation crossed the lifecycle boundary while activation was paused")
+	default:
+	}
+
+	close(authenticator.release)
+	<-authenticator.activated
+	<-owner.entered // the exclusive lifecycle transition now owns the boundary
+	close(owner.release)
+	if err := <-revoked; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := server.Execute(context.Background(), bodyID, "doll", execution.RequestPayload{
+		ExecutionID: "after-revocation", Capability: "test", Operation: "run", Arguments: map[string]any{},
+	}); !errors.Is(err, ws.ErrNoAuthenticatedSession) {
+		t.Fatalf("execution after revocation error = %v", err)
+	}
+}
+
 func (r *recordingPeerRefresher) RefreshPeers(context.Context) error {
 	r.mu.Lock()
 	r.calls++
@@ -475,6 +573,10 @@ func (r *recordingAuthenticator) BeginAuthentication(ctx context.Context, connec
 
 func (r *recordingAuthenticator) CompleteAuthentication(ctx context.Context, connectionID string, value authentication.Proof) (authentication.Accept, string, error) {
 	return r.delegate.CompleteAuthentication(ctx, connectionID, value)
+}
+
+func (r *recordingAuthenticator) ActivateAuthentication(ctx context.Context, connectionID string, value authentication.Proof, activate func(authentication.Accept, string) error) error {
+	return r.delegate.ActivateAuthentication(ctx, connectionID, value, activate)
 }
 
 func (r *recordingAuthenticator) CancelAuthentication(connectionID string) {

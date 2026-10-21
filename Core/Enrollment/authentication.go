@@ -64,6 +64,26 @@ func (s *Service) BeginAuthentication(ctx context.Context, connectionID string, 
 }
 
 func (s *Service) CompleteAuthentication(ctx context.Context, connectionID string, proof authentication.Proof) (authentication.Accept, string, error) {
+	s.lifecycleMu.RLock()
+	defer s.lifecycleMu.RUnlock()
+	return s.completeAuthentication(ctx, connectionID, proof)
+}
+
+// ActivateAuthentication keeps the final durable credential check and the
+// caller's connection activation in one revocation lifecycle transaction.
+// Once Revoke returns, an authentication that raced it either has been
+// disconnected or observes the revoked credential and cannot activate.
+func (s *Service) ActivateAuthentication(ctx context.Context, connectionID string, proof authentication.Proof, activate func(authentication.Accept, string) error) error {
+	s.lifecycleMu.RLock()
+	defer s.lifecycleMu.RUnlock()
+	accept, bodyID, err := s.completeAuthentication(ctx, connectionID, proof)
+	if err != nil {
+		return err
+	}
+	return activate(accept, bodyID)
+}
+
+func (s *Service) completeAuthentication(ctx context.Context, connectionID string, proof authentication.Proof) (authentication.Accept, string, error) {
 	s.authMu.Lock()
 	pending, ok := s.challenges[connectionID]
 	delete(s.challenges, connectionID) // every proof attempt consumes the challenge
