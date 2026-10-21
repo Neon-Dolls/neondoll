@@ -33,6 +33,7 @@ func (s *MemoryStore) Create(_ context.Context, inv *Invitation) error {
 		return fmt.Errorf("invitation %q already exists", inv.ID)
 	}
 	clone := *inv
+	clone.Permissions = append([]string(nil), inv.Permissions...)
 	s.inv[inv.ID] = &clone
 	return nil
 }
@@ -45,6 +46,7 @@ func (s *MemoryStore) Get(_ context.Context, id string) (*Invitation, error) {
 		return nil, fmt.Errorf("invitation %q not found", id)
 	}
 	clone := *inv
+	clone.Permissions = append([]string(nil), inv.Permissions...)
 	return &clone, nil
 }
 
@@ -108,6 +110,7 @@ func NewService(store Store, clock Clock) *Service {
 // CreateParams are the parameters for creating an invitation.
 type CreateParams struct {
 	Lifetime           time.Duration
+	Permissions        []string
 	BootstrapEndpoints dollnetwork.Endpoints
 }
 
@@ -148,6 +151,7 @@ func (s *Service) Create(ctx context.Context, params CreateParams) (*CreatedInvi
 		SecretHash:         hash,
 		ExpiresAt:          now.Add(lifetime),
 		Consumed:           false,
+		Permissions:        append([]string(nil), params.Permissions...),
 		BootstrapEndpoints: params.BootstrapEndpoints,
 	}
 

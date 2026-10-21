@@ -34,6 +34,7 @@ type Invitation struct {
 	SecretHash         SecretHash            `json:"-"`
 	ExpiresAt          time.Time             `json:"expires_at"`
 	Consumed           bool                  `json:"consumed"`
+	Permissions        []string              `json:"permissions,omitempty"`
 	BootstrapEndpoints dollnetwork.Endpoints `json:"bootstrap_endpoints,omitempty"`
 }
 

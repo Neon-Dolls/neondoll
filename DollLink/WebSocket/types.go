@@ -161,6 +161,12 @@ func (s *Server) SetListener(l net.Listener) {
 	s.listener = l
 }
 
+// RegisterHandler adds a bootstrap HTTP endpoint to the server that owns the
+// Doll Link WebSocket. Call it before Start.
+func (s *Server) RegisterHandler(pattern string, handler http.HandlerFunc) {
+	s.mux.HandleFunc(pattern, handler)
+}
+
 // Start begins the HTTP/WebSocket server.
 func (s *Server) Start(ctx context.Context) error {
 	s.mu.Lock()

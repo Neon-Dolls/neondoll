@@ -16,8 +16,10 @@ import (
 	"github.com/Neon-Dolls/neondoll/Core/Body"
 	"github.com/Neon-Dolls/neondoll/Core/Config"
 	"github.com/Neon-Dolls/neondoll/Core/DollMind"
+	"github.com/Neon-Dolls/neondoll/Core/Enrollment"
 	"github.com/Neon-Dolls/neondoll/Core/Inference"
 	"github.com/Neon-Dolls/neondoll/Core/Interaction"
+	"github.com/Neon-Dolls/neondoll/Core/Invitation"
 	"github.com/Neon-Dolls/neondoll/Core/Network"
 	"github.com/Neon-Dolls/neondoll/Core/Persistence"
 	"github.com/Neon-Dolls/neondoll/Core/Pulse"
@@ -156,6 +158,24 @@ func main() {
 	// Create WebSocket transport.
 	wsCfg := ws.Config{Listen: listenAddr}
 	wsServer := ws.New(wsCfg, log, interactionSvc)
+	invitationStore, ok := store.(invitation.Store)
+	if !ok {
+		log.Error("store does not implement Invitation Store")
+		os.Exit(1)
+	}
+	enrollmentStore, ok := store.(enrollment.Store)
+	if !ok {
+		log.Error("store does not implement Enrollment Store")
+		os.Exit(1)
+	}
+	invitationService := invitation.NewService(invitationStore, invitation.RealClock{})
+	enrollmentService, err := enrollment.NewService(ctx, enrollmentStore, nw, invitationService, nil, nil, enrollment.DefaultConfig())
+	if err != nil {
+		log.Error("Body enrollment service setup error", map[string]any{"error": err.Error()})
+		os.Exit(1)
+	}
+	enrollment.RegisterBodyEndpoints(wsServer, enrollmentService)
+	log.Info("Body enrollment endpoints registered", map[string]any{"core_id": enrollmentService.CoreIdentity().CoreID})
 	remoteRegistrar, err := body.NewRemoteRegistrar(bodyRegistry, ns, wsServer)
 	if err != nil {
 		log.Error("remote Body registrar setup error", map[string]any{"error": err.Error()})
