@@ -22,14 +22,18 @@ func (s *store) Create(ctx context.Context, inv *invitation.Invitation) error {
 	if err != nil {
 		return fmt.Errorf("marshal invitation endpoints: %v", err)
 	}
+	permissionsJSON, err := json.Marshal(inv.Permissions)
+	if err != nil {
+		return fmt.Errorf("marshal invitation permissions: %v", err)
+	}
 
 	hashBytes := inv.SecretHash[:] // [32]byte → []byte for SQL BLOB binding
 
 	_, err = s.db.ExecContext(ctx,
-		`INSERT INTO invitations (id, secret_hash, expires_at, consumed, endpoints_json)
-		 VALUES (?, ?, ?, ?, ?)`,
+		`INSERT INTO invitations (id, secret_hash, expires_at, consumed, endpoints_json, permissions_json)
+		 VALUES (?, ?, ?, ?, ?, ?)`,
 		inv.ID, hashBytes, inv.ExpiresAt.UTC().Format(time.RFC3339),
-		boolToInt(inv.Consumed), string(endJSON),
+		boolToInt(inv.Consumed), string(endJSON), string(permissionsJSON),
 	)
 	if err != nil {
 		return fmt.Errorf("persist invitation %q: %v", inv.ID, err)
@@ -40,15 +44,16 @@ func (s *store) Create(ctx context.Context, inv *invitation.Invitation) error {
 // Get retrieves an invitation by ID. Returns nil, nil if not found.
 func (s *store) Get(ctx context.Context, id string) (*invitation.Invitation, error) {
 	var (
-		hashBytes     []byte
-		expiresStr    string
-		consumed      int
-		endpointsJSON string
+		hashBytes       []byte
+		expiresStr      string
+		consumed        int
+		endpointsJSON   string
+		permissionsJSON string
 	)
 	err := s.db.QueryRowContext(ctx,
-		`SELECT secret_hash, expires_at, consumed, endpoints_json
+		`SELECT secret_hash, expires_at, consumed, endpoints_json, permissions_json
 		 FROM invitations WHERE id = ?`, id,
-	).Scan(&hashBytes, &expiresStr, &consumed, &endpointsJSON)
+	).Scan(&hashBytes, &expiresStr, &consumed, &endpointsJSON, &permissionsJSON)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -66,6 +71,10 @@ func (s *store) Get(ctx context.Context, id string) (*invitation.Invitation, err
 			return nil, fmt.Errorf("unmarshal invitation %q endpoints: %v", id, err)
 		}
 	}
+	var permissions []string
+	if err := json.Unmarshal([]byte(permissionsJSON), &permissions); err != nil {
+		return nil, fmt.Errorf("unmarshal invitation %q permissions: %v", id, err)
+	}
 
 	expiresAt, err := time.Parse(time.RFC3339, expiresStr)
 	if err != nil {
@@ -77,6 +86,7 @@ func (s *store) Get(ctx context.Context, id string) (*invitation.Invitation, err
 		SecretHash:         bytesToHash(hashBytes),
 		ExpiresAt:          expiresAt,
 		Consumed:           consumed == 1,
+		Permissions:        permissions,
 		BootstrapEndpoints: endpoints,
 	}
 	return inv, nil

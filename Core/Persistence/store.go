@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"time"
 
 	"github.com/Neon-Dolls/neondoll/DollState"
@@ -61,6 +62,12 @@ func NewStore(dbPath string) (Store, error) {
 	if err := createSchema(db); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("%w: schema: %v", ErrCannotOpen, err)
+	}
+	if dbPath != ":memory:" {
+		if err := os.Chmod(dbPath, 0o600); err != nil {
+			db.Close()
+			return nil, fmt.Errorf("%w: protect database: %v", ErrCannotOpen, err)
+		}
 	}
 
 	return &store{db: db}, nil
@@ -191,6 +198,80 @@ func createSchema(db *sql.DB) error {
 	`)
 	if err != nil {
 		return fmt.Errorf("invitations table: %v", err)
+	}
+	invitationColumns := []struct {
+		name string
+		sql  string
+	}{
+		{"permissions_json", "ALTER TABLE invitations ADD COLUMN permissions_json TEXT NOT NULL DEFAULT '[]'"},
+	}
+	for _, column := range invitationColumns {
+		exists, inspectErr := columnExists(db, "invitations", column.name)
+		if inspectErr != nil {
+			return inspectErr
+		}
+		if !exists {
+			if _, alterErr := db.Exec(column.sql); alterErr != nil {
+				return fmt.Errorf("migrate invitations %s: %v", column.name, alterErr)
+			}
+		}
+	}
+
+	// Core 4 Body Enrollment v1: Core signing identity, pending ceremonies,
+	// durable Body credential bindings, and recoverable signed receipts.
+	_, err = db.Exec(`
+		CREATE TABLE IF NOT EXISTS enrollment_core_identity (
+			singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+			core_id TEXT NOT NULL UNIQUE,
+			public_key BLOB NOT NULL,
+			private_key BLOB NOT NULL
+		);
+		CREATE TABLE IF NOT EXISTS pending_enrollments (
+			request_id TEXT PRIMARY KEY,
+			mode TEXT NOT NULL,
+			core_id TEXT NOT NULL,
+			body_public_key BLOB NOT NULL,
+			wg_public_key BLOB NOT NULL,
+			body_nonce BLOB NOT NULL,
+			code_verifier BLOB UNIQUE,
+			invitation_id TEXT,
+			metadata_json TEXT NOT NULL DEFAULT '{}',
+			status TEXT NOT NULL,
+			attempt_count INTEGER NOT NULL DEFAULT 0,
+			approved_owner_id TEXT NOT NULL DEFAULT '',
+			permissions_json TEXT NOT NULL DEFAULT '[]',
+			created_at TEXT NOT NULL,
+			expires_at TEXT NOT NULL,
+			UNIQUE(body_public_key, body_nonce)
+		);
+		CREATE INDEX IF NOT EXISTS pending_enrollments_status_expiry
+			ON pending_enrollments(status, expires_at);
+		CREATE TABLE IF NOT EXISTS body_credentials (
+			body_id TEXT PRIMARY KEY,
+			public_key BLOB NOT NULL UNIQUE,
+			key_version INTEGER NOT NULL,
+			owner_id TEXT NOT NULL,
+			permissions_json TEXT NOT NULL,
+			membership_reference TEXT NOT NULL UNIQUE,
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL,
+			revoked_at TEXT
+		);
+		CREATE TABLE IF NOT EXISTS enrollment_receipts (
+			request_id TEXT PRIMARY KEY,
+			receipt_json TEXT NOT NULL,
+			FOREIGN KEY (request_id) REFERENCES pending_enrollments(request_id)
+		);
+		CREATE TABLE IF NOT EXISTS enrollment_result_nonces (
+			request_id TEXT NOT NULL,
+			nonce BLOB NOT NULL,
+			consumed_at TEXT NOT NULL DEFAULT (datetime('now')),
+			PRIMARY KEY (request_id, nonce),
+			FOREIGN KEY (request_id) REFERENCES pending_enrollments(request_id)
+		);
+	`)
+	if err != nil {
+		return fmt.Errorf("body enrollment tables: %v", err)
 	}
 
 	return nil

@@ -2,6 +2,7 @@ package invitation
 
 import (
 	"context"
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
@@ -33,6 +34,7 @@ func (s *MemoryStore) Create(_ context.Context, inv *Invitation) error {
 		return fmt.Errorf("invitation %q already exists", inv.ID)
 	}
 	clone := *inv
+	clone.Permissions = append([]string(nil), inv.Permissions...)
 	s.inv[inv.ID] = &clone
 	return nil
 }
@@ -45,6 +47,7 @@ func (s *MemoryStore) Get(_ context.Context, id string) (*Invitation, error) {
 		return nil, fmt.Errorf("invitation %q not found", id)
 	}
 	clone := *inv
+	clone.Permissions = append([]string(nil), inv.Permissions...)
 	return &clone, nil
 }
 
@@ -108,6 +111,7 @@ func NewService(store Store, clock Clock) *Service {
 // CreateParams are the parameters for creating an invitation.
 type CreateParams struct {
 	Lifetime           time.Duration
+	Permissions        []string
 	BootstrapEndpoints dollnetwork.Endpoints
 }
 
@@ -148,6 +152,7 @@ func (s *Service) Create(ctx context.Context, params CreateParams) (*CreatedInvi
 		SecretHash:         hash,
 		ExpiresAt:          now.Add(lifetime),
 		Consumed:           false,
+		Permissions:        append([]string(nil), params.Permissions...),
 		BootstrapEndpoints: params.BootstrapEndpoints,
 	}
 
@@ -176,6 +181,9 @@ func (s *Service) Validate(ctx context.Context, id, secret string) (*Invitation,
 	if err != nil {
 		return nil, fmt.Errorf("invalid invitation: %w", err)
 	}
+	if inv == nil {
+		return nil, fmt.Errorf("invalid invitation")
+	}
 
 	// Return the invitation regardless of consumed state — the caller
 	// uses inv.Consumed to set the correct protocol-level 'consumed' flag.
@@ -188,10 +196,26 @@ func (s *Service) Validate(ctx context.Context, id, secret string) (*Invitation,
 	}
 
 	hash := HashSecret(secret)
-	if hash != inv.SecretHash {
+	if !hmac.Equal(hash[:], inv.SecretHash[:]) {
 		return nil, fmt.Errorf("invitation %q: wrong secret", id)
 	}
 
+	return inv, nil
+}
+
+// ValidateAuthorization verifies that a secret belongs to an invitation even
+// after successful consumption. It exists only for idempotent recovery of an
+// already-enrolled request; callers must still use Validate before any new
+// enrollment completion.
+func (s *Service) ValidateAuthorization(ctx context.Context, id, secret string) (*Invitation, error) {
+	inv, err := s.store.Get(ctx, id)
+	if err != nil || inv == nil {
+		return nil, fmt.Errorf("invalid invitation authorization")
+	}
+	hash := HashSecret(secret)
+	if !hmac.Equal(hash[:], inv.SecretHash[:]) {
+		return nil, fmt.Errorf("invalid invitation authorization")
+	}
 	return inv, nil
 }
 
