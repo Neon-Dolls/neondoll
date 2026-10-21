@@ -14,6 +14,7 @@ import (
 	"github.com/gorilla/websocket"
 
 	"github.com/Neon-Dolls/neondoll/DollLink/Actions"
+	"github.com/Neon-Dolls/neondoll/DollLink/Authentication"
 	"github.com/Neon-Dolls/neondoll/DollLink/Capabilities"
 	"github.com/Neon-Dolls/neondoll/DollLink/Events"
 	"github.com/Neon-Dolls/neondoll/DollLink/Execution"
@@ -43,6 +44,12 @@ type ExecutionSessionLifecycle interface {
 	SessionDisconnected(string, string)
 }
 
+type BodyAuthenticator interface {
+	BeginAuthentication(context.Context, string, authentication.Hello) (authentication.Challenge, error)
+	CompleteAuthentication(context.Context, string, authentication.Proof) (authentication.Accept, string, error)
+	CancelAuthentication(string)
+}
+
 // upgrader upgrades HTTP connections to WebSocket.
 var upgrader = websocket.Upgrader{
 	ReadBufferSize:  4096,
@@ -52,6 +59,7 @@ var upgrader = websocket.Upgrader{
 
 // writeTimeout for sending messages.
 const writeTimeout = 10 * time.Second
+const defaultAuthenticationTimeout = 30 * time.Second
 
 // Server is a WebSocket transport for Doll Link.
 type Server struct {
@@ -72,6 +80,8 @@ type Server struct {
 	handler               Handler
 	listenerAddr          string
 	authenticateExecution func(*http.Request) (string, error)
+	bodyAuthenticator     BodyAuthenticator
+	authenticationTimeout time.Duration
 	executionLifecycle    ExecutionSessionLifecycle
 
 	// listener is an optional pre-created net.Listener.
@@ -113,6 +123,15 @@ type Config struct {
 	// generations and canonical capability advertisements with Core. It does
 	// not authenticate and is never invoked without AuthenticateExecution.
 	ExecutionSessionLifecycle ExecutionSessionLifecycle
+
+	// BodyAuthenticator performs the canonical in-band Ed25519 handshake.
+	// When configured, every connection remains nonprivileged until it
+	// completes that handshake.
+	BodyAuthenticator BodyAuthenticator
+
+	// AuthenticationTimeout bounds the complete in-band handshake, including
+	// clients that connect and send nothing. Zero uses 30 seconds.
+	AuthenticationTimeout time.Duration
 }
 
 // New creates a WS Server with the given config, logger, and event handler.
@@ -130,6 +149,11 @@ func New(cfg Config, log Logger, handler Handler) *Server {
 		s.authenticateExecution = cfg.AuthenticateExecution
 	}
 	s.executionLifecycle = cfg.ExecutionSessionLifecycle
+	s.bodyAuthenticator = cfg.BodyAuthenticator
+	s.authenticationTimeout = cfg.AuthenticationTimeout
+	if s.authenticationTimeout <= 0 {
+		s.authenticationTimeout = defaultAuthenticationTimeout
+	}
 
 	s.mux.HandleFunc("/ws", s.handleWS)
 	s.mux.HandleFunc("/ws/status", s.handleStatus)
@@ -150,6 +174,14 @@ func (s *Server) SetExecutionSessionLifecycle(lifecycle ExecutionSessionLifecycl
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.executionLifecycle = lifecycle
+}
+
+// SetBodyAuthenticator installs the production in-band authentication
+// boundary. Call it before Start.
+func (s *Server) SetBodyAuthenticator(authenticator BodyAuthenticator) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.bodyAuthenticator = authenticator
 }
 
 // SetListener sets an optional pre-created net.Listener for the server.
@@ -242,7 +274,10 @@ func (s *Server) ConnCount() int {
 
 func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	var authenticatedBodyID string
-	if s.authenticateExecution != nil {
+	// In-band authentication takes precedence. The legacy callback remains an
+	// explicit trusted fixture/boundary for deployments that have not enabled
+	// Body Authentication v1; it must never bypass a configured handshake.
+	if s.bodyAuthenticator == nil && s.authenticateExecution != nil {
 		bodyID, err := s.authenticateExecution(r)
 		if err != nil {
 			s.log.Warn("ws execution authentication failed", map[string]any{"error": err.Error(), "remote": r.RemoteAddr})
@@ -265,54 +300,16 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		remote: r.RemoteAddr,
 		done:   make(chan struct{}),
 	}
+	if s.bodyAuthenticator != nil {
+		if err := conn.SetReadDeadline(time.Now().Add(s.authenticationTimeout)); err != nil {
+			conn.Close()
+			return
+		}
+	}
 	if authenticatedBodyID != "" {
-		// Keep lifecycle generation changes and transport ownership changes in
-		// one activation critical section. Execute takes the same lock while
-		// selecting a session, so it can never observe a newly registered
-		// generation with the previous generation's transport.
-		s.activationMu.Lock()
-		s.mu.Lock()
-		lifecycle := s.executionLifecycle
-		s.mu.Unlock()
-		if lifecycle != nil {
-			if err := lifecycle.SessionConnected(r.Context(), cc.id, authenticatedBodyID); err != nil {
-				s.log.Warn("ws execution registration rejected", map[string]any{"error": err.Error(), "remote": r.RemoteAddr})
-				authenticatedBodyID = ""
-			}
+		if err := s.activateAuthenticated(r.Context(), cc, authenticatedBodyID, nil); err != nil {
+			s.log.Warn("ws execution registration rejected", map[string]any{"error": err.Error(), "remote": r.RemoteAddr})
 		}
-		if authenticatedBodyID != "" {
-			cc.bodyID = authenticatedBodyID
-			cc.execution, err = execution.NewClient(authenticatedBodyID, executionSender{cc: cc})
-			if err != nil {
-				s.activationMu.Unlock()
-				conn.Close()
-				s.log.Error("ws execution session setup failed", map[string]any{"error": err.Error(), "remote": r.RemoteAddr})
-				return
-			}
-		}
-
-		s.mu.Lock()
-		s.conns[cc.id] = cc
-		var replaced *clientConn
-		if cc.execution != nil {
-			replaced = s.execution[cc.bodyID]
-			s.execution[cc.bodyID] = cc
-		}
-		count := len(s.conns)
-		s.mu.Unlock()
-		s.activationMu.Unlock()
-		if replaced != nil {
-			replaced.execution.Close(execution.ErrDisconnected)
-			replaced.conn.Close()
-		}
-
-		s.log.Info("ws client connected", map[string]any{
-			"id":     cc.id,
-			"remote": cc.remote,
-			"total":  count,
-		})
-		s.readLoop(cc)
-		return
 	}
 
 	s.mu.Lock()
@@ -329,9 +326,56 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	s.readLoop(cc)
 }
 
+func (s *Server) activateAuthenticated(ctx context.Context, cc *clientConn, bodyID string, beforeInstall func() error) error {
+	s.activationMu.Lock()
+	defer s.activationMu.Unlock()
+	s.mu.Lock()
+	lifecycle := s.executionLifecycle
+	s.mu.Unlock()
+	if lifecycle != nil {
+		if err := lifecycle.SessionConnected(ctx, cc.id, bodyID); err != nil {
+			return err
+		}
+	}
+	client, err := execution.NewClient(bodyID, executionSender{cc: cc})
+	if err != nil {
+		return err
+	}
+	if beforeInstall != nil {
+		if err := beforeInstall(); err != nil {
+			client.Close(execution.ErrDisconnected)
+			if lifecycle != nil {
+				lifecycle.SessionDisconnected(cc.id, bodyID)
+			}
+			return err
+		}
+	}
+	cc.bodyID, cc.execution = bodyID, client
+	if err := cc.conn.SetReadDeadline(time.Time{}); err != nil {
+		client.Close(execution.ErrDisconnected)
+		if lifecycle != nil {
+			lifecycle.SessionDisconnected(cc.id, bodyID)
+		}
+		return err
+	}
+	s.mu.Lock()
+	s.conns[cc.id] = cc
+	replaced := s.execution[bodyID]
+	s.execution[bodyID] = cc
+	s.mu.Unlock()
+	if replaced != nil && replaced != cc {
+		replaced.execution.Close(execution.ErrDisconnected)
+		replaced.conn.Close()
+	}
+	return nil
+}
+
 // readLoop reads messages from a WebSocket connection until it closes.
 func (s *Server) readLoop(cc *clientConn) {
 	defer func() {
+		if s.bodyAuthenticator != nil {
+			s.bodyAuthenticator.CancelAuthentication(cc.id)
+		}
 		cc.conn.Close()
 		if cc.execution != nil {
 			s.activationMu.Lock()
@@ -372,9 +416,49 @@ func (s *Server) readLoop(cc *clientConn) {
 		}
 		if err := json.Unmarshal(message, &envelope); err != nil {
 			s.log.Warn("ws invalid message", map[string]any{"id": cc.id, "error": err.Error()})
+			if s.bodyAuthenticator != nil && cc.execution == nil {
+				return
+			}
 			errResp := events.NewErrorResponse("", "", fmt.Sprintf("invalid message: %v", err))
 			s.writeJSON(cc, errResp)
 			continue
+		}
+		if s.bodyAuthenticator != nil && cc.execution == nil {
+			switch envelope.Type {
+			case authentication.TypeHello:
+				var hello authentication.Hello
+				if err := json.Unmarshal(message, &hello); err != nil {
+					return
+				}
+				challenge, err := s.bodyAuthenticator.BeginAuthentication(context.Background(), cc.id, hello)
+				if err != nil || s.writeValue(cc, challenge) != nil {
+					s.log.Warn("ws Body authentication hello rejected", map[string]any{"id": cc.id})
+					return
+				}
+			case authentication.TypeProof:
+				var proof authentication.Proof
+				if err := json.Unmarshal(message, &proof); err != nil {
+					return
+				}
+				accept, bodyID, err := s.bodyAuthenticator.CompleteAuthentication(context.Background(), cc.id, proof)
+				if err != nil {
+					s.log.Warn("ws Body authentication proof rejected", map[string]any{"id": cc.id})
+					return
+				}
+				if err := s.activateAuthenticated(context.Background(), cc, bodyID, func() error { return s.writeValue(cc, accept) }); err != nil {
+					s.log.Warn("ws authenticated Body activation rejected", map[string]any{"id": cc.id, "error": err.Error()})
+					return
+				}
+			default:
+				s.log.Warn("ws pre-authentication message rejected", map[string]any{"id": cc.id, "type": envelope.Type})
+				return
+			}
+			continue
+		}
+		if s.bodyAuthenticator != nil && (envelope.Type == authentication.TypeHello || envelope.Type == authentication.TypeProof ||
+			envelope.Type == authentication.TypeChallenge || envelope.Type == authentication.TypeAccept) {
+			s.log.Warn("ws authentication message after authentication rejected", map[string]any{"id": cc.id, "type": envelope.Type})
+			return
 		}
 		if envelope.Type == string(execution.TypeResult) {
 			if cc.execution == nil {
@@ -459,6 +543,12 @@ func (s *Server) readLoop(cc *clientConn) {
 	}
 }
 
+func (s *Server) writeValue(cc *clientConn, value any) error {
+	cc.writeMu.Lock()
+	defer cc.writeMu.Unlock()
+	return writeJSON(cc, value)
+}
+
 // writeJSON sends a JSON-encoded event to a client connection.
 func (s *Server) writeJSON(cc *clientConn, event events.Event) error {
 	cc.writeMu.Lock()
@@ -519,6 +609,9 @@ func (s *Server) SendAction(ctx context.Context, action actions.Action) error {
 	s.mu.Lock()
 	conns := make([]*clientConn, 0, len(s.conns))
 	for _, cc := range s.conns {
+		if s.bodyAuthenticator != nil && cc.execution == nil {
+			continue
+		}
 		conns = append(conns, cc)
 	}
 	s.mu.Unlock()

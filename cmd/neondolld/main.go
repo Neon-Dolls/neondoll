@@ -175,6 +175,7 @@ func main() {
 		os.Exit(1)
 	}
 	enrollment.RegisterBodyEndpoints(wsServer, enrollmentService)
+	wsServer.SetBodyAuthenticator(enrollmentService)
 	log.Info("Body enrollment endpoints registered", map[string]any{"core_id": enrollmentService.CoreIdentity().CoreID})
 	remoteRegistrar, err := body.NewRemoteRegistrar(bodyRegistry, ns, wsServer)
 	if err != nil {

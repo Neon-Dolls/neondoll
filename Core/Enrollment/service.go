@@ -22,6 +22,8 @@ import (
 
 type Service struct {
 	mu          sync.Mutex
+	authMu      sync.Mutex
+	challenges  map[string]authenticationChallenge
 	store       Store
 	network     *network.Network
 	invitations *invitation.Service
@@ -58,7 +60,7 @@ func NewService(ctx context.Context, store Store, nw *network.Network, invitatio
 			return nil, fmt.Errorf("enrollment: persist Core identity: %w", err)
 		}
 	}
-	return &Service{store: store, network: nw, invitations: invitations, clock: clock, config: config, identity: identity, owners: owners}, nil
+	return &Service{store: store, network: nw, invitations: invitations, clock: clock, config: config, identity: identity, owners: owners, challenges: make(map[string]authenticationChallenge)}, nil
 }
 
 func (s *Service) CoreIdentity() CoreIdentity {
