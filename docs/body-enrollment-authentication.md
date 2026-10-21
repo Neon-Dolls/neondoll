@@ -17,6 +17,11 @@ Body-initiated requests are accepted at:
 - `POST /v1/body/enrollment/begin`
 - `POST /v1/body/enrollment/result`
 
+Before enrollment, a Body obtains the persistent public Core signing identity
+from `GET /v1/core/identity`. The response contains only the CoreID, algorithm,
+and unpadded-base64url Ed25519 public key. Discovery is unauthenticated and does
+not replace the owner approval-code trust ceremony.
+
 Core-initiated invitations are redeemed at:
 
 - `POST /v1/body/enrollment/redeem`

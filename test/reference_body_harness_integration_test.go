@@ -5,8 +5,6 @@ package integration
 import (
 	"bytes"
 	"context"
-	"crypto/ed25519"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -34,11 +32,9 @@ import (
 const referenceProcessRole = "NEONDOLL_REFERENCE_PROCESS_ROLE"
 
 type referenceCoreReady struct {
-	BaseURL       string `json:"base_url"`
-	WebSocketURL  string `json:"websocket_url"`
-	AdminSocket   string `json:"admin_socket"`
-	CoreID        string `json:"core_id"`
-	CorePublicKey string `json:"core_public_key"`
+	BaseURL      string `json:"base_url"`
+	WebSocketURL string `json:"websocket_url"`
+	AdminSocket  string `json:"admin_socket"`
 }
 
 type referenceBodyStatus struct {
@@ -151,10 +147,9 @@ func runReferenceCoreProcess() error {
 	go func() { serveOwner <- ownerServer.Serve() }()
 	serveWebSocket := make(chan error, 1)
 	go func() { serveWebSocket <- server.Start(ctx) }()
-	identity := enrollmentService.CoreIdentity()
 	ready := referenceCoreReady{
 		BaseURL: "http://" + listener.Addr().String(), WebSocketURL: "ws://" + listener.Addr().String() + "/ws",
-		AdminSocket: ownerSocket, CoreID: identity.CoreID, CorePublicKey: base64.RawURLEncoding.EncodeToString(identity.PublicKey),
+		AdminSocket: ownerSocket,
 	}
 	if err := writeReferenceJSON(readyPath, ready); err != nil {
 		return err
@@ -193,15 +188,11 @@ func runReferenceBodyProcess() error {
 	}
 	var status referenceBodyStatus
 	if client.State.Receipt == nil {
-		ready, err := waitReferenceJSON[referenceCoreReady](ctx, readyPath, func(value referenceCoreReady) bool { return value.CoreID != "" })
+		ready, err := waitReferenceJSON[referenceCoreReady](ctx, readyPath, func(value referenceCoreReady) bool { return value.BaseURL != "" })
 		if err != nil {
 			return err
 		}
-		coreKey, err := decodeReferenceCoreKey(ready.CorePublicKey)
-		if err != nil {
-			return err
-		}
-		pending, err := client.BeginEnrollment(ctx, ready.BaseURL, ready.CoreID, coreKey)
+		pending, err := client.BeginEnrollment(ctx, ready.BaseURL)
 		if err != nil {
 			return err
 		}
@@ -222,9 +213,7 @@ func runReferenceBodyProcess() error {
 	}
 	status.BodyID = client.State.BodyID()
 	for ctx.Err() == nil {
-		ready, err := waitReferenceJSON[referenceCoreReady](ctx, readyPath, func(value referenceCoreReady) bool {
-			return value.WebSocketURL != "" && value.CoreID == client.State.CoreID && value.CorePublicKey == client.State.CorePublicKey
-		})
+		ready, err := waitReferenceJSON[referenceCoreReady](ctx, readyPath, func(value referenceCoreReady) bool { return value.WebSocketURL != "" })
 		if err != nil {
 			return err
 		}
@@ -261,7 +250,11 @@ func TestReferenceBodyEnrollmentAuthenticationRestartAndRevocation(t *testing.T)
 	coreProcess := startReferenceProcess(t, "core", map[string]string{
 		"NEONDOLL_REFERENCE_CORE_STATE": coreState, "NEONDOLL_REFERENCE_CORE_READY": coreReadyPath,
 	})
-	ready := awaitReferenceJSON(t, coreReadyPath, func(value referenceCoreReady) bool { return value.CoreID != "" })
+	ready := awaitReferenceJSON(t, coreReadyPath, func(value referenceCoreReady) bool { return value.BaseURL != "" })
+	initialIdentity, _, err := referencebody.DiscoverCoreIdentity(context.Background(), nil, ready.BaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
 	bodyProcess := startReferenceProcess(t, "body", map[string]string{
 		"NEONDOLL_REFERENCE_BODY_STATE": bodyState, "NEONDOLL_REFERENCE_BODY_STATUS": bodyStatusPath,
 		"NEONDOLL_REFERENCE_CORE_READY": coreReadyPath,
@@ -296,8 +289,12 @@ func TestReferenceBodyEnrollmentAuthenticationRestartAndRevocation(t *testing.T)
 	coreProcess = startReferenceProcess(t, "core", map[string]string{
 		"NEONDOLL_REFERENCE_CORE_STATE": coreState, "NEONDOLL_REFERENCE_CORE_READY": coreReadyPath,
 	})
-	restartedCore := awaitReferenceJSON(t, coreReadyPath, func(value referenceCoreReady) bool { return value.CoreID != "" })
-	if restartedCore.CoreID != ready.CoreID || restartedCore.CorePublicKey != ready.CorePublicKey {
+	restartedCore := awaitReferenceJSON(t, coreReadyPath, func(value referenceCoreReady) bool { return value.BaseURL != "" })
+	restartedIdentity, _, err := referencebody.DiscoverCoreIdentity(context.Background(), nil, restartedCore.BaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if restartedIdentity != initialIdentity {
 		t.Fatal("Core enrollment identity changed after restart")
 	}
 	connectionsBefore := connected.Connections
@@ -422,14 +419,6 @@ func executeReference(t *testing.T, baseURL, bodyID, message string) corebody.Ex
 		t.Fatal(err)
 	}
 	return result
-}
-
-func decodeReferenceCoreKey(encoded string) (ed25519.PublicKey, error) {
-	raw, err := base64.RawURLEncoding.DecodeString(encoded)
-	if err != nil || len(raw) != ed25519.PublicKeySize {
-		return nil, errors.New("reference Body: invalid Core public key")
-	}
-	return ed25519.PublicKey(raw), nil
 }
 
 func writeReferenceJSON(path string, value any) error {

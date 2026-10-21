@@ -167,6 +167,13 @@ func (s *Service) CoreIdentity() CoreIdentity {
 	return CoreIdentity{CoreID: s.identity.CoreID, PublicKey: append(ed25519.PublicKey(nil), s.identity.PublicKey...)}
 }
 
+func (s *Service) PublicCoreIdentity() dollnetwork.CoreIdentityResponse {
+	return dollnetwork.CoreIdentityResponse{
+		Version: dollnetwork.CoreIdentityVersion, CoreID: s.identity.CoreID,
+		Algorithm: dollnetwork.CoreIdentityAlgorithm, PublicKey: dollnetwork.EncodeRawURL(s.identity.PublicKey),
+	}
+}
+
 func (s *Service) Begin(ctx context.Context, request dollnetwork.EnrollmentBeginRequest) (*dollnetwork.EnrollmentPendingResponse, error) {
 	if request.Version != dollnetwork.EnrollmentVersion {
 		return nil, ErrUnsupportedVersion

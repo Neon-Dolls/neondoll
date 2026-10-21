@@ -5,7 +5,6 @@ package integration
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -23,8 +22,6 @@ import (
 
 	corebody "github.com/Neon-Dolls/neondoll/Core/Body"
 	"github.com/Neon-Dolls/neondoll/Core/Config"
-	"github.com/Neon-Dolls/neondoll/Core/Enrollment"
-	"github.com/Neon-Dolls/neondoll/Core/Persistence"
 	"github.com/Neon-Dolls/neondoll/DollLink/Capabilities"
 	"github.com/Neon-Dolls/neondoll/test/referencebody"
 )
@@ -48,6 +45,10 @@ func TestProductionDaemonBodyLifecycleAcceptance(t *testing.T) {
 
 	daemon := startDaemonAcceptanceProcess(t, binaries.daemon, coreDir, acceptanceSocket)
 	ready := publishDaemonReady(t, coreDir, listenAddress, adminSocket, coreReadyPath)
+	initialIdentity, _, err := referencebody.DiscoverCoreIdentity(context.Background(), nil, ready.BaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
 	assertUnauthenticatedAdvertisementRejected(t, ready.WebSocketURL, "body_unenrolled")
 	unknown := executeDaemonAcceptance(t, acceptanceSocket, "body_unenrolled", "pre-auth")
 	if unknown.Status == corebody.StatusSuccess {
@@ -92,7 +93,11 @@ func TestProductionDaemonBodyLifecycleAcceptance(t *testing.T) {
 	_ = os.Remove(coreReadyPath)
 	daemon = startDaemonAcceptanceProcess(t, binaries.daemon, coreDir, acceptanceSocket)
 	restartedCore := publishDaemonReady(t, coreDir, listenAddress, adminSocket, coreReadyPath)
-	if restartedCore.CoreID != ready.CoreID || restartedCore.CorePublicKey != ready.CorePublicKey {
+	restartedIdentity, _, err := referencebody.DiscoverCoreIdentity(context.Background(), nil, restartedCore.BaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if restartedIdentity != initialIdentity {
 		t.Fatal("Core signing identity changed after daemon restart")
 	}
 	connectionsBefore := connected.Connections
@@ -177,33 +182,30 @@ func publishDaemonReady(t *testing.T, coreDir, listenAddress, adminSocket, ready
 	t.Helper()
 	waitForUnixSocket(t, adminSocket)
 	waitForUnixSocket(t, filepath.Join(coreDir, "acceptance.sock"))
-	databasePath := filepath.Join(coreDir, "data", "neondoll.db")
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	var identity *enrollment.CoreIdentity
-	for identity == nil {
-		store, err := persistence.NewStore(databasePath)
-		if err == nil {
-			identity, err = store.(enrollment.Store).LoadCoreIdentity(ctx)
-			store.Close()
-		}
-		if identity != nil {
-			break
-		}
-		select {
-		case <-ctx.Done():
-			t.Fatalf("wait for daemon Core identity: %v", ctx.Err())
-		case <-time.After(20 * time.Millisecond):
-		}
-	}
 	ready := referenceCoreReady{
 		BaseURL: "http://" + listenAddress, WebSocketURL: "ws://" + listenAddress + "/ws", AdminSocket: adminSocket,
-		CoreID: identity.CoreID, CorePublicKey: base64.RawURLEncoding.EncodeToString(identity.PublicKey),
 	}
+	awaitDiscoveredCoreIdentity(t, ready.BaseURL)
 	if err := writeReferenceJSON(readyPath, ready); err != nil {
 		t.Fatal(err)
 	}
 	return ready
+}
+
+func awaitDiscoveredCoreIdentity(t *testing.T, baseURL string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	for {
+		if _, _, err := referencebody.DiscoverCoreIdentity(ctx, nil, baseURL); err == nil {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatalf("wait for Core identity discovery: %v", ctx.Err())
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
 }
 
 type daemonAcceptanceProcess struct {

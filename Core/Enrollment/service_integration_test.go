@@ -135,6 +135,7 @@ func TestBodyInitiatedEnrollmentPersistsIdentityMembershipAndRecoverableReceipt(
 	}
 
 	coreID := fx.service.CoreIdentity()
+	publicCoreID := fx.service.PublicCoreIdentity()
 	if err := fx.store.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -156,6 +157,9 @@ func TestBodyInitiatedEnrollmentPersistsIdentityMembershipAndRecoverableReceipt(
 	}
 	if service2.CoreIdentity().CoreID != coreID.CoreID || !service2.CoreIdentity().PublicKey.Equal(coreID.PublicKey) {
 		t.Fatal("Core signing identity changed across restart")
+	}
+	if service2.PublicCoreIdentity() != publicCoreID {
+		t.Fatal("public Core identity discovery changed across restart")
 	}
 	if _, err := service2.Result(context.Background(), recoveryRequest); !errors.Is(err, enrollment.ErrReplayed) {
 		t.Fatalf("persisted result nonce replay error = %v", err)
