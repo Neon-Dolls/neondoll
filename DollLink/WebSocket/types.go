@@ -594,6 +594,21 @@ func (s *Server) Execute(ctx context.Context, bodyID, dollID string, payload exe
 	return cc.execution.Execute(ctx, dollID, payload)
 }
 
+// DisconnectBody immediately invalidates the current authenticated session
+// for bodyID. Closing the execution client releases pending requests; closing
+// the socket causes the normal generation-aware disconnect lifecycle to run.
+func (s *Server) DisconnectBody(bodyID string) {
+	s.activationMu.Lock()
+	s.mu.Lock()
+	cc := s.execution[bodyID]
+	s.mu.Unlock()
+	if cc != nil {
+		cc.execution.Close(execution.ErrDisconnected)
+		_ = cc.conn.Close()
+	}
+	s.activationMu.Unlock()
+}
+
 // SendAction delivers an outbound action to all connected WebSocket clients.
 //
 // Core 1 delivery rule:

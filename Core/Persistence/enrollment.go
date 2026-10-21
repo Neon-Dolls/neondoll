@@ -73,6 +73,23 @@ func (s *store) GetPendingByCodeVerifier(ctx context.Context, verifier []byte) (
 	return scanPending(s.db.QueryRowContext(ctx, pendingSelect+` WHERE code_verifier = ?`, verifier))
 }
 
+func (s *store) ListPending(ctx context.Context) ([]*enrollment.PendingEnrollment, error) {
+	rows, err := s.db.QueryContext(ctx, pendingSelect+` ORDER BY created_at, request_id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var result []*enrollment.PendingEnrollment
+	for rows.Next() {
+		pending, err := scanPending(rows)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, pending)
+	}
+	return result, rows.Err()
+}
+
 const pendingSelect = `SELECT request_id, mode, core_id, body_public_key, wg_public_key, body_nonce,
 	code_verifier, invitation_id, metadata_json, status, attempt_count, approved_owner_id,
 	permissions_json, created_at, expires_at FROM pending_enrollments`
@@ -220,12 +237,34 @@ func (s *store) GetReceipt(ctx context.Context, requestID string) (*dollnetwork.
 }
 
 func (s *store) GetBody(ctx context.Context, bodyID string) (*enrollment.BodyRecord, error) {
+	return scanBody(s.db.QueryRowContext(ctx, bodySelect+` WHERE body_id = ?`, bodyID))
+}
+
+const bodySelect = `SELECT body_id, public_key, key_version, owner_id, permissions_json, membership_reference, created_at, updated_at, revoked_at FROM body_credentials`
+
+func (s *store) ListBodies(ctx context.Context) ([]*enrollment.BodyRecord, error) {
+	rows, err := s.db.QueryContext(ctx, bodySelect+` ORDER BY body_id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var result []*enrollment.BodyRecord
+	for rows.Next() {
+		body, err := scanBody(rows)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, body)
+	}
+	return result, rows.Err()
+}
+
+func scanBody(row rowScanner) (*enrollment.BodyRecord, error) {
 	var body enrollment.BodyRecord
 	var publicKey []byte
 	var permissions, created, updated string
 	var revoked sql.NullString
-	err := s.db.QueryRowContext(ctx, `SELECT body_id, public_key, key_version, owner_id, permissions_json, membership_reference, created_at, updated_at, revoked_at FROM body_credentials WHERE body_id = ?`, bodyID).
-		Scan(&body.BodyID, &publicKey, &body.KeyVersion, &body.OwnerID, &permissions, &body.MembershipRef, &created, &updated, &revoked)
+	err := row.Scan(&body.BodyID, &publicKey, &body.KeyVersion, &body.OwnerID, &permissions, &body.MembershipRef, &created, &updated, &revoked)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -244,6 +283,36 @@ func (s *store) GetBody(ctx context.Context, bodyID string) (*enrollment.BodyRec
 		body.RevokedAt = &value
 	}
 	return &body, nil
+}
+
+func (s *store) RevokeBody(ctx context.Context, bodyID string, membership *network.Membership, revokedAt time.Time) error {
+	if membership == nil || membership.BodyID != bodyID || membership.Status != network.MembershipRevoked {
+		return errors.New("revoke Body: invalid revoked membership")
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	result, err := tx.ExecContext(ctx, `UPDATE body_credentials SET revoked_at = ?, updated_at = ? WHERE body_id = ? AND revoked_at IS NULL`, formatTime(revokedAt), formatTime(revokedAt), bodyID)
+	if err != nil {
+		return err
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows != 1 {
+		return enrollment.ErrUnknownBody
+	}
+	membershipJSON, err := json.Marshal(membershipToRow(membership))
+	if err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT OR REPLACE INTO network_state(key, value, updated_at) VALUES(?, ?, datetime('now'))`, membershipKey(membership.PeerID), string(membershipJSON)); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func membershipToRow(m *network.Membership) membershipRow {

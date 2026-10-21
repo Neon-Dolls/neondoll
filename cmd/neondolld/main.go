@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -21,6 +22,7 @@ import (
 	"github.com/Neon-Dolls/neondoll/Core/Interaction"
 	"github.com/Neon-Dolls/neondoll/Core/Invitation"
 	"github.com/Neon-Dolls/neondoll/Core/Network"
+	"github.com/Neon-Dolls/neondoll/Core/OwnerControl"
 	"github.com/Neon-Dolls/neondoll/Core/Persistence"
 	"github.com/Neon-Dolls/neondoll/Core/Pulse"
 	"github.com/Neon-Dolls/neondoll/Core/Runtime"
@@ -169,7 +171,8 @@ func main() {
 		os.Exit(1)
 	}
 	invitationService := invitation.NewService(invitationStore, invitation.RealClock{})
-	enrollmentService, err := enrollment.NewService(ctx, enrollmentStore, nw, invitationService, nil, nil, enrollment.DefaultConfig())
+	ownerBoundary := ownercontrol.NewBoundary()
+	enrollmentService, err := enrollment.NewService(ctx, enrollmentStore, nw, invitationService, ownerBoundary, nil, enrollment.DefaultConfig())
 	if err != nil {
 		log.Error("Body enrollment service setup error", map[string]any{"error": err.Error()})
 		os.Exit(1)
@@ -183,7 +186,23 @@ func main() {
 		os.Exit(1)
 	}
 	wsServer.SetExecutionSessionLifecycle(remoteRegistrar)
+	enrollmentService.SetRevocationLifecycle(wsServer, rt)
 	log.Info("ws transport created", map[string]any{"listen": listenAddr})
+
+	adminSocket := filepath.Join(cfg.Paths.DataDir, "neondoll-admin.sock")
+	ownerService := ownercontrol.NewService(enrollmentService, invitationService, ownerBoundary)
+	ownerServer, err := ownercontrol.NewServer(adminSocket, ownerService)
+	if err != nil {
+		log.Error("owner control setup error", map[string]any{"error": err.Error()})
+		os.Exit(1)
+	}
+	go func() {
+		if err := ownerServer.Serve(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Error("owner control server error", map[string]any{"error": err.Error()})
+			cancel()
+		}
+	}()
+	log.Info("owner control ready", map[string]any{"socket": adminSocket})
 
 	// If the tunnel provides a netstack Net, serve WS through the overlay.
 	if tnet := rt.Tunnel().Netstack(); tnet != nil {
@@ -344,6 +363,9 @@ func main() {
 
 		if err := wsServer.Shutdown(shutdownCtx); err != nil {
 			log.Error("ws shutdown error", map[string]any{"error": err.Error()})
+		}
+		if err := ownerServer.Shutdown(shutdownCtx); err != nil {
+			log.Error("owner control shutdown error", map[string]any{"error": err.Error()})
 		}
 		if pulseRunner != nil {
 			pulseRunner.Stop()

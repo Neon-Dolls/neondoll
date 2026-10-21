@@ -120,10 +120,10 @@ type CreateParams struct {
 // stored in plaintext by the service). It also carries metadata the caller
 // needs to build the out-of-band invitation document.
 type CreatedInvitation struct {
-	ID                 string
-	Secret             string
-	ExpiresAt          time.Time
-	BootstrapEndpoints dollnetwork.Endpoints
+	ID                 string                `json:"invitation_id"`
+	Secret             string                `json:"invitation_secret"`
+	ExpiresAt          time.Time             `json:"expires_at"`
+	BootstrapEndpoints dollnetwork.Endpoints `json:"bootstrap_endpoints,omitempty"`
 }
 
 // Create generates a new invitation with a cryptographically strong secret

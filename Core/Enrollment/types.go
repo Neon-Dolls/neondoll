@@ -35,6 +35,7 @@ var (
 	ErrInvalidProof       = errors.New("enrollment: invalid proof")
 	ErrCoreIdentity       = errors.New("enrollment: core identity mismatch")
 	ErrUnsupportedVersion = errors.New("enrollment: unsupported version")
+	ErrUnknownBody        = errors.New("enrollment: unknown Body")
 )
 
 type CoreIdentity struct {
@@ -71,6 +72,7 @@ type BodyRecord struct {
 	CreatedAt     time.Time
 	UpdatedAt     time.Time
 	RevokedAt     *time.Time
+	Status        string
 }
 
 type Completion struct {
@@ -88,6 +90,7 @@ type Store interface {
 	CreatePending(context.Context, *PendingEnrollment) error
 	GetPending(context.Context, string) (*PendingEnrollment, error)
 	GetPendingByCodeVerifier(context.Context, []byte) (*PendingEnrollment, error)
+	ListPending(context.Context) ([]*PendingEnrollment, error)
 	CountPending(context.Context, time.Time) (int, error)
 	IncrementAttempts(context.Context, string) error
 	ConsumeResultNonce(context.Context, string, []byte) (bool, error)
@@ -95,7 +98,12 @@ type Store interface {
 	Complete(context.Context, *Completion) error
 	GetReceipt(context.Context, string) (*dollnetwork.EnrollmentReceipt, error)
 	GetBody(context.Context, string) (*BodyRecord, error)
+	ListBodies(context.Context) ([]*BodyRecord, error)
+	RevokeBody(context.Context, string, *network.Membership, time.Time) error
 }
+
+type SessionRevoker interface{ DisconnectBody(string) }
+type PeerRefresher interface{ RefreshPeers(context.Context) error }
 
 type Clock interface{ Now() time.Time }
 type realClock struct{}

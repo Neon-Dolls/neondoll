@@ -31,6 +31,97 @@ type Service struct {
 	config      Config
 	identity    *CoreIdentity
 	owners      OwnerAuthorizer
+	sessions    SessionRevoker
+	peers       PeerRefresher
+}
+
+func (s *Service) SetRevocationLifecycle(sessions SessionRevoker, peers PeerRefresher) {
+	s.mu.Lock()
+	s.sessions = sessions
+	s.peers = peers
+	s.mu.Unlock()
+}
+
+func (s *Service) ListPending(ctx context.Context, ownerID string) ([]*PendingEnrollment, error) {
+	if ownerID == "" || s.owners.AuthorizeEnrollment(ctx, ownerID, OwnerAction{Operation: "list_pending"}) != nil {
+		return nil, ErrUnauthorized
+	}
+	items, err := s.store.ListPending(ctx)
+	if err != nil {
+		return nil, err
+	}
+	now := s.clock.Now()
+	result := make([]*PendingEnrollment, 0, len(items))
+	for _, item := range items {
+		if item.Status == StatusPending && !now.Before(item.ExpiresAt) {
+			continue
+		}
+		if item.Status != StatusPending {
+			continue
+		}
+		item.CodeVerifier = nil
+		item.BodyNonce = nil
+		result = append(result, item)
+	}
+	return result, nil
+}
+
+func (s *Service) ListBodies(ctx context.Context, ownerID string) ([]*BodyRecord, error) {
+	if ownerID == "" || s.owners.AuthorizeEnrollment(ctx, ownerID, OwnerAction{Operation: "list_bodies"}) != nil {
+		return nil, ErrUnauthorized
+	}
+	bodies, err := s.store.ListBodies(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for _, body := range bodies {
+		body.Status = string(StatusEnrolled)
+		if body.RevokedAt != nil {
+			body.Status = "revoked"
+		}
+	}
+	return bodies, nil
+}
+
+func (s *Service) Revoke(ctx context.Context, bodyID, ownerID string) error {
+	if bodyID == "" || ownerID == "" || s.owners.AuthorizeEnrollment(ctx, ownerID, OwnerAction{Operation: "revoke", RequestID: bodyID}) != nil {
+		return ErrUnauthorized
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	body, err := s.store.GetBody(ctx, bodyID)
+	if err != nil {
+		return err
+	}
+	if body == nil {
+		return ErrUnknownBody
+	}
+	membership := s.network.GetMembership(network.PeerID(body.MembershipRef))
+	if membership == nil || membership.BodyID != bodyID {
+		return ErrUnknownBody
+	}
+	if body.RevokedAt == nil {
+		copy := *membership
+		copy.Status = network.MembershipRevoked
+		revokedAt := s.clock.Now().UTC()
+		if err := s.store.RevokeBody(ctx, bodyID, &copy, revokedAt); err != nil {
+			return err
+		}
+	}
+	if membership.Status != network.MembershipRevoked {
+		if err := s.network.RevokeMembership(membership.PeerID); err != nil && !errors.Is(err, network.ErrMembershipRevoked) {
+			return err
+		}
+	}
+	if s.sessions != nil {
+		s.sessions.DisconnectBody(bodyID)
+	}
+	if s.peers != nil {
+		if err := s.peers.RefreshPeers(ctx); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func NewService(ctx context.Context, store Store, nw *network.Network, invitations *invitation.Service, owners OwnerAuthorizer, clock Clock, config Config) (*Service, error) {
