@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sync"
 
 	"github.com/Neon-Dolls/neondoll/DollLink/Execution"
 )
@@ -24,6 +25,7 @@ type RemoteExecutionTransport interface {
 type RemoteBody struct {
 	id        BodyID
 	name      string
+	mu        sync.RWMutex
 	caps      *CapabilityRegistry
 	transport RemoteExecutionTransport
 }
@@ -53,14 +55,50 @@ func (b *RemoteBody) ID() BodyID     { return b.id }
 func (b *RemoteBody) Kind() BodyKind { return BodyKindRemote }
 func (b *RemoteBody) Name() string   { return b.name }
 
-func (b *RemoteBody) Describe() []Capability { return b.caps.All() }
+func (b *RemoteBody) Describe() []Capability {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return b.caps.All()
+}
 
 func (b *RemoteBody) ResolveCapability(capID, operation string) error {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
 	return b.caps.Resolve(capID, operation)
 }
 
 func (b *RemoteBody) RegisterCapability(capability Capability) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	return b.caps.Register(capability)
+}
+
+// replaceCapabilities atomically replaces the current advertisement. A
+// replacement is validated completely before it becomes visible.
+func (b *RemoteBody) replaceCapabilities(capabilities []Capability, connected bool) error {
+	next := NewCapabilityRegistry()
+	for _, capability := range capabilities {
+		if !connected {
+			capability.Available = false
+		}
+		if err := next.Register(capability); err != nil {
+			return fmt.Errorf("remote body %q: %w", b.id, err)
+		}
+	}
+	b.mu.Lock()
+	b.caps = next
+	b.mu.Unlock()
+	return nil
+}
+
+func (b *RemoteBody) setDisconnected() {
+	_ = b.replaceCapabilities(b.Describe(), false)
+}
+
+func (b *RemoteBody) setTransport(transport RemoteExecutionTransport) {
+	b.mu.Lock()
+	b.transport = transport
+	b.mu.Unlock()
 }
 
 // Execute satisfies Body using a non-cancellable background context. Core
@@ -78,7 +116,10 @@ func (b *RemoteBody) ExecuteContext(ctx context.Context, request ExecutionReques
 	if arguments == nil {
 		arguments = map[string]any{}
 	}
-	wireResult, err := b.transport.Execute(ctx, string(b.id), request.Doll, execution.RequestPayload{
+	b.mu.RLock()
+	transport := b.transport
+	b.mu.RUnlock()
+	wireResult, err := transport.Execute(ctx, string(b.id), request.Doll, execution.RequestPayload{
 		ExecutionID: request.ExecutionID,
 		Capability:  request.Capability,
 		Operation:   request.Operation,

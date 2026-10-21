@@ -9,6 +9,7 @@ import (
 
 	"github.com/gorilla/websocket"
 
+	"github.com/Neon-Dolls/neondoll/DollLink/Capabilities"
 	"github.com/Neon-Dolls/neondoll/DollLink/Events"
 	"github.com/Neon-Dolls/neondoll/DollLink/Execution"
 )
@@ -128,6 +129,17 @@ func (c *Client) Done() <-chan struct{} { return c.done }
 // used for execution results.
 func (c *Client) SendEvent(ctx context.Context, event events.Event) error {
 	return c.write(ctx, event)
+}
+
+// AdvertiseCapabilities sends the canonical repeatable body.capabilities
+// message. bodyID is a wire claim; Core accepts it only when it matches the
+// independently authenticated connection identity.
+func (c *Client) AdvertiseCapabilities(ctx context.Context, bodyID string, advertised []capabilities.Capability) error {
+	message := capabilities.NewAdvertisement(bodyID, advertised)
+	if err := message.Validate(); err != nil {
+		return err
+	}
+	return c.write(ctx, message)
 }
 
 func (c *Client) readLoop(ctx context.Context) error {
