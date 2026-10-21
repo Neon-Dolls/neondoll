@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -42,9 +41,45 @@ func New(statePath string) (*Client, error) {
 	return &Client{StatePath: statePath, State: state, HTTP: &http.Client{Timeout: 5 * time.Second}}, nil
 }
 
-func (c *Client) BeginEnrollment(ctx context.Context, baseURL, coreID string, corePublicKey ed25519.PublicKey) (*dollnetwork.EnrollmentPendingResponse, error) {
+func DiscoverCoreIdentity(ctx context.Context, client *http.Client, baseURL string) (dollnetwork.CoreIdentityResponse, ed25519.PublicKey, error) {
+	if client == nil {
+		client = http.DefaultClient
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/v1/core/identity", nil)
+	if err != nil {
+		return dollnetwork.CoreIdentityResponse{}, nil, err
+	}
+	response, err := client.Do(request)
+	if err != nil {
+		return dollnetwork.CoreIdentityResponse{}, nil, err
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return dollnetwork.CoreIdentityResponse{}, nil, fmt.Errorf("reference Body: Core identity discovery returned %s", response.Status)
+	}
+	var identity dollnetwork.CoreIdentityResponse
+	if err := json.NewDecoder(response.Body).Decode(&identity); err != nil {
+		return dollnetwork.CoreIdentityResponse{}, nil, err
+	}
+	publicKey, err := dollnetwork.DecodeBodyPublicKey(identity.PublicKey)
+	if err != nil || identity.Version != dollnetwork.CoreIdentityVersion || identity.CoreID == "" ||
+		identity.Algorithm != dollnetwork.CoreIdentityAlgorithm || dollnetwork.EncodeRawURL(publicKey) != identity.PublicKey {
+		return dollnetwork.CoreIdentityResponse{}, nil, errors.New("reference Body: invalid Core identity discovery response")
+	}
+	return identity, publicKey, nil
+}
+
+func (c *Client) BeginEnrollment(ctx context.Context, baseURL string) (*dollnetwork.EnrollmentPendingResponse, error) {
 	if c.State.Receipt != nil {
 		return nil, errors.New("reference Body: already enrolled")
+	}
+	identity, corePublicKey, err := DiscoverCoreIdentity(ctx, c.HTTP, baseURL)
+	if err != nil {
+		return nil, err
+	}
+	if (c.State.CoreID != "" && c.State.CoreID != identity.CoreID) ||
+		(c.State.CorePublicKey != "" && c.State.CorePublicKey != identity.PublicKey) {
+		return nil, errors.New("reference Body: discovered Core identity changed during enrollment")
 	}
 	privateKey, err := c.State.SigningPrivate()
 	if err != nil {
@@ -58,8 +93,8 @@ func (c *Client) BeginEnrollment(ctx context.Context, baseURL, coreID string, co
 	if c.State.RequestID == "" {
 		c.State.RequestID = "request_" + uuid.NewString()
 	}
-	c.State.CoreID = coreID
-	c.State.CorePublicKey = base64.RawURLEncoding.EncodeToString(corePublicKey)
+	c.State.CoreID = identity.CoreID
+	c.State.CorePublicKey = identity.PublicKey
 	if err := c.State.Save(c.StatePath); err != nil {
 		return nil, err
 	}
@@ -68,7 +103,7 @@ func (c *Client) BeginEnrollment(ctx context.Context, baseURL, coreID string, co
 		return nil, err
 	}
 	request := dollnetwork.EnrollmentBeginRequest{
-		Version: 1, RequestID: c.State.RequestID, CoreID: coreID,
+		Version: 1, RequestID: c.State.RequestID, CoreID: identity.CoreID,
 		BodyPublicKey: dollnetwork.EncodeRawURL(publicKey), WGPublicKey: wg.PublicKeyBase64(),
 		BodyNonce: bodyNonce, Metadata: c.State.Metadata,
 	}
@@ -82,7 +117,7 @@ func (c *Client) BeginEnrollment(ctx context.Context, baseURL, coreID string, co
 	if err := dollnetwork.VerifyEnrollmentPending(corePublicKey, pending); err != nil {
 		return nil, fmt.Errorf("reference Body: verify pending response: %w", err)
 	}
-	if pending.Version != dollnetwork.EnrollmentVersion || pending.CoreID != coreID || pending.RequestID != c.State.RequestID ||
+	if pending.Version != dollnetwork.EnrollmentVersion || pending.CoreID != identity.CoreID || pending.RequestID != c.State.RequestID ||
 		pending.BodyKeyFingerprint != dollnetwork.BodyKeyFingerprint(publicKey) || pending.ApprovalCode == "" || !time.Now().Before(pending.ExpiresAt) {
 		return nil, errors.New("reference Body: pending response binding mismatch")
 	}

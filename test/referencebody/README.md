@@ -5,6 +5,10 @@ an Ed25519 signing identity, an independent X25519/WireGuard identity, the
 verified Core identity, and the signed enrollment receipt in an owner-protected
 state file.
 
+Before enrollment it discovers the CoreID and Ed25519 public key from
+`GET /v1/core/identity`. The key is not preconfigured; the owner approval-code
+ceremony remains the trust-establishment step.
+
 The integration test composes the production enrollment wire types, owner Unix
 socket, Doll Link authentication frames, WebSocket client, capability
 dispatcher, RemoteRegistrar, Registry, and Guard. Core and Body run as separate

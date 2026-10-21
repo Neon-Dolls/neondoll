@@ -11,6 +11,7 @@ temporary configuration and persistent state.
 | Stage | Result |
 | --- | --- |
 | Body identity | A real Ed25519 signing key and independent X25519/WireGuard key are generated and stored with mode 0600. |
+| Core identity discovery | The Body fetches the persistent CoreID and unpadded-base64url Ed25519 public key from `GET /v1/core/identity`; no database access or pre-shared Core key is used. |
 | Enrollment | The Body sends the canonical signed enrollment request to the daemon's production HTTP handler. |
 | Owner approval | The built `neondollctl` approves through the daemon's production owner-control Unix socket. |
 | Receipt | The Body polls with newly signed nonces and verifies the Core-signed enrollment receipt and all identity bindings. |
@@ -42,8 +43,9 @@ acceptance.
 
 ## Remaining limitations
 
-- TLS termination and deployment-specific endpoint discovery remain external
-  deployment concerns; the isolated acceptance test uses loopback TCP.
+- TLS termination and discovery of the Core's network URL remain external
+  deployment concerns; public identity discovery occurs through that URL and
+  the isolated acceptance test uses loopback TCP.
 - The reference Body owns a real WireGuard identity and enrollment binds its
   public key, but this test targets Doll Link over loopback and does not repeat
   the separate WireGuard/Relay transport acceptance suites.

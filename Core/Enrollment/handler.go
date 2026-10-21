@@ -15,6 +15,14 @@ type Handler struct{ service *Service }
 
 func NewHandler(service *Service) *Handler { return &Handler{service: service} }
 
+func (h *Handler) CoreIdentity(w http.ResponseWriter, request *http.Request) {
+	if request.Method != http.MethodGet {
+		writeEnrollmentJSON(w, http.StatusMethodNotAllowed, dollnetwork.EnrollmentErrorResponse{Version: 1, Error: dollnetwork.EnrollmentError{Code: "invalid_request", Message: "method not allowed"}})
+		return
+	}
+	writeEnrollmentJSON(w, http.StatusOK, h.service.PublicCoreIdentity())
+}
+
 func (h *Handler) Begin(w http.ResponseWriter, request *http.Request) {
 	var body dollnetwork.EnrollmentBeginRequest
 	if !h.decode(w, request, &body) {
@@ -77,6 +85,7 @@ func RegisterBodyEndpoints(server interface {
 	RegisterHandler(string, http.HandlerFunc)
 }, service *Service) {
 	handler := NewHandler(service)
+	server.RegisterHandler("/v1/core/identity", handler.CoreIdentity)
 	server.RegisterHandler("/v1/body/enrollment/begin", handler.Begin)
 	server.RegisterHandler("/v1/body/enrollment/redeem", handler.Redeem)
 	server.RegisterHandler("/v1/body/enrollment/result", handler.Result)
