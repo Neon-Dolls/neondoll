@@ -31,6 +31,61 @@ type blockingActivationLifecycle struct {
 	advertised    chan activationAdvertisement
 }
 
+type blockingDisconnectLifecycle struct {
+	mu                sync.Mutex
+	connections       int
+	disconnections    int
+	current           string
+	disconnectEntered chan struct{}
+	releaseDisconnect chan struct{}
+	secondConnected   chan struct{}
+}
+
+func newBlockingDisconnectLifecycle() *blockingDisconnectLifecycle {
+	return &blockingDisconnectLifecycle{
+		disconnectEntered: make(chan struct{}),
+		releaseDisconnect: make(chan struct{}),
+		secondConnected:   make(chan struct{}),
+	}
+}
+
+func (l *blockingDisconnectLifecycle) SessionConnected(_ context.Context, sessionID, _ string) error {
+	l.mu.Lock()
+	l.connections++
+	connection := l.connections
+	l.current = sessionID
+	l.mu.Unlock()
+	if connection == 2 {
+		close(l.secondConnected)
+	}
+	return nil
+}
+
+func (l *blockingDisconnectLifecycle) CapabilitiesAdvertised(_ context.Context, sessionID, _ string, _ []capabilities.Capability) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.current != sessionID {
+		return errors.New("stale session")
+	}
+	return nil
+}
+
+func (l *blockingDisconnectLifecycle) SessionDisconnected(sessionID, _ string) {
+	l.mu.Lock()
+	l.disconnections++
+	disconnection := l.disconnections
+	l.mu.Unlock()
+	if disconnection == 1 {
+		close(l.disconnectEntered)
+		<-l.releaseDisconnect
+	}
+	l.mu.Lock()
+	if l.current == sessionID {
+		l.current = ""
+	}
+	l.mu.Unlock()
+}
+
 func newBlockingActivationLifecycle() *blockingActivationLifecycle {
 	return &blockingActivationLifecycle{
 		secondEntered: make(chan struct{}),
@@ -303,6 +358,109 @@ func TestConnectionActivationKeepsRegistrarAndExecutionGenerationOrdered(t *test
 	server.mu.Unlock()
 	if transport == nil || transport.id != current {
 		t.Fatalf("registrar generation %q and transport generation disagree", current)
+	}
+}
+
+func TestDisconnectAndReplacementUseOneOwnershipTransition(t *testing.T) {
+	lifecycle := newBlockingDisconnectLifecycle()
+	var releaseOnce sync.Once
+	releaseDisconnect := func() { releaseOnce.Do(func() { close(lifecycle.releaseDisconnect) }) }
+	t.Cleanup(releaseDisconnect)
+
+	server, url := startWSTestServer(t, Config{
+		AuthenticateExecution:     trustedTestAuthenticator,
+		ExecutionSessionLifecycle: lifecycle,
+	}, nil)
+	first := dialTestBody(t, url, "fixture-token")
+	waitForConnection(t, server, true)
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-lifecycle.disconnectEntered:
+	case <-time.After(time.Second):
+		t.Fatal("disconnect did not reach lifecycle barrier")
+	}
+
+	second := dialTestBody(t, url, "fixture-token")
+	select {
+	case <-lifecycle.secondConnected:
+		t.Fatal("replacement lifecycle advanced before disconnect ownership transition completed")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	executedDuringDisconnect := make(chan error, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		_, err := server.Execute(ctx, "body-1", "doll-1", execution.RequestPayload{
+			ExecutionID: "during-disconnect", Capability: "current", Operation: "run", Arguments: map[string]any{},
+		})
+		executedDuringDisconnect <- err
+	}()
+	select {
+	case err := <-executedDuringDisconnect:
+		t.Fatalf("execution selection escaped incomplete disconnect transition: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	cancel()
+
+	releaseDisconnect()
+	select {
+	case <-lifecycle.secondConnected:
+	case <-time.After(time.Second):
+		t.Fatal("replacement did not activate after disconnect completed")
+	}
+	select {
+	case <-executedDuringDisconnect:
+	case <-time.After(time.Second):
+		t.Fatal("blocked execution selection was not released")
+	}
+
+	deadline := time.Now().Add(time.Second)
+	for {
+		lifecycle.mu.Lock()
+		current := lifecycle.current
+		lifecycle.mu.Unlock()
+		server.mu.Lock()
+		transport := server.execution["body-1"]
+		server.mu.Unlock()
+		if transport != nil && transport.id == current {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("replacement registrar and transport ownership did not converge: registrar=%q transport=%v", current, transport)
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	bodyDone := make(chan error, 1)
+	go func() {
+		var request execution.Request
+		if err := second.ReadJSON(&request); err != nil {
+			bodyDone <- err
+			return
+		}
+		bodyDone <- second.WriteJSON(execution.Result{
+			Type: execution.TypeResult, ID: "after-disconnect-result", Timestamp: time.Now().UTC(),
+			DollID: request.DollID, BodyID: request.BodyID, CorrelationID: request.ID,
+			Payload: execution.ResultPayload{
+				ExecutionID: request.Payload.ExecutionID,
+				Status:      execution.StatusSuccess,
+			},
+		})
+	}()
+	result, err := server.Execute(context.Background(), "body-1", "doll-1", execution.RequestPayload{
+		ExecutionID: "after-disconnect", Capability: "current", Operation: "run", Arguments: map[string]any{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Payload.ExecutionID != "after-disconnect" {
+		t.Fatalf("unexpected replacement execution result: %#v", result)
+	}
+	if err := <-bodyDone; err != nil {
+		t.Fatal(err)
 	}
 }
 

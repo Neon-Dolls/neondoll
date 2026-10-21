@@ -55,8 +55,14 @@ const writeTimeout = 10 * time.Second
 
 // Server is a WebSocket transport for Doll Link.
 type Server struct {
-	mu                    sync.Mutex
-	activationMu          sync.Mutex
+	// activationMu serializes authenticated lifecycle callbacks, execution
+	// ownership changes, and execution-session selection. When both locks are
+	// needed, activationMu must always be acquired before mu. Lifecycle
+	// callbacks run without mu held and must not synchronously re-enter methods
+	// that acquire activationMu.
+	activationMu sync.Mutex
+	mu           sync.Mutex
+
 	conns                 map[string]*clientConn
 	execution             map[string]*clientConn
 	log                   Logger
@@ -322,6 +328,7 @@ func (s *Server) readLoop(cc *clientConn) {
 	defer func() {
 		cc.conn.Close()
 		if cc.execution != nil {
+			s.activationMu.Lock()
 			cc.execution.Close(execution.ErrDisconnected)
 		}
 		s.mu.Lock()
@@ -334,6 +341,9 @@ func (s *Server) readLoop(cc *clientConn) {
 		s.mu.Unlock()
 		if cc.execution != nil && lifecycle != nil {
 			lifecycle.SessionDisconnected(cc.id, cc.bodyID)
+		}
+		if cc.execution != nil {
+			s.activationMu.Unlock()
 		}
 		s.log.Info("ws client disconnected", map[string]any{
 			"id":    cc.id,
