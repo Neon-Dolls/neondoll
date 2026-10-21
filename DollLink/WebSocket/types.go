@@ -10,9 +10,11 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 
 	"github.com/Neon-Dolls/neondoll/DollLink/Actions"
+	"github.com/Neon-Dolls/neondoll/DollLink/Capabilities"
 	"github.com/Neon-Dolls/neondoll/DollLink/Events"
 	"github.com/Neon-Dolls/neondoll/DollLink/Execution"
 )
@@ -32,6 +34,15 @@ type Handler interface {
 	HandleEvent(ctx context.Context, event *events.Event) (*events.Event, error)
 }
 
+// ExecutionSessionLifecycle receives identities already verified by the
+// configured authentication boundary. sessionID is an opaque connection
+// generation used to reject stale updates and disconnects.
+type ExecutionSessionLifecycle interface {
+	SessionConnected(context.Context, string, string) error
+	CapabilitiesAdvertised(context.Context, string, string, []capabilities.Capability) error
+	SessionDisconnected(string, string)
+}
+
 // upgrader upgrades HTTP connections to WebSocket.
 var upgrader = websocket.Upgrader{
 	ReadBufferSize:  4096,
@@ -44,7 +55,14 @@ const writeTimeout = 10 * time.Second
 
 // Server is a WebSocket transport for Doll Link.
 type Server struct {
-	mu                    sync.Mutex
+	// activationMu serializes authenticated lifecycle callbacks, execution
+	// ownership changes, and execution-session selection. When both locks are
+	// needed, activationMu must always be acquired before mu. Lifecycle
+	// callbacks run without mu held and must not synchronously re-enter methods
+	// that acquire activationMu.
+	activationMu sync.Mutex
+	mu           sync.Mutex
+
 	conns                 map[string]*clientConn
 	execution             map[string]*clientConn
 	log                   Logger
@@ -54,6 +72,7 @@ type Server struct {
 	handler               Handler
 	listenerAddr          string
 	authenticateExecution func(*http.Request) (string, error)
+	executionLifecycle    ExecutionSessionLifecycle
 
 	// listener is an optional pre-created net.Listener.
 	// When set (typically via SetListener before Start), the server
@@ -89,6 +108,11 @@ type Config struct {
 	// or unsuccessful, the connection remains usable for Events/Actions but is
 	// ineligible for execution.
 	AuthenticateExecution func(*http.Request) (string, error)
+
+	// ExecutionSessionLifecycle integrates authenticated connection
+	// generations and canonical capability advertisements with Core. It does
+	// not authenticate and is never invoked without AuthenticateExecution.
+	ExecutionSessionLifecycle ExecutionSessionLifecycle
 }
 
 // New creates a WS Server with the given config, logger, and event handler.
@@ -105,6 +129,7 @@ func New(cfg Config, log Logger, handler Handler) *Server {
 	if cfg.AuthenticateExecution != nil {
 		s.authenticateExecution = cfg.AuthenticateExecution
 	}
+	s.executionLifecycle = cfg.ExecutionSessionLifecycle
 
 	s.mux.HandleFunc("/ws", s.handleWS)
 	s.mux.HandleFunc("/ws/status", s.handleStatus)
@@ -117,6 +142,14 @@ func New(cfg Config, log Logger, handler Handler) *Server {
 	}
 
 	return s
+}
+
+// SetExecutionSessionLifecycle completes Core wiring when the lifecycle owner
+// itself delegates execution through this Server. Call it before Start.
+func (s *Server) SetExecutionSessionLifecycle(lifecycle ExecutionSessionLifecycle) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.executionLifecycle = lifecycle
 }
 
 // SetListener sets an optional pre-created net.Listener for the server.
@@ -221,34 +254,65 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	}
 
 	cc := &clientConn{
-		id:     fmt.Sprintf("conn-%d", time.Now().UnixNano()),
+		id:     "conn-" + uuid.NewString(),
 		conn:   conn,
 		remote: r.RemoteAddr,
 		done:   make(chan struct{}),
 	}
 	if authenticatedBodyID != "" {
-		cc.bodyID = authenticatedBodyID
-		cc.execution, err = execution.NewClient(authenticatedBodyID, executionSender{cc: cc})
-		if err != nil {
-			conn.Close()
-			s.log.Error("ws execution session setup failed", map[string]any{"error": err.Error(), "remote": r.RemoteAddr})
-			return
+		// Keep lifecycle generation changes and transport ownership changes in
+		// one activation critical section. Execute takes the same lock while
+		// selecting a session, so it can never observe a newly registered
+		// generation with the previous generation's transport.
+		s.activationMu.Lock()
+		s.mu.Lock()
+		lifecycle := s.executionLifecycle
+		s.mu.Unlock()
+		if lifecycle != nil {
+			if err := lifecycle.SessionConnected(r.Context(), cc.id, authenticatedBodyID); err != nil {
+				s.log.Warn("ws execution registration rejected", map[string]any{"error": err.Error(), "remote": r.RemoteAddr})
+				authenticatedBodyID = ""
+			}
 		}
+		if authenticatedBodyID != "" {
+			cc.bodyID = authenticatedBodyID
+			cc.execution, err = execution.NewClient(authenticatedBodyID, executionSender{cc: cc})
+			if err != nil {
+				s.activationMu.Unlock()
+				conn.Close()
+				s.log.Error("ws execution session setup failed", map[string]any{"error": err.Error(), "remote": r.RemoteAddr})
+				return
+			}
+		}
+
+		s.mu.Lock()
+		s.conns[cc.id] = cc
+		var replaced *clientConn
+		if cc.execution != nil {
+			replaced = s.execution[cc.bodyID]
+			s.execution[cc.bodyID] = cc
+		}
+		count := len(s.conns)
+		s.mu.Unlock()
+		s.activationMu.Unlock()
+		if replaced != nil {
+			replaced.execution.Close(execution.ErrDisconnected)
+			replaced.conn.Close()
+		}
+
+		s.log.Info("ws client connected", map[string]any{
+			"id":     cc.id,
+			"remote": cc.remote,
+			"total":  count,
+		})
+		s.readLoop(cc)
+		return
 	}
 
 	s.mu.Lock()
 	s.conns[cc.id] = cc
-	var replaced *clientConn
-	if cc.execution != nil {
-		replaced = s.execution[cc.bodyID]
-		s.execution[cc.bodyID] = cc
-	}
 	count := len(s.conns)
 	s.mu.Unlock()
-	if replaced != nil {
-		replaced.execution.Close(execution.ErrDisconnected)
-		replaced.conn.Close()
-	}
 
 	s.log.Info("ws client connected", map[string]any{
 		"id":     cc.id,
@@ -264,6 +328,7 @@ func (s *Server) readLoop(cc *clientConn) {
 	defer func() {
 		cc.conn.Close()
 		if cc.execution != nil {
+			s.activationMu.Lock()
 			cc.execution.Close(execution.ErrDisconnected)
 		}
 		s.mu.Lock()
@@ -272,7 +337,14 @@ func (s *Server) readLoop(cc *clientConn) {
 			delete(s.execution, cc.bodyID)
 		}
 		count := len(s.conns)
+		lifecycle := s.executionLifecycle
 		s.mu.Unlock()
+		if cc.execution != nil && lifecycle != nil {
+			lifecycle.SessionDisconnected(cc.id, cc.bodyID)
+		}
+		if cc.execution != nil {
+			s.activationMu.Unlock()
+		}
 		s.log.Info("ws client disconnected", map[string]any{
 			"id":    cc.id,
 			"total": count,
@@ -315,6 +387,32 @@ func (s *Server) readLoop(cc *clientConn) {
 		}
 		if envelope.Type == string(execution.TypeRequest) {
 			s.log.Warn("ws rejected execution request from Body connection", map[string]any{"id": cc.id})
+			continue
+		}
+		if envelope.Type == capabilities.Type {
+			s.mu.Lock()
+			lifecycle := s.executionLifecycle
+			s.mu.Unlock()
+			if cc.execution == nil || lifecycle == nil {
+				s.log.Warn("ws capabilities on unauthenticated connection", map[string]any{"id": cc.id})
+				continue
+			}
+			var advertisement capabilities.Advertisement
+			if err := json.Unmarshal(message, &advertisement); err != nil {
+				s.log.Warn("ws invalid capability advertisement", map[string]any{"id": cc.id, "error": err.Error()})
+				continue
+			}
+			if err := advertisement.Validate(); err != nil {
+				s.log.Warn("ws rejected capability advertisement", map[string]any{"id": cc.id, "error": err.Error()})
+				continue
+			}
+			if advertisement.BodyID != cc.bodyID {
+				s.log.Warn("ws capability Body identity mismatch", map[string]any{"id": cc.id})
+				continue
+			}
+			if err := lifecycle.CapabilitiesAdvertised(context.Background(), cc.id, cc.bodyID, advertisement.Payload.Capabilities); err != nil {
+				s.log.Warn("ws rejected capability update", map[string]any{"id": cc.id, "error": err.Error()})
+			}
 			continue
 		}
 
@@ -389,9 +487,11 @@ func (sender executionSender) SendExecutionRequest(ctx context.Context, request 
 // bodyID. bodyID only selects a session that was established by the configured
 // authentication boundary; it is not accepted as authentication evidence.
 func (s *Server) Execute(ctx context.Context, bodyID, dollID string, payload execution.RequestPayload) (execution.Result, error) {
+	s.activationMu.Lock()
 	s.mu.Lock()
 	cc := s.execution[bodyID]
 	s.mu.Unlock()
+	s.activationMu.Unlock()
 	if cc == nil || cc.execution == nil {
 		return execution.Result{}, fmt.Errorf("%w for Body %q", ErrNoAuthenticatedSession, bodyID)
 	}

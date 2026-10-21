@@ -156,6 +156,12 @@ func main() {
 	// Create WebSocket transport.
 	wsCfg := ws.Config{Listen: listenAddr}
 	wsServer := ws.New(wsCfg, log, interactionSvc)
+	remoteRegistrar, err := body.NewRemoteRegistrar(bodyRegistry, ns, wsServer)
+	if err != nil {
+		log.Error("remote Body registrar setup error", map[string]any{"error": err.Error()})
+		os.Exit(1)
+	}
+	wsServer.SetExecutionSessionLifecycle(remoteRegistrar)
 	log.Info("ws transport created", map[string]any{"listen": listenAddr})
 
 	// If the tunnel provides a netstack Net, serve WS through the overlay.
