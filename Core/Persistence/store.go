@@ -296,6 +296,23 @@ func createSchema(db *sql.DB) error {
 	if err != nil {
 		return fmt.Errorf("interaction_sessions table: %v", err)
 	}
+	_, err = db.Exec(`
+		CREATE TABLE IF NOT EXISTS interaction_session_messages (
+			session_id TEXT NOT NULL,
+			sequence INTEGER NOT NULL,
+			message_id TEXT NOT NULL UNIQUE,
+			role TEXT NOT NULL,
+			content TEXT NOT NULL,
+			created_at TEXT NOT NULL,
+			PRIMARY KEY (session_id, sequence),
+			FOREIGN KEY (session_id) REFERENCES interaction_sessions(session_id) ON DELETE CASCADE
+		);
+		CREATE INDEX IF NOT EXISTS interaction_session_messages_order
+			ON interaction_session_messages(session_id, sequence);
+	`)
+	if err != nil {
+		return fmt.Errorf("interaction_session_messages table: %v", err)
+	}
 
 	return nil
 }
