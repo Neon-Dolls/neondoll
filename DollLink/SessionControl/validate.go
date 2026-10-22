@@ -35,3 +35,13 @@ func (request Request) Validate() error {
 	}
 	return nil
 }
+
+func (interaction Interaction) Validate() error {
+	if interaction.Version != Version {
+		return ErrUnsupportedVersion
+	}
+	if interaction.Type != TypeInteraction || strings.TrimSpace(interaction.SessionID) == "" || strings.TrimSpace(interaction.Event.ID) == "" {
+		return ErrInvalidRequest
+	}
+	return nil
+}

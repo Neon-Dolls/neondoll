@@ -133,5 +133,26 @@ returns `request_id_conflict` and does not mutate selection. After reconnect, a 
 instead of replaying an uncertain create request. This bounds retry state while
 making live-connection retries safe.
 
-Per-interaction overrides are intentionally absent from this phase; events use
-the connection default for their entire admission path.
+An authenticated Body may override the connection default for one interaction
+with a compact, versioned wrapper around the unchanged event:
+
+```json
+{
+  "version": 1,
+  "type": "interaction",
+  "session_id": "core-assigned-session-id",
+  "event": { "id": "event-id", "type": "message", "payload": {} }
+}
+```
+
+The inner event ID remains the response correlation ID. The Core resolves the
+selector against the connection's authenticated Body identity and routes it
+through the same Interaction Router used by default-selected events. Unknown,
+closed, and foreign selectors produce the same generic correlated error and
+never fall back to either the connection default or the implicit session.
+
+An override does not mutate connection selection. Concurrent overrides can be
+admitted independently while the transport retains one read-loop owner and
+serialized writes. Their workers are scoped to the connection and canceled and
+joined on disconnect. Legacy event envelopes are unchanged and continue to use
+the connection default, or `doll-link/default` when no default is selected.

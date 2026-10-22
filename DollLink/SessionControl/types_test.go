@@ -5,6 +5,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/Neon-Dolls/neondoll/DollLink/Events"
 	"github.com/Neon-Dolls/neondoll/DollLink/SessionControl"
 )
 
@@ -20,6 +21,34 @@ func TestRequestWireShapeAndValidation(t *testing.T) {
 	}
 	if err := request.Validate(); err != nil {
 		t.Fatalf("Validate: %v", err)
+	}
+}
+
+func TestInteractionWireShapeAndValidation(t *testing.T) {
+	event := events.NewDollMessage("event-1", "doll-1", "hello")
+	interaction := sessioncontrol.Interaction{Version: 1, Type: sessioncontrol.TypeInteraction, SessionID: "session-1", Event: event}
+	encoded, err := json.Marshal(interaction)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded map[string]json.RawMessage
+	if err := json.Unmarshal(encoded, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if len(decoded) != 4 || string(decoded["version"]) != "1" || string(decoded["type"]) != `"interaction"` || string(decoded["session_id"]) != `"session-1"` {
+		t.Fatalf("wire interaction = %s", encoded)
+	}
+	if err := interaction.Validate(); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	interaction.Version = 2
+	if err := interaction.Validate(); !errors.Is(err, sessioncontrol.ErrUnsupportedVersion) {
+		t.Fatalf("version error = %v", err)
+	}
+	interaction.Version = 1
+	interaction.SessionID = ""
+	if err := interaction.Validate(); !errors.Is(err, sessioncontrol.ErrInvalidRequest) {
+		t.Fatalf("selector error = %v", err)
 	}
 }
 

@@ -3,7 +3,9 @@ package interaction_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/Neon-Dolls/neondoll/Core/Session"
@@ -133,4 +135,71 @@ func TestBodyIngressSessionCreateHidesInternalFailure(t *testing.T) {
 	if strings.Contains(response.Payload.Error.Message, internalDetail) || strings.Contains(response.Payload.Error.Message, "sqlite") {
 		t.Fatalf("internal detail exposed in response %q", response.Payload.Error.Message)
 	}
+}
+
+func TestBodyIngressExplicitInteractionsAreOwnedAndConcurrent(t *testing.T) {
+	ctx := context.Background()
+	sessions := openRouterSessions(t)
+	handler := &ingressHandler{}
+	ingress := newBodyIngress(t, sessions, handler)
+	bodyOne := session.Owner{Kind: session.OwnerBody, InstanceID: "body-one"}
+	bodyTwo := session.Owner{Kind: session.OwnerBody, InstanceID: "body-two"}
+	first, err := sessions.Create(ctx, session.CreateRequest{Owner: bodyOne})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := sessions.Create(ctx, session.CreateRequest{Owner: bodyOne})
+	if err != nil {
+		t.Fatal(err)
+	}
+	foreign, err := sessions.Create(ctx, session.CreateRequest{Owner: bodyTwo})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var wg sync.WaitGroup
+	for index, id := range []session.ID{first.ID, second.ID} {
+		wg.Add(1)
+		go func(index int, id session.ID) {
+			defer wg.Done()
+			event := events.NewDollMessage(fmt.Sprintf("event-%d", index), "doll-1", "hello")
+			if _, err := ingress.HandleSessionInteraction(ctx, "body-one", string(id), &event); err != nil {
+				t.Errorf("HandleSessionInteraction(%s): %v", id, err)
+			}
+		}(index, id)
+	}
+	wg.Wait()
+	handler.mu.Lock()
+	routed := append([]session.ID(nil), handler.sessions...)
+	handler.mu.Unlock()
+	if len(routed) != 2 || !containsSession(routed, first.ID) || !containsSession(routed, second.ID) {
+		t.Fatalf("concurrent routed sessions = %v", routed)
+	}
+
+	closed, err := sessions.Close(ctx, second.ID)
+	if err != nil || closed.Status != session.StatusClosed {
+		t.Fatalf("Close: %+v, %v", closed, err)
+	}
+	for name, id := range map[string]string{"foreign": string(foreign.ID), "closed": string(second.ID), "unknown": "unknown-session"} {
+		t.Run(name, func(t *testing.T) {
+			event := events.NewDollMessage("rejected-"+name, "doll-1", "hello")
+			if _, err := ingress.HandleSessionInteraction(ctx, "body-one", id, &event); err == nil {
+				t.Fatal("explicit selector was accepted")
+			}
+		})
+	}
+	handler.mu.Lock()
+	defer handler.mu.Unlock()
+	if len(handler.sessions) != 2 {
+		t.Fatalf("rejected selector fell back to another session: %v", handler.sessions)
+	}
+}
+
+func containsSession(values []session.ID, want session.ID) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }

@@ -3,9 +3,11 @@ package ws
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/gorilla/websocket"
 
@@ -15,12 +17,47 @@ import (
 )
 
 type selectionHandler struct {
-	mu       sync.Mutex
-	selected []string
-	controls int
+	mu              sync.Mutex
+	selected        []string
+	overrides       []string
+	controls        int
+	rejectOverrides bool
+}
+
+func (h *selectionHandler) HandleSessionInteraction(_ context.Context, _, sessionID string, event *events.Event) (*events.Event, error) {
+	h.mu.Lock()
+	h.overrides = append(h.overrides, sessionID)
+	reject := h.rejectOverrides
+	h.mu.Unlock()
+	if reject {
+		return nil, errors.New("foreign, closed, or unknown session detail")
+	}
+	response := events.NewResponse(event.ID, event.DollID, "override")
+	return &response, nil
 }
 
 type pendingBodyAuthenticator struct{}
+
+type concurrentInteractionHandler struct {
+	entered chan string
+	release chan struct{}
+}
+
+func (h *concurrentInteractionHandler) HandleEvent(_ context.Context, event *events.Event) (*events.Event, error) {
+	response := events.NewResponse(event.ID, event.DollID, "legacy")
+	return &response, nil
+}
+
+func (h *concurrentInteractionHandler) HandleSessionInteraction(ctx context.Context, _ string, sessionID string, event *events.Event) (*events.Event, error) {
+	h.entered <- sessionID
+	select {
+	case <-h.release:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	response := events.NewResponse(event.ID, event.DollID, "done")
+	return &response, nil
+}
 
 func (pendingBodyAuthenticator) BeginAuthentication(context.Context, string, authentication.Hello) (authentication.Challenge, error) {
 	return authentication.Challenge{}, errors.New("unexpected authentication hello")
@@ -180,6 +217,140 @@ func sendEvent(t *testing.T, body interface {
 	var response events.Event
 	if err := body.ReadJSON(&response); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func sendSessionInteraction(t *testing.T, body interface {
+	WriteJSON(any) error
+	ReadJSON(any) error
+}, sessionID, eventID string) events.Event {
+	t.Helper()
+	event := events.NewDollMessage(eventID, "doll-one", "hello")
+	message := sessioncontrol.Interaction{Version: sessioncontrol.Version, Type: sessioncontrol.TypeInteraction, SessionID: sessionID, Event: event}
+	if err := body.WriteJSON(message); err != nil {
+		t.Fatal(err)
+	}
+	var response events.Event
+	if err := body.ReadJSON(&response); err != nil {
+		t.Fatal(err)
+	}
+	return response
+}
+
+func TestPerInteractionOverrideDoesNotChangeConnectionSelection(t *testing.T) {
+	handler := &selectionHandler{}
+	_, url := startWSTestServer(t, Config{AuthenticateExecution: bodyHeaderAuthenticator}, handler)
+	body := dialTestBody(t, url, "body-one")
+	defer body.Close()
+	sendControl(t, body, sessioncontrol.Request{Version: 1, Type: sessioncontrol.TypeSelect, ID: "select-1", Payload: sessioncontrol.RequestPayload{SessionID: "session-default"}})
+	response := sendSessionInteraction(t, body, "session-override", "event-override")
+	if response.CorrelationID != "event-override" {
+		t.Fatalf("override correlation = %q", response.CorrelationID)
+	}
+	sendEvent(t, body, "event-default")
+	handler.mu.Lock()
+	defer handler.mu.Unlock()
+	if len(handler.overrides) != 1 || handler.overrides[0] != "session-override" || len(handler.selected) != 1 || handler.selected[0] != "session-default" {
+		t.Fatalf("overrides=%#v selected=%#v", handler.overrides, handler.selected)
+	}
+}
+
+func TestPerInteractionOverrideAfterReconnectLeavesImplicitDefault(t *testing.T) {
+	handler := &selectionHandler{}
+	_, url := startWSTestServer(t, Config{AuthenticateExecution: bodyHeaderAuthenticator}, handler)
+	body := dialTestBody(t, url, "body-one")
+	sendControl(t, body, sessioncontrol.Request{Version: 1, Type: sessioncontrol.TypeSelect, ID: "select-1", Payload: sessioncontrol.RequestPayload{SessionID: "old-default"}})
+	_ = body.Close()
+
+	reconnected := dialTestBody(t, url, "body-one")
+	defer reconnected.Close()
+	sendSessionInteraction(t, reconnected, "session-override", "event-override")
+	sendEvent(t, reconnected, "event-default")
+	handler.mu.Lock()
+	defer handler.mu.Unlock()
+	if len(handler.overrides) != 1 || handler.overrides[0] != "session-override" || len(handler.selected) != 1 || handler.selected[0] != "" {
+		t.Fatalf("reconnect overrides=%#v selected=%#v", handler.overrides, handler.selected)
+	}
+}
+
+func TestPerInteractionOverridesRunConcurrently(t *testing.T) {
+	handler := &concurrentInteractionHandler{entered: make(chan string, 2), release: make(chan struct{})}
+	_, url := startWSTestServer(t, Config{AuthenticateExecution: bodyHeaderAuthenticator}, handler)
+	body := dialTestBody(t, url, "body-one")
+	defer body.Close()
+	for index, sessionID := range []string{"session-one", "session-two"} {
+		event := events.NewDollMessage(fmt.Sprintf("event-%d", index), "doll-one", "hello")
+		message := sessioncontrol.Interaction{Version: 1, Type: sessioncontrol.TypeInteraction, SessionID: sessionID, Event: event}
+		if err := body.WriteJSON(message); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	seen := make(map[string]bool)
+	for len(seen) < 2 {
+		select {
+		case sessionID := <-handler.entered:
+			seen[sessionID] = true
+		case <-ctx.Done():
+			t.Fatal("second session interaction did not enter concurrently")
+		}
+	}
+	close(handler.release)
+	for range 2 {
+		var response events.Event
+		if err := body.ReadJSON(&response); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestRejectedPerInteractionOverrideDoesNotFallBackOrChangeDefault(t *testing.T) {
+	handler := &selectionHandler{rejectOverrides: true}
+	_, url := startWSTestServer(t, Config{AuthenticateExecution: bodyHeaderAuthenticator}, handler)
+	body := dialTestBody(t, url, "body-one")
+	defer body.Close()
+	sendControl(t, body, sessioncontrol.Request{Version: 1, Type: sessioncontrol.TypeSelect, ID: "select-1", Payload: sessioncontrol.RequestPayload{SessionID: "session-default"}})
+	response := sendSessionInteraction(t, body, "forged-session", "event-forged")
+	payload, ok := response.Payload.(map[string]any)
+	if !ok || payload["event"] != "error" || payload["data"] != "session is not available" {
+		t.Fatalf("rejected response = %+v", response)
+	}
+	sendEvent(t, body, "event-default")
+	handler.mu.Lock()
+	defer handler.mu.Unlock()
+	if len(handler.overrides) != 1 || len(handler.selected) != 1 || handler.selected[0] != "session-default" {
+		t.Fatalf("rejected override fell back or changed default: overrides=%#v selected=%#v", handler.overrides, handler.selected)
+	}
+}
+
+func TestPerInteractionVersionAndAuthenticationRejection(t *testing.T) {
+	handler := &selectionHandler{}
+	_, url := startWSTestServer(t, Config{AuthenticateExecution: trustedTestAuthenticator}, handler)
+	unauthenticated := dialTestBody(t, url, "invalid-token")
+	response := sendSessionInteraction(t, unauthenticated, "session-one", "event-unauthenticated")
+	if response.CorrelationID != "event-unauthenticated" {
+		t.Fatalf("unauthenticated correlation = %q", response.CorrelationID)
+	}
+	_ = unauthenticated.Close()
+
+	authenticated := dialTestBody(t, url, "fixture-token")
+	defer authenticated.Close()
+	event := events.NewDollMessage("event-version", "doll-one", "hello")
+	message := sessioncontrol.Interaction{Version: 2, Type: sessioncontrol.TypeInteraction, SessionID: "session-one", Event: event}
+	if err := authenticated.WriteJSON(message); err != nil {
+		t.Fatal(err)
+	}
+	if err := authenticated.ReadJSON(&response); err != nil {
+		t.Fatal(err)
+	}
+	if response.CorrelationID != "event-version" {
+		t.Fatalf("version correlation = %q", response.CorrelationID)
+	}
+	handler.mu.Lock()
+	defer handler.mu.Unlock()
+	if len(handler.overrides) != 0 {
+		t.Fatalf("rejected interactions reached handler: %#v", handler.overrides)
 	}
 }
 

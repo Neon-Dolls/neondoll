@@ -3,7 +3,11 @@
 // Core session lifecycle and authorization remain outside this package.
 package sessioncontrol
 
-import "time"
+import (
+	"time"
+
+	"github.com/Neon-Dolls/neondoll/DollLink/Events"
+)
 
 const Version = 1
 
@@ -17,6 +21,9 @@ const (
 	TypeSelect MessageType = "session.select"
 	TypeClose  MessageType = "session.close"
 	TypeResult MessageType = "session.result"
+	// TypeInteraction wraps an otherwise unchanged legacy event with an
+	// explicit per-interaction session selector.
+	TypeInteraction MessageType = "interaction"
 
 	StatusOK    Status = "ok"
 	StatusError Status = "error"
@@ -29,6 +36,15 @@ const (
 	ErrorSessionUnavailable ErrorCode = "session_unavailable"
 	ErrorInternal           ErrorCode = "internal_error"
 )
+
+// Interaction routes one legacy event through an explicit Core Interaction
+// Session without modifying the connection-wide selection.
+type Interaction struct {
+	Version   int          `json:"version"`
+	Type      MessageType  `json:"type"`
+	SessionID string       `json:"session_id"`
+	Event     events.Event `json:"event"`
+}
 
 // Request is the common request envelope. Payload fields not used by an
 // operation must be omitted. ID is supplied by the Body and is echoed by the
