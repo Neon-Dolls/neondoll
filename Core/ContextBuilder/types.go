@@ -1,6 +1,6 @@
-// Package contextbuilder assembles disposable, bounded model context from a
-// persisted Core Interaction Session. It does not own conversation history or
-// continuity-bearing Doll state.
+// Package contextbuilder assembles disposable, bounded model context from an
+// authorized context source. It does not own source records or continuity-
+// bearing Doll state.
 package contextbuilder
 
 import (
@@ -25,7 +25,48 @@ const (
 var (
 	ErrInvalidRequest               = errors.New("context builder: invalid request")
 	ErrRequiredContextExceedsBudget = errors.New("context builder: required context exceeds token budget")
+	ErrInvalidSource                = errors.New("context builder: invalid source")
+	ErrSourceNotFound               = errors.New("context builder: source not found")
+	ErrSourceUnauthorized           = errors.New("context builder: source unauthorized")
+	ErrSourceUnsupported            = errors.New("context builder: source unsupported")
+	ErrSourceIsolation              = errors.New("context builder: source isolation violation")
 )
+
+type SourceKind string
+
+const (
+	SourceInteractionSession SourceKind = "interaction_session"
+	SourceCognitionRun       SourceKind = "cognition_run"
+)
+
+// ContextSource identifies an authorized record scope. It is an identity
+// reference, not authority by itself; SourceResolver performs access checks.
+type ContextSource struct {
+	Kind SourceKind `json:"kind"`
+	ID   string     `json:"id"`
+}
+
+// ContextRecord is a source-neutral ordered input record. Source tagging lets
+// Service reject resolver output that crosses source boundaries.
+type ContextRecord struct {
+	ID        string        `json:"record_id"`
+	Source    ContextSource `json:"source"`
+	Sequence  int           `json:"sequence"`
+	Role      Role          `json:"role"`
+	Content   string        `json:"content"`
+	CreatedAt time.Time     `json:"created_at"`
+}
+
+type ResolvedSource struct {
+	Source  ContextSource
+	Records []ContextRecord
+}
+
+// SourceResolver validates source identity and caller access before returning
+// isolated records. A source reference never grants authority on its own.
+type SourceResolver interface {
+	Resolve(context.Context, ContextSource) (ResolvedSource, error)
+}
 
 // Message is provider-neutral, model-ready text context.
 type Message struct {
@@ -60,7 +101,7 @@ type TokenEstimator interface {
 	EstimateTokens(Message) int
 }
 
-// WindowPolicy selects a bounded working set from ordered persisted history.
+// WindowPolicy selects a bounded working set from ordered resolved records.
 // Implementations must preserve required items and return selected items in
 // chronological order. Selection is derived for every Build and is not state.
 type WindowPolicy interface {
@@ -68,7 +109,7 @@ type WindowPolicy interface {
 }
 
 type WindowItem struct {
-	Message         HistoryMessage
+	Record          ContextRecord
 	EstimatedTokens int
 	Required        bool
 }
@@ -90,8 +131,19 @@ type Builder interface {
 	Build(context.Context, Request) (Result, error)
 }
 
+type SourceBuilder interface {
+	Builder
+	BuildSource(context.Context, SourceRequest) (Result, error)
+}
+
 type Request struct {
 	SessionID          session.ID
+	TokenBudget        int
+	SystemInstructions []string
+}
+
+type SourceRequest struct {
+	Source             ContextSource
 	TokenBudget        int
 	SystemInstructions []string
 }

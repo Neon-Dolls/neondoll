@@ -23,7 +23,7 @@ type fixture struct {
 	store    persistence.Store
 	history  contextbuilder.HistoryStore
 	sessions session.Service
-	builder  contextbuilder.Builder
+	builder  contextbuilder.SourceBuilder
 }
 
 func newFixture(t *testing.T) *fixture {

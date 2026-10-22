@@ -9,13 +9,13 @@ import (
 )
 
 type Service struct {
-	sessions  session.Service
-	history   HistoryStore
+	resolver  SourceResolver
 	estimator TokenEstimator
 	policy    WindowPolicy
 }
 
 var _ Builder = (*Service)(nil)
+var _ SourceBuilder = (*Service)(nil)
 
 func New(sessions session.Service, history HistoryStore, estimator TokenEstimator) (*Service, error) {
 	return NewWithPolicy(sessions, history, estimator, SlidingWindowPolicy{})
@@ -26,13 +26,22 @@ func NewWithPolicy(sessions session.Service, history HistoryStore, estimator Tok
 	if sessions == nil || history == nil {
 		return nil, ErrInvalidRequest
 	}
+	return NewWithResolver(newInteractionSessionSourceResolver(sessions, history), estimator, policy)
+}
+
+// NewWithResolver constructs the shared Builder over an explicit authorized
+// source-resolution boundary.
+func NewWithResolver(resolver SourceResolver, estimator TokenEstimator, policy WindowPolicy) (*Service, error) {
+	if resolver == nil {
+		return nil, ErrInvalidRequest
+	}
 	if estimator == nil {
 		estimator = ApproximateEstimator{}
 	}
 	if policy == nil {
 		return nil, ErrInvalidRequest
 	}
-	return &Service{sessions: sessions, history: history, estimator: estimator, policy: policy}, nil
+	return &Service{resolver: resolver, estimator: estimator, policy: policy}, nil
 }
 
 // ApproximateEstimator is deterministic and provider-independent. It charges
@@ -48,18 +57,48 @@ func (builder *Service) Build(ctx context.Context, request Request) (Result, err
 	if strings.TrimSpace(string(request.SessionID)) == "" || request.TokenBudget <= 0 {
 		return Result{}, ErrInvalidRequest
 	}
-	if _, err := builder.sessions.Lookup(ctx, request.SessionID); err != nil {
-		return Result{}, err
-	}
-	history, err := builder.history.ListSessionMessages(ctx, request.SessionID)
+	result, err := builder.BuildSource(ctx, SourceRequest{
+		Source:             InteractionSessionSource(request.SessionID),
+		TokenBudget:        request.TokenBudget,
+		SystemInstructions: request.SystemInstructions,
+	})
 	if err != nil {
 		return Result{}, err
 	}
+	result.SessionID = request.SessionID
+	return result, nil
+}
 
-	result := Result{SessionID: request.SessionID, Metadata: Metadata{TokenBudget: request.TokenBudget, HistoryMessages: len(history)}}
-	if len(history) > 0 {
-		result.Metadata.HistoryStartSequence = sequencePointer(history[0].Sequence)
-		result.Metadata.HistoryEndSequence = sequencePointer(history[len(history)-1].Sequence)
+func (builder *Service) BuildSource(ctx context.Context, request SourceRequest) (Result, error) {
+	if !validSource(request.Source) {
+		return Result{}, ErrInvalidSource
+	}
+	if request.TokenBudget <= 0 {
+		return Result{}, ErrInvalidRequest
+	}
+	resolved, err := builder.resolver.Resolve(ctx, request.Source)
+	if err != nil {
+		return Result{}, err
+	}
+	if resolved.Source != request.Source {
+		return Result{}, ErrSourceIsolation
+	}
+	for index, record := range resolved.Records {
+		if record.Source != request.Source {
+			return Result{}, ErrSourceIsolation
+		}
+		if strings.TrimSpace(record.ID) == "" || record.Sequence < 0 || (index > 0 && record.Sequence <= resolved.Records[index-1].Sequence) {
+			return Result{}, ErrInvalidSource
+		}
+	}
+
+	result := Result{Metadata: Metadata{TokenBudget: request.TokenBudget, HistoryMessages: len(resolved.Records)}}
+	if request.Source.Kind == SourceInteractionSession {
+		result.SessionID = session.ID(request.Source.ID)
+	}
+	if len(resolved.Records) > 0 {
+		result.Metadata.HistoryStartSequence = sequencePointer(resolved.Records[0].Sequence)
+		result.Metadata.HistoryEndSequence = sequencePointer(resolved.Records[len(resolved.Records)-1].Sequence)
 	}
 	for _, instruction := range request.SystemInstructions {
 		message := Message{Role: RoleSystem, Content: instruction}
@@ -71,15 +110,15 @@ func (builder *Service) Build(ctx context.Context, request Request) (Result, err
 		result.Metadata.EstimatedTokens += cost
 	}
 
-	items := make([]WindowItem, len(history))
-	for index, stored := range history {
-		if !validRole(stored.Role) {
+	items := make([]WindowItem, len(resolved.Records))
+	for index, record := range resolved.Records {
+		if !validRole(record.Role) {
 			return Result{}, ErrInvalidRequest
 		}
 		items[index] = WindowItem{
-			Message:         stored,
-			EstimatedTokens: estimate(builder.estimator, Message{Role: stored.Role, Content: stored.Content}),
-			Required:        stored.Role == RoleSystem,
+			Record:          record,
+			EstimatedTokens: estimate(builder.estimator, Message{Role: record.Role, Content: record.Content}),
+			Required:        record.Role == RoleSystem,
 		}
 	}
 	window, err := builder.policy.Select(WindowRequest{
@@ -96,10 +135,17 @@ func (builder *Service) Build(ctx context.Context, request Request) (Result, err
 	result.Metadata.OmittedHistoryMessages = len(window.OmittedMessages)
 	result.Metadata.OmittedMessages = window.OmittedMessages
 	for _, item := range window.Items {
-		result.Messages = append(result.Messages, Message{Role: item.Message.Role, Content: item.Message.Content})
-		result.Metadata.IncludedMessageIDs = append(result.Metadata.IncludedMessageIDs, item.Message.ID)
+		result.Messages = append(result.Messages, Message{Role: item.Record.Role, Content: item.Record.Content})
+		result.Metadata.IncludedMessageIDs = append(result.Metadata.IncludedMessageIDs, item.Record.ID)
 	}
 	return result, nil
+}
+
+func validSource(source ContextSource) bool {
+	if strings.TrimSpace(source.ID) == "" {
+		return false
+	}
+	return source.Kind == SourceInteractionSession || source.Kind == SourceCognitionRun
 }
 
 func sequencePointer(sequence int) *int {

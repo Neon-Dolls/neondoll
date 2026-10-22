@@ -45,16 +45,16 @@ func (SlidingWindowPolicy) Select(request WindowRequest) (Window, error) {
 			window.Items = append(window.Items, item)
 			if !item.Required {
 				if window.StartSequence == nil {
-					window.StartSequence = sequencePointer(item.Message.Sequence)
+					window.StartSequence = sequencePointer(item.Record.Sequence)
 				}
-				window.EndSequence = sequencePointer(item.Message.Sequence)
+				window.EndSequence = sequencePointer(item.Record.Sequence)
 				window.EstimatedTokens += item.EstimatedTokens
 			}
 			continue
 		}
 		window.OmittedMessages = append(window.OmittedMessages, OmittedMessage{
-			ID:              item.Message.ID,
-			Sequence:        item.Message.Sequence,
+			ID:              item.Record.ID,
+			Sequence:        item.Record.Sequence,
 			EstimatedTokens: item.EstimatedTokens,
 			Reason:          OmittedBudget,
 		})
