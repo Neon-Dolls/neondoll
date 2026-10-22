@@ -60,6 +60,32 @@ type TokenEstimator interface {
 	EstimateTokens(Message) int
 }
 
+// WindowPolicy selects a bounded working set from ordered persisted history.
+// Implementations must preserve required items and return selected items in
+// chronological order. Selection is derived for every Build and is not state.
+type WindowPolicy interface {
+	Select(WindowRequest) (Window, error)
+}
+
+type WindowItem struct {
+	Message         HistoryMessage
+	EstimatedTokens int
+	Required        bool
+}
+
+type WindowRequest struct {
+	Items       []WindowItem
+	TokenBudget int
+}
+
+type Window struct {
+	Items           []WindowItem
+	OmittedMessages []OmittedMessage
+	EstimatedTokens int
+	StartSequence   *int
+	EndSequence     *int
+}
+
 type Builder interface {
 	Build(context.Context, Request) (Result, error)
 }
@@ -81,6 +107,10 @@ type Metadata struct {
 	TokenBudget             int              `json:"token_budget"`
 	EstimatedTokens         int              `json:"estimated_tokens"`
 	HistoryMessages         int              `json:"history_messages"`
+	HistoryStartSequence    *int             `json:"history_start_sequence,omitempty"`
+	HistoryEndSequence      *int             `json:"history_end_sequence,omitempty"`
+	WindowStartSequence     *int             `json:"window_start_sequence,omitempty"`
+	WindowEndSequence       *int             `json:"window_end_sequence,omitempty"`
 	IncludedHistoryMessages int              `json:"included_history_messages"`
 	OmittedHistoryMessages  int              `json:"omitted_history_messages"`
 	IncludedMessageIDs      []string         `json:"included_message_ids,omitempty"`

@@ -114,6 +114,50 @@ func TestBuildUsesWholeMessageRollingBudget(t *testing.T) {
 	if result.Metadata.IncludedHistoryMessages != 2 || result.Metadata.OmittedHistoryMessages != 1 || len(result.Metadata.OmittedMessages) != 1 || result.Metadata.OmittedMessages[0].ID != stored[0].ID {
 		t.Fatalf("metadata = %+v", result.Metadata)
 	}
+	if *result.Metadata.HistoryStartSequence != 0 || *result.Metadata.HistoryEndSequence != 2 || *result.Metadata.WindowStartSequence != 1 || *result.Metadata.WindowEndSequence != 2 {
+		t.Fatalf("window boundaries = %+v", result.Metadata)
+	}
+}
+
+func TestBuildWindowAdvancesAndRespondsToBudgetChanges(t *testing.T) {
+	fx := newFixture(t)
+	created := fx.createSession(t, "body-one")
+	fx.append(t, created.ID,
+		contextbuilder.NewHistoryMessage{Role: contextbuilder.RoleUser, Content: "one"},
+		contextbuilder.NewHistoryMessage{Role: contextbuilder.RoleAssistant, Content: "two"},
+		contextbuilder.NewHistoryMessage{Role: contextbuilder.RoleUser, Content: "six"},
+	)
+
+	build := func(budget int) contextbuilder.Result {
+		t.Helper()
+		result, err := fx.builder.Build(context.Background(), contextbuilder.Request{SessionID: created.ID, TokenBudget: budget})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return result
+	}
+
+	initial := build(6)
+	if got := []string{initial.Messages[0].Content, initial.Messages[1].Content}; !reflect.DeepEqual(got, []string{"two", "six"}) {
+		t.Fatalf("initial window = %v", got)
+	}
+	fx.append(t, created.ID, contextbuilder.NewHistoryMessage{Role: contextbuilder.RoleAssistant, Content: "ten"})
+	advanced := build(6)
+	if got := []string{advanced.Messages[0].Content, advanced.Messages[1].Content}; !reflect.DeepEqual(got, []string{"six", "ten"}) {
+		t.Fatalf("advanced window = %v", got)
+	}
+	if *advanced.Metadata.WindowStartSequence != 2 || *advanced.Metadata.WindowEndSequence != 3 {
+		t.Fatalf("advanced boundaries = %+v", advanced.Metadata)
+	}
+
+	expanded := build(12)
+	if len(expanded.Messages) != 4 || *expanded.Metadata.WindowStartSequence != 0 || *expanded.Metadata.WindowEndSequence != 3 {
+		t.Fatalf("expanded window = %+v", expanded)
+	}
+	repeated := build(6)
+	if !reflect.DeepEqual(advanced, repeated) {
+		t.Fatalf("same history and budget produced different results:\nfirst:  %+v\nsecond: %+v", advanced, repeated)
+	}
 }
 
 func TestBuildIsolatesSessionsAndHandlesEmptyHistory(t *testing.T) {
@@ -199,7 +243,10 @@ func TestBuildReconstructsPersistedHistoryAfterRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := history.AppendSessionMessages(ctx, created.ID, []contextbuilder.NewHistoryMessage{{Role: contextbuilder.RoleUser, Content: "persisted"}}); err != nil {
+	if _, err := history.AppendSessionMessages(ctx, created.ID, []contextbuilder.NewHistoryMessage{
+		{Role: contextbuilder.RoleUser, Content: "old"},
+		{Role: contextbuilder.RoleAssistant, Content: "new"},
+	}); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.Close(); err != nil {
@@ -215,8 +262,8 @@ func TestBuildReconstructsPersistedHistoryAfterRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	result, err := builder.Build(ctx, contextbuilder.Request{SessionID: created.ID, TokenBudget: 20})
-	if err != nil || len(result.Messages) != 1 || result.Messages[0].Content != "persisted" {
+	result, err := builder.Build(ctx, contextbuilder.Request{SessionID: created.ID, TokenBudget: 3})
+	if err != nil || len(result.Messages) != 1 || result.Messages[0].Content != "new" || *result.Metadata.WindowStartSequence != 1 || *result.Metadata.WindowEndSequence != 1 {
 		t.Fatalf("reconstructed result = %+v, %v", result, err)
 	}
 }
