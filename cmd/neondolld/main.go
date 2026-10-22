@@ -183,10 +183,20 @@ func main() {
 
 	// Create the Interaction service (Doll Link ↔ Persistence bridge).
 	interactionSvc := interaction.New(store, inferenceProvider, log)
+	interactionRouter, err := coreServices.InteractionRouter(interactionSvc)
+	if err != nil {
+		log.Error("Interaction Session router setup error", map[string]any{"error": err.Error()})
+		os.Exit(1)
+	}
+	bodyIngress, err := interaction.NewBodyIngress(coreServices.Sessions(), interactionRouter, interactionSvc)
+	if err != nil {
+		log.Error("authenticated Body interaction ingress setup error", map[string]any{"error": err.Error()})
+		os.Exit(1)
+	}
 
 	// Create WebSocket transport.
 	wsCfg := ws.Config{Listen: listenAddr}
-	wsServer := ws.New(wsCfg, log, interactionSvc)
+	wsServer := ws.New(wsCfg, log, bodyIngress)
 	invitationStore, ok := store.(invitation.Store)
 	if !ok {
 		log.Error("store does not implement Invitation Store")
