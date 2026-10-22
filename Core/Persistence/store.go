@@ -274,6 +274,29 @@ func createSchema(db *sql.DB) error {
 		return fmt.Errorf("body enrollment tables: %v", err)
 	}
 
+	// Core 5 M1.1: Core-owned Interaction Session lifecycle. External
+	// conversation references are unique only while active; closing a session
+	// permits an explicit Session Restart for the same Gateway conversation.
+	_, err = db.Exec(`
+		CREATE TABLE IF NOT EXISTS interaction_sessions (
+			session_id TEXT PRIMARY KEY,
+			owner_kind TEXT NOT NULL,
+			owner_instance_id TEXT NOT NULL,
+			external_conversation_ref TEXT NOT NULL DEFAULT '',
+			status TEXT NOT NULL,
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL
+		);
+		CREATE INDEX IF NOT EXISTS interaction_sessions_active_owner
+			ON interaction_sessions(status, owner_kind, owner_instance_id, created_at, session_id);
+		CREATE UNIQUE INDEX IF NOT EXISTS interaction_sessions_active_conversation
+			ON interaction_sessions(owner_kind, owner_instance_id, external_conversation_ref)
+			WHERE status = 'active' AND external_conversation_ref <> '';
+	`)
+	if err != nil {
+		return fmt.Errorf("interaction_sessions table: %v", err)
+	}
+
 	return nil
 }
 
