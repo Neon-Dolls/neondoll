@@ -102,7 +102,33 @@ closure wins before router admission, that interaction is rejected. A later
 Body interaction creates a fresh session for the implicit conversation, which
 implements the canonical close-plus-create Session Restart semantics.
 
-The existing wire contract cannot explicitly select among multiple concurrent
-sessions owned by one Body. Supporting that requires an independently specified
-authenticated ingress/session-selection contract; this implementation does not
-infer selection from untrusted event fields or add an ad hoc protocol field.
+## Doll Link session selection
+
+Authenticated Bodies can manage their Core-owned Interaction Sessions with the
+integer-versioned session-control protocol. Requests use the common shape
+`{"version":1,"type":"session.create|session.list|session.select|session.close","id":"...","payload":{...}}`.
+Create accepts an optional `external_conversation_ref`; select and close require
+`session_id`; list has an empty payload. The Core replies with
+`session.result`, a Core-generated message ID, the request ID in
+`correlation_id`, and a payload containing the operation, `ok` or `error`
+status, and any session data or deterministic error code.
+
+All operations are scoped to the Body identity authenticated on that WebSocket.
+List returns only that Body's active sessions. Unknown, foreign, and closed
+session IDs all return `session_unavailable`, preventing ownership disclosure.
+Unsupported versions return `unsupported_version` and never change selection.
+
+Selection is stored only on the WebSocket connection and is discarded at
+disconnect. Without a selection, events retain the implicit
+`doll-link/default` behavior. Closing the selected session clears selection, so
+later events again use the implicit default. Reconnecting never restores an
+old explicit selection.
+
+Request IDs are scoped to one connection. The transport caches the 128 most
+recent responses and returns the original response for a duplicate ID without
+reapplying the operation. After reconnect, a client must list current sessions
+instead of replaying an uncertain create request. This bounds retry state while
+making live-connection retries safe.
+
+Per-interaction overrides are intentionally absent from this phase; events use
+the connection default for their entire admission path.
