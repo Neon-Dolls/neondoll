@@ -76,8 +76,33 @@ or global dispatch lock, so independent sessions remain isolated and may enter
 their handlers concurrently.
 
 The existing Doll Link event envelope does not contain a Core Interaction
-Session ID, and its legacy WebSocket event callback does not expose the
-authenticated connection identity. This milestone deliberately does not alter
-that protocol. A future authenticated Body/Gateway ingress must select a Core
-session and call the internal router with its trusted owner identity; event
-fields such as `source` are never accepted as identity proof.
+Session ID. Authenticated ingress must therefore select a Core session outside
+that envelope and call the internal router with its trusted owner identity;
+event fields such as `source` are never accepted as identity proof.
+
+## Authenticated Body ingress
+
+The production Doll Link WebSocket now supplies its connection-bound BodyID to
+`Core/Interaction.BodyIngress` after authentication. If a session-aware handler
+has no authenticated BodyID, event ingress fails closed. Handlers that do not
+implement authenticated ingress retain the legacy Core 4 callback behavior.
+
+Because the canonical Doll Link event envelope has no Core session selector,
+each authenticated Body currently maps to one implicit persisted conversation,
+`doll-link/default`. The mapping is scoped to the authenticated Body owner, so
+forged event `source`, user, channel, or Doll fields cannot select another
+Body's session. Reconnecting as the same authenticated Body resumes the same
+active session; independently authenticated Bodies always receive independent
+sessions.
+
+Closing the implicit session is terminal for that session. An interaction that
+has already passed router admission continues on the resolved immutable session
+snapshot; closing a session does not cancel already-admitted handler work. If
+closure wins before router admission, that interaction is rejected. A later
+Body interaction creates a fresh session for the implicit conversation, which
+implements the canonical close-plus-create Session Restart semantics.
+
+The existing wire contract cannot explicitly select among multiple concurrent
+sessions owned by one Body. Supporting that requires an independently specified
+authenticated ingress/session-selection contract; this implementation does not
+infer selection from untrusted event fields or add an ad hoc protocol field.

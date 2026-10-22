@@ -35,6 +35,14 @@ type Handler interface {
 	HandleEvent(ctx context.Context, event *events.Event) (*events.Event, error)
 }
 
+// AuthenticatedHandler receives events together with the Body identity bound
+// to this connection by the configured authentication boundary. Implementing
+// this interface makes event ingress fail closed when no authenticated BodyID
+// is available; event fields are never used as identity proof.
+type AuthenticatedHandler interface {
+	HandleAuthenticatedEvent(ctx context.Context, bodyID string, event *events.Event) (*events.Event, error)
+}
+
 // ExecutionSessionLifecycle receives identities already verified by the
 // configured authentication boundary. sessionID is an opaque connection
 // generation used to reject stale updates and disconnects.
@@ -515,9 +523,22 @@ func (s *Server) readLoop(cc *clientConn) {
 			continue
 		}
 
-		// Process through the handler.
+		// Process through the handler. Session-aware Core handlers receive only
+		// the Body identity already bound to this connection by authentication.
 		if s.handler != nil {
-			response, err := s.handler.HandleEvent(context.Background(), &event)
+			var response *events.Event
+			var err error
+			if authenticated, ok := s.handler.(AuthenticatedHandler); ok {
+				if cc.bodyID == "" {
+					s.log.Warn("ws unauthenticated event rejected", map[string]any{"id": cc.id})
+					errResp := events.NewErrorResponse(event.ID, event.DollID, "authenticated Body required")
+					s.writeJSON(cc, errResp)
+					continue
+				}
+				response, err = authenticated.HandleAuthenticatedEvent(context.Background(), cc.bodyID, &event)
+			} else {
+				response, err = s.handler.HandleEvent(context.Background(), &event)
+			}
 			if err != nil {
 				s.log.Error("ws handler error", map[string]any{"id": cc.id, "error": err.Error()})
 				errResp := events.NewErrorResponse(event.ID, event.DollID, fmt.Sprintf("handler error: %v", err))
