@@ -90,7 +90,10 @@ func (i *BodyIngress) HandleSessionControl(ctx context.Context, bodyID, selected
 	case sessioncontrol.TypeCreate:
 		created, err := i.sessions.Create(ctx, session.CreateRequest{Owner: owner, ExternalConversationRef: request.Payload.ExternalConversationRef})
 		if err != nil {
-			return fail(sessioncontrol.ErrorInvalidRequest, "session could not be created")
+			if errors.Is(err, session.ErrInvalidRequest) || errors.Is(err, session.ErrConversationInUse) {
+				return fail(sessioncontrol.ErrorInvalidRequest, "session could not be created")
+			}
+			return fail(sessioncontrol.ErrorInternal, "session service unavailable")
 		}
 		response.Payload.Status = sessioncontrol.StatusOK
 		response.Payload.Session = wireSession(created)

@@ -2,12 +2,23 @@ package interaction_test
 
 import (
 	"context"
+	"errors"
+	"strings"
 	"testing"
 
 	"github.com/Neon-Dolls/neondoll/Core/Session"
 	"github.com/Neon-Dolls/neondoll/DollLink/Events"
 	"github.com/Neon-Dolls/neondoll/DollLink/SessionControl"
 )
+
+type createErrorService struct {
+	session.Service
+	err error
+}
+
+func (service createErrorService) Create(context.Context, session.CreateRequest) (*session.InteractionSession, error) {
+	return nil, service.err
+}
 
 func controlRequest(kind sessioncontrol.MessageType, id, sessionID string) sessioncontrol.Request {
 	return sessioncontrol.Request{Version: sessioncontrol.Version, Type: kind, ID: id, Payload: sessioncontrol.RequestPayload{SessionID: sessionID}}
@@ -86,5 +97,40 @@ func TestBodyIngressSessionControlVersionAndImplicitDefault(t *testing.T) {
 	active, err := sessions.ListActive(ctx, &session.ActiveFilter{Owner: session.Owner{Kind: session.OwnerBody, InstanceID: "body-one"}})
 	if err != nil || len(active) != 1 || active[0].ExternalConversationRef != "doll-link/default" {
 		t.Fatalf("implicit sessions = %+v, %v", active, err)
+	}
+}
+
+func TestBodyIngressSessionCreateClassifiesExpectedConflict(t *testing.T) {
+	ctx := context.Background()
+	sessions := openRouterSessions(t)
+	ingress := newBodyIngress(t, sessions, &ingressHandler{})
+	request := sessioncontrol.Request{
+		Version: sessioncontrol.Version,
+		Type:    sessioncontrol.TypeCreate,
+		ID:      "create-1",
+		Payload: sessioncontrol.RequestPayload{ExternalConversationRef: "conversation-1"},
+	}
+	if response, _ := ingress.HandleSessionControl(ctx, "body-one", "", request); response.Payload.Status != sessioncontrol.StatusOK {
+		t.Fatalf("initial create = %+v", response)
+	}
+	request.ID = "create-conflict"
+	response, selected := ingress.HandleSessionControl(ctx, "body-one", "unchanged", request)
+	if response.Payload.Error == nil || response.Payload.Error.Code != sessioncontrol.ErrorInvalidRequest || selected != "unchanged" {
+		t.Fatalf("conflict response = %+v, selected %q", response, selected)
+	}
+}
+
+func TestBodyIngressSessionCreateHidesInternalFailure(t *testing.T) {
+	const internalDetail = "sqlite write failed: secret filesystem path"
+	base := openRouterSessions(t)
+	sessions := createErrorService{Service: base, err: errors.New(internalDetail)}
+	ingress := newBodyIngress(t, sessions, &ingressHandler{})
+	request := controlRequest(sessioncontrol.TypeCreate, "create-failure", "")
+	response, selected := ingress.HandleSessionControl(context.Background(), "body-one", "unchanged", request)
+	if response.Payload.Error == nil || response.Payload.Error.Code != sessioncontrol.ErrorInternal || selected != "unchanged" {
+		t.Fatalf("internal response = %+v, selected %q", response, selected)
+	}
+	if strings.Contains(response.Payload.Error.Message, internalDetail) || strings.Contains(response.Payload.Error.Message, "sqlite") {
+		t.Fatalf("internal detail exposed in response %q", response.Payload.Error.Message)
 	}
 }
