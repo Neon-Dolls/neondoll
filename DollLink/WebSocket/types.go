@@ -18,6 +18,7 @@ import (
 	"github.com/Neon-Dolls/neondoll/DollLink/Capabilities"
 	"github.com/Neon-Dolls/neondoll/DollLink/Events"
 	"github.com/Neon-Dolls/neondoll/DollLink/Execution"
+	"github.com/Neon-Dolls/neondoll/DollLink/SessionControl"
 )
 
 var ErrNoAuthenticatedSession = errors.New("ws: no authenticated execution session")
@@ -41,6 +42,19 @@ type Handler interface {
 // is available; event fields are never used as identity proof.
 type AuthenticatedHandler interface {
 	HandleAuthenticatedEvent(ctx context.Context, bodyID string, event *events.Event) (*events.Event, error)
+}
+
+// SelectedSessionHandler receives the connection-local session selection.
+// An empty sessionID means the canonical implicit doll-link/default session.
+type SelectedSessionHandler interface {
+	HandleSelectedSessionEvent(ctx context.Context, bodyID, sessionID string, event *events.Event) (*events.Event, error)
+}
+
+// SessionControlHandler applies authenticated session-control requests and
+// returns the next connection-local selection. The transport owns that
+// selection and discards it with the connection.
+type SessionControlHandler interface {
+	HandleSessionControl(context.Context, string, string, sessioncontrol.Request) (sessioncontrol.Response, string)
 }
 
 // ExecutionSessionLifecycle receives identities already verified by the
@@ -70,6 +84,7 @@ var upgrader = websocket.Upgrader{
 // writeTimeout for sending messages.
 const writeTimeout = 10 * time.Second
 const defaultAuthenticationTimeout = 30 * time.Second
+const sessionResponseCacheSize = 128
 
 // Server is a WebSocket transport for Doll Link.
 type Server struct {
@@ -108,13 +123,21 @@ type Server struct {
 
 // clientConn tracks a single WebSocket connection.
 type clientConn struct {
-	id        string
-	conn      *websocket.Conn
-	remote    string
-	writeMu   sync.Mutex
-	bodyID    string
-	execution *execution.Client
-	done      chan struct{}
+	id                 string
+	conn               *websocket.Conn
+	remote             string
+	writeMu            sync.Mutex
+	bodyID             string
+	execution          *execution.Client
+	selectedSessionID  string
+	sessionResponses   map[string]cachedSessionResponse
+	sessionResponseIDs []string
+	done               chan struct{}
+}
+
+type cachedSessionResponse struct {
+	request  sessioncontrol.Request
+	response sessioncontrol.Response
 }
 
 // Config for the WS server.
@@ -457,6 +480,11 @@ func (s *Server) readLoop(cc *clientConn) {
 					return
 				}
 			default:
+				if isSessionControlType(envelope.Type) {
+					if request, ok := recoverSessionControlRequest(message); ok {
+						_ = s.writeValue(cc, sessionControlError(request, sessioncontrol.ErrorUnauthenticated, "authenticated Body required"))
+					}
+				}
 				s.log.Warn("ws pre-authentication message rejected", map[string]any{"id": cc.id, "type": envelope.Type})
 				return
 			}
@@ -484,6 +512,65 @@ func (s *Server) readLoop(cc *clientConn) {
 		}
 		if envelope.Type == string(execution.TypeRequest) {
 			s.log.Warn("ws rejected execution request from Body connection", map[string]any{"id": cc.id})
+			continue
+		}
+		if isSessionControlType(envelope.Type) {
+			var request sessioncontrol.Request
+			if err := json.Unmarshal(message, &request); err != nil {
+				s.log.Warn("ws invalid session-control request", map[string]any{"id": cc.id, "error": err.Error()})
+				if recovered, ok := recoverSessionControlRequest(message); ok {
+					if err := s.writeValue(cc, sessionControlError(recovered, sessioncontrol.ErrorInvalidRequest, "invalid session-control request")); err != nil {
+						return
+					}
+				}
+				continue
+			}
+			if cc.bodyID == "" {
+				s.log.Warn("ws unauthenticated session-control request rejected", map[string]any{"id": cc.id})
+				if request.ID != "" {
+					if err := s.writeValue(cc, sessionControlError(request, sessioncontrol.ErrorUnauthenticated, "authenticated Body required")); err != nil {
+						return
+					}
+				}
+				continue
+			}
+			handler, ok := s.handler.(SessionControlHandler)
+			if !ok {
+				s.log.Warn("ws session-control handler unavailable", map[string]any{"id": cc.id})
+				if request.ID != "" {
+					if err := s.writeValue(cc, sessionControlError(request, sessioncontrol.ErrorHandlerUnavailable, "session-control handler unavailable")); err != nil {
+						return
+					}
+				}
+				continue
+			}
+			if cached, ok := cc.sessionResponses[request.ID]; ok && request.ID != "" {
+				response := cached.response
+				if cached.request != request {
+					response = sessionControlError(request, sessioncontrol.ErrorRequestIDConflict, "request ID was already used for different content")
+				}
+				if err := s.writeValue(cc, response); err != nil {
+					return
+				}
+				continue
+			}
+			response, selectedSessionID := handler.HandleSessionControl(context.Background(), cc.bodyID, cc.selectedSessionID, request)
+			if request.ID != "" {
+				if cc.sessionResponses == nil {
+					cc.sessionResponses = make(map[string]cachedSessionResponse)
+				}
+				cc.sessionResponses[request.ID] = cachedSessionResponse{request: request, response: response}
+				cc.sessionResponseIDs = append(cc.sessionResponseIDs, request.ID)
+				if len(cc.sessionResponseIDs) > sessionResponseCacheSize {
+					delete(cc.sessionResponses, cc.sessionResponseIDs[0])
+					cc.sessionResponseIDs = cc.sessionResponseIDs[1:]
+				}
+			}
+			if err := s.writeValue(cc, response); err != nil {
+				s.log.Error("ws session-control write error", map[string]any{"id": cc.id, "error": err.Error()})
+				return
+			}
+			cc.selectedSessionID = selectedSessionID
 			continue
 		}
 		if envelope.Type == capabilities.Type {
@@ -528,7 +615,15 @@ func (s *Server) readLoop(cc *clientConn) {
 		if s.handler != nil {
 			var response *events.Event
 			var err error
-			if authenticated, ok := s.handler.(AuthenticatedHandler); ok {
+			if selected, ok := s.handler.(SelectedSessionHandler); ok {
+				if cc.bodyID == "" {
+					s.log.Warn("ws unauthenticated event rejected", map[string]any{"id": cc.id})
+					errResp := events.NewErrorResponse(event.ID, event.DollID, "authenticated Body required")
+					s.writeJSON(cc, errResp)
+					continue
+				}
+				response, err = selected.HandleSelectedSessionEvent(context.Background(), cc.bodyID, cc.selectedSessionID, &event)
+			} else if authenticated, ok := s.handler.(AuthenticatedHandler); ok {
 				if cc.bodyID == "" {
 					s.log.Warn("ws unauthenticated event rejected", map[string]any{"id": cc.id})
 					errResp := events.NewErrorResponse(event.ID, event.DollID, "authenticated Body required")
@@ -560,6 +655,41 @@ func (s *Server) readLoop(cc *clientConn) {
 			errResp := events.NewErrorResponse(event.ID, event.DollID, "no handler configured")
 			s.writeJSON(cc, errResp)
 		}
+	}
+}
+
+func isSessionControlType(messageType string) bool {
+	return messageType == string(sessioncontrol.TypeCreate) || messageType == string(sessioncontrol.TypeList) ||
+		messageType == string(sessioncontrol.TypeSelect) || messageType == string(sessioncontrol.TypeClose)
+}
+
+func recoverSessionControlRequest(message []byte) (sessioncontrol.Request, bool) {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(message, &fields); err != nil {
+		return sessioncontrol.Request{}, false
+	}
+	var id string
+	if err := json.Unmarshal(fields["id"], &id); err != nil || id == "" {
+		return sessioncontrol.Request{}, false
+	}
+	var version int
+	_ = json.Unmarshal(fields["version"], &version)
+	var messageType sessioncontrol.MessageType
+	_ = json.Unmarshal(fields["type"], &messageType)
+	return sessioncontrol.Request{Version: version, Type: messageType, ID: id}, true
+}
+
+func sessionControlError(request sessioncontrol.Request, code sessioncontrol.ErrorCode, message string) sessioncontrol.Response {
+	return sessioncontrol.Response{
+		Version:       sessioncontrol.Version,
+		Type:          sessioncontrol.TypeResult,
+		ID:            uuid.NewString(),
+		CorrelationID: request.ID,
+		Payload: sessioncontrol.ResponsePayload{
+			Operation: request.Type,
+			Status:    sessioncontrol.StatusError,
+			Error:     &sessioncontrol.Error{Code: code, Message: message},
+		},
 	}
 }
 
