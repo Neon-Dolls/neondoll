@@ -117,7 +117,7 @@ release:
   header: |
     ## NeonDoll {{ .Tag }}
 
-    > Core 2 — Spark acts, observes, learns from experience, and persists across restarts.
+    > Core 4 — The Doll moves freely, finds its own paths, and reconnects after disconnection.
 
     ### Binaries
 
