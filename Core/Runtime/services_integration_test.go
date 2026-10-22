@@ -6,9 +6,11 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/Neon-Dolls/neondoll/Core/Interaction"
 	"github.com/Neon-Dolls/neondoll/Core/Persistence"
 	"github.com/Neon-Dolls/neondoll/Core/Runtime"
 	"github.com/Neon-Dolls/neondoll/Core/Session"
+	"github.com/Neon-Dolls/neondoll/DollLink/Events"
 )
 
 func openRuntimeServices(t *testing.T, path string) (*runtime.Services, persistence.Store) {
@@ -115,5 +117,37 @@ func TestSessionServiceWiringAndRestartRecovery(t *testing.T) {
 func TestNewServicesRejectsMissingSessionStore(t *testing.T) {
 	if _, err := runtime.NewServices(context.Background(), nil); err == nil {
 		t.Fatal("NewServices(nil) succeeded")
+	}
+}
+
+type runtimeInteractionHandler struct{ sessionID session.ID }
+
+func (h *runtimeInteractionHandler) HandleInteraction(_ context.Context, resolved *session.InteractionSession, event *events.Event) (*events.Event, error) {
+	h.sessionID = resolved.ID
+	response := events.NewResponse(event.ID, event.DollID, "runtime-routed")
+	return &response, nil
+}
+
+func TestRuntimeExposesSessionInteractionRouter(t *testing.T) {
+	ctx := context.Background()
+	services, store := openRuntimeServices(t, filepath.Join(t.TempDir(), "neondoll.db"))
+	defer store.Close()
+	owner := session.Owner{Kind: session.OwnerGateway, InstanceID: "gateway-one"}
+	created, err := services.Sessions().Create(ctx, session.CreateRequest{Owner: owner, ExternalConversationRef: "conversation-one"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	handler := &runtimeInteractionHandler{}
+	router, err := services.InteractionRouter(handler)
+	if err != nil {
+		t.Fatalf("InteractionRouter: %v", err)
+	}
+	event := events.NewDollMessage("event-one", "doll-one", "hello")
+	response, err := router.RouteInteraction(ctx, interaction.RouteRequest{SessionID: created.ID, Owner: owner, Event: &event})
+	if err != nil {
+		t.Fatalf("RouteInteraction: %v", err)
+	}
+	if handler.sessionID != created.ID || response.CorrelationID != event.ID {
+		t.Fatalf("runtime route session = %q, response = %+v", handler.sessionID, response)
 	}
 }

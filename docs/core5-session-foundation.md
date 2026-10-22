@@ -58,3 +58,26 @@ Rin's future Gateway host needs only a `session.Service` supplied from
 identity and opaque platform conversation reference to `Create` or `Resume`;
 it does not need persistence access and must not infer owner authority from a
 platform sender identity.
+
+## Interaction routing
+
+`Core/Interaction.Router` is the internal session-aware interaction entry point.
+Core components obtain one with
+`runtime.Services.InteractionRouter(handler)`. A trusted ingress passes a Core
+session ID, the already-authenticated Body or Core-assigned Gateway instance
+identity, and the inbound event. The router resolves the persisted session,
+compares the exact owner identity, atomically rechecks that the session remains
+active, updates its activity timestamp, and then passes both the resolved
+session and event to the handler.
+
+Unknown, wrong-owner, and closed-session routes return distinct errors and do
+not invoke the interaction handler. The router holds no mutable model context
+or global dispatch lock, so independent sessions remain isolated and may enter
+their handlers concurrently.
+
+The existing Doll Link event envelope does not contain a Core Interaction
+Session ID, and its legacy WebSocket event callback does not expose the
+authenticated connection identity. This milestone deliberately does not alter
+that protocol. A future authenticated Body/Gateway ingress must select a Core
+session and call the internal router with its trusted owner identity; event
+fields such as `source` are never accepted as identity proof.
