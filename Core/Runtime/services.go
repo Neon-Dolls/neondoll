@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/Neon-Dolls/neondoll/Core/Interaction"
 	"github.com/Neon-Dolls/neondoll/Core/Session"
 )
 
@@ -33,3 +34,10 @@ func NewServices(ctx context.Context, sessionStore session.Store) (*Services, er
 // future Gateway host should depend on this interface, not on SQLite or the
 // concrete session Manager.
 func (s *Services) Sessions() session.Service { return s.sessions }
+
+// InteractionRouter binds a session-aware interaction handler to the running
+// Core's session authority. Authenticated Body/Gateway ingress supplies the
+// trusted owner and session ID when routing an event.
+func (s *Services) InteractionRouter(handler interaction.SessionHandler) (interaction.SessionRouter, error) {
+	return interaction.NewRouter(s.sessions, handler)
+}

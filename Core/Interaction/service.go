@@ -11,6 +11,7 @@ import (
 
 	"github.com/Neon-Dolls/neondoll/Core/Inference"
 	"github.com/Neon-Dolls/neondoll/Core/Persistence"
+	"github.com/Neon-Dolls/neondoll/Core/Session"
 	"github.com/Neon-Dolls/neondoll/DollLink/Events"
 	"github.com/Neon-Dolls/neondoll/DollState"
 	"github.com/Neon-Dolls/neondoll/pkg/logger"
@@ -25,6 +26,16 @@ type Service struct {
 	provider inference.Provider
 	log      *logger.Logger
 	mu       sync.Mutex
+}
+
+var _ SessionHandler = (*Service)(nil)
+
+// HandleInteraction is the session-aware entry point used by Router. The
+// current inference path remains session-independent until Context Builder is
+// introduced; receiving the resolved session here keeps that future state
+// explicit without changing legacy Doll Link event behavior.
+func (s *Service) HandleInteraction(ctx context.Context, _ *session.InteractionSession, event *events.Event) (*events.Event, error) {
+	return s.HandleEvent(ctx, event)
 }
 
 // New creates an Interaction service with the given persistence store and
