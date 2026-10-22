@@ -23,6 +23,9 @@ const (
 
 	ErrorInvalidRequest     ErrorCode = "invalid_request"
 	ErrorUnsupportedVersion ErrorCode = "unsupported_version"
+	ErrorRequestIDConflict  ErrorCode = "request_id_conflict"
+	ErrorUnauthenticated    ErrorCode = "unauthenticated"
+	ErrorHandlerUnavailable ErrorCode = "handler_unavailable"
 	ErrorSessionUnavailable ErrorCode = "session_unavailable"
 	ErrorInternal           ErrorCode = "internal_error"
 )

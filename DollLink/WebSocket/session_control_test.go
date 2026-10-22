@@ -7,6 +7,9 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/gorilla/websocket"
+
+	"github.com/Neon-Dolls/neondoll/DollLink/Authentication"
 	"github.com/Neon-Dolls/neondoll/DollLink/Events"
 	"github.com/Neon-Dolls/neondoll/DollLink/SessionControl"
 )
@@ -16,6 +19,18 @@ type selectionHandler struct {
 	selected []string
 	controls int
 }
+
+type pendingBodyAuthenticator struct{}
+
+func (pendingBodyAuthenticator) BeginAuthentication(context.Context, string, authentication.Hello) (authentication.Challenge, error) {
+	return authentication.Challenge{}, errors.New("unexpected authentication hello")
+}
+
+func (pendingBodyAuthenticator) ActivateAuthentication(context.Context, string, authentication.Proof, func(authentication.Accept, string) error) error {
+	return errors.New("unexpected authentication proof")
+}
+
+func (pendingBodyAuthenticator) CancelAuthentication(string) {}
 
 func (h *selectionHandler) HandleEvent(_ context.Context, event *events.Event) (*events.Event, error) {
 	response := events.NewResponse(event.ID, event.DollID, "legacy")
@@ -65,6 +80,68 @@ func TestSessionControlDuplicateRequestIsNotReapplied(t *testing.T) {
 	defer handler.mu.Unlock()
 	if handler.controls != 1 {
 		t.Fatalf("handler calls = %d, want 1", handler.controls)
+	}
+}
+
+func TestSessionControlDuplicateRequestIDRejectsDifferentContent(t *testing.T) {
+	handler := &selectionHandler{}
+	_, url := startWSTestServer(t, Config{AuthenticateExecution: bodyHeaderAuthenticator}, handler)
+	body := dialTestBody(t, url, "body-one")
+	defer body.Close()
+
+	first := sessioncontrol.Request{Version: 1, Type: sessioncontrol.TypeSelect, ID: "request-1", Payload: sessioncontrol.RequestPayload{SessionID: "session-one"}}
+	if response := sendControl(t, body, first); response.Payload.Status != sessioncontrol.StatusOK {
+		t.Fatalf("first response = %+v", response)
+	}
+	conflicts := []sessioncontrol.Request{
+		{Version: 1, Type: sessioncontrol.TypeClose, ID: "request-1", Payload: sessioncontrol.RequestPayload{SessionID: "session-one"}},
+		{Version: 1, Type: sessioncontrol.TypeSelect, ID: "request-1", Payload: sessioncontrol.RequestPayload{SessionID: "session-two"}},
+	}
+	for _, request := range conflicts {
+		response := sendControl(t, body, request)
+		if response.CorrelationID != request.ID || response.Payload.Error == nil || response.Payload.Error.Code != sessioncontrol.ErrorRequestIDConflict {
+			t.Fatalf("conflict response = %+v", response)
+		}
+	}
+	sendEvent(t, body, "event-one")
+	handler.mu.Lock()
+	defer handler.mu.Unlock()
+	if handler.controls != 1 || len(handler.selected) != 1 || handler.selected[0] != "session-one" {
+		t.Fatalf("conflicting request changed state: controls=%d selected=%#v", handler.controls, handler.selected)
+	}
+}
+
+func TestSessionControlMalformedRequestReturnsCorrelatedError(t *testing.T) {
+	handler := &selectionHandler{}
+	_, url := startWSTestServer(t, Config{AuthenticateExecution: bodyHeaderAuthenticator}, handler)
+	body := dialTestBody(t, url, "body-one")
+	defer body.Close()
+
+	malformed := []byte(`{"version":"not-an-integer","type":"session.select","id":"malformed-1","payload":[]}`)
+	if err := body.WriteMessage(websocket.TextMessage, malformed); err != nil {
+		t.Fatal(err)
+	}
+	var response sessioncontrol.Response
+	if err := body.ReadJSON(&response); err != nil {
+		t.Fatal(err)
+	}
+	if response.CorrelationID != "malformed-1" || response.Payload.Operation != sessioncontrol.TypeSelect || response.Payload.Error == nil || response.Payload.Error.Code != sessioncontrol.ErrorInvalidRequest {
+		t.Fatalf("malformed response = %+v", response)
+	}
+	handler.mu.Lock()
+	defer handler.mu.Unlock()
+	if handler.controls != 0 {
+		t.Fatalf("malformed request reached handler %d times", handler.controls)
+	}
+}
+
+func TestSessionControlUnavailableHandlerReturnsCorrelatedError(t *testing.T) {
+	_, url := startWSTestServer(t, Config{AuthenticateExecution: bodyHeaderAuthenticator}, echoEventHandler{})
+	body := dialTestBody(t, url, "body-one")
+	defer body.Close()
+	response := sendControl(t, body, sessioncontrol.Request{Version: 1, Type: sessioncontrol.TypeList, ID: "list-1"})
+	if response.CorrelationID != "list-1" || response.Payload.Error == nil || response.Payload.Error.Code != sessioncontrol.ErrorHandlerUnavailable {
+		t.Fatalf("unavailable response = %+v", response)
 	}
 }
 
@@ -156,22 +233,29 @@ func TestUnauthenticatedConnectionCannotControlSessions(t *testing.T) {
 	body := dialTestBody(t, url, "invalid-token")
 	defer body.Close()
 	request := sessioncontrol.Request{Version: 1, Type: sessioncontrol.TypeCreate, ID: "create-1"}
-	if err := body.WriteJSON(request); err != nil {
-		t.Fatal(err)
-	}
-	// A following event acts as an ordering barrier for the single transport
-	// read loop and receives the normal authenticated-ingress rejection.
-	event := events.NewDollMessage("event-one", "doll-one", "barrier")
-	if err := body.WriteJSON(event); err != nil {
-		t.Fatal(err)
-	}
-	var response events.Event
-	if err := body.ReadJSON(&response); err != nil {
-		t.Fatal(err)
+	response := sendControl(t, body, request)
+	if response.CorrelationID != "create-1" || response.Payload.Error == nil || response.Payload.Error.Code != sessioncontrol.ErrorUnauthenticated {
+		t.Fatalf("unauthenticated response = %+v", response)
 	}
 	handler.mu.Lock()
 	defer handler.mu.Unlock()
 	if handler.controls != 0 || len(handler.selected) != 0 {
 		t.Fatalf("unauthenticated calls: controls=%d selected=%#v", handler.controls, handler.selected)
+	}
+}
+
+func TestPreAuthenticationSessionControlReturnsCorrelatedError(t *testing.T) {
+	handler := &selectionHandler{}
+	_, url := startWSTestServer(t, Config{BodyAuthenticator: pendingBodyAuthenticator{}}, handler)
+	body := dialTestBody(t, url, "")
+	defer body.Close()
+	response := sendControl(t, body, sessioncontrol.Request{Version: 1, Type: sessioncontrol.TypeList, ID: "pre-auth-1"})
+	if response.CorrelationID != "pre-auth-1" || response.Payload.Error == nil || response.Payload.Error.Code != sessioncontrol.ErrorUnauthenticated {
+		t.Fatalf("pre-authentication response = %+v", response)
+	}
+	handler.mu.Lock()
+	defer handler.mu.Unlock()
+	if handler.controls != 0 {
+		t.Fatalf("pre-authentication request reached handler %d times", handler.controls)
 	}
 }

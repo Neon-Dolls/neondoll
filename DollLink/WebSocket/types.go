@@ -130,9 +130,14 @@ type clientConn struct {
 	bodyID             string
 	execution          *execution.Client
 	selectedSessionID  string
-	sessionResponses   map[string]sessioncontrol.Response
+	sessionResponses   map[string]cachedSessionResponse
 	sessionResponseIDs []string
 	done               chan struct{}
+}
+
+type cachedSessionResponse struct {
+	request  sessioncontrol.Request
+	response sessioncontrol.Response
 }
 
 // Config for the WS server.
@@ -475,6 +480,11 @@ func (s *Server) readLoop(cc *clientConn) {
 					return
 				}
 			default:
+				if isSessionControlType(envelope.Type) {
+					if request, ok := recoverSessionControlRequest(message); ok {
+						_ = s.writeValue(cc, sessionControlError(request, sessioncontrol.ErrorUnauthenticated, "authenticated Body required"))
+					}
+				}
 				s.log.Warn("ws pre-authentication message rejected", map[string]any{"id": cc.id, "type": envelope.Type})
 				return
 			}
@@ -504,24 +514,42 @@ func (s *Server) readLoop(cc *clientConn) {
 			s.log.Warn("ws rejected execution request from Body connection", map[string]any{"id": cc.id})
 			continue
 		}
-		if envelope.Type == string(sessioncontrol.TypeCreate) || envelope.Type == string(sessioncontrol.TypeList) ||
-			envelope.Type == string(sessioncontrol.TypeSelect) || envelope.Type == string(sessioncontrol.TypeClose) {
+		if isSessionControlType(envelope.Type) {
 			var request sessioncontrol.Request
 			if err := json.Unmarshal(message, &request); err != nil {
 				s.log.Warn("ws invalid session-control request", map[string]any{"id": cc.id, "error": err.Error()})
+				if recovered, ok := recoverSessionControlRequest(message); ok {
+					if err := s.writeValue(cc, sessionControlError(recovered, sessioncontrol.ErrorInvalidRequest, "invalid session-control request")); err != nil {
+						return
+					}
+				}
 				continue
 			}
 			if cc.bodyID == "" {
 				s.log.Warn("ws unauthenticated session-control request rejected", map[string]any{"id": cc.id})
+				if request.ID != "" {
+					if err := s.writeValue(cc, sessionControlError(request, sessioncontrol.ErrorUnauthenticated, "authenticated Body required")); err != nil {
+						return
+					}
+				}
 				continue
 			}
 			handler, ok := s.handler.(SessionControlHandler)
 			if !ok {
 				s.log.Warn("ws session-control handler unavailable", map[string]any{"id": cc.id})
+				if request.ID != "" {
+					if err := s.writeValue(cc, sessionControlError(request, sessioncontrol.ErrorHandlerUnavailable, "session-control handler unavailable")); err != nil {
+						return
+					}
+				}
 				continue
 			}
 			if cached, ok := cc.sessionResponses[request.ID]; ok && request.ID != "" {
-				if err := s.writeValue(cc, cached); err != nil {
+				response := cached.response
+				if cached.request != request {
+					response = sessionControlError(request, sessioncontrol.ErrorRequestIDConflict, "request ID was already used for different content")
+				}
+				if err := s.writeValue(cc, response); err != nil {
 					return
 				}
 				continue
@@ -529,9 +557,9 @@ func (s *Server) readLoop(cc *clientConn) {
 			response, selectedSessionID := handler.HandleSessionControl(context.Background(), cc.bodyID, cc.selectedSessionID, request)
 			if request.ID != "" {
 				if cc.sessionResponses == nil {
-					cc.sessionResponses = make(map[string]sessioncontrol.Response)
+					cc.sessionResponses = make(map[string]cachedSessionResponse)
 				}
-				cc.sessionResponses[request.ID] = response
+				cc.sessionResponses[request.ID] = cachedSessionResponse{request: request, response: response}
 				cc.sessionResponseIDs = append(cc.sessionResponseIDs, request.ID)
 				if len(cc.sessionResponseIDs) > sessionResponseCacheSize {
 					delete(cc.sessionResponses, cc.sessionResponseIDs[0])
@@ -627,6 +655,41 @@ func (s *Server) readLoop(cc *clientConn) {
 			errResp := events.NewErrorResponse(event.ID, event.DollID, "no handler configured")
 			s.writeJSON(cc, errResp)
 		}
+	}
+}
+
+func isSessionControlType(messageType string) bool {
+	return messageType == string(sessioncontrol.TypeCreate) || messageType == string(sessioncontrol.TypeList) ||
+		messageType == string(sessioncontrol.TypeSelect) || messageType == string(sessioncontrol.TypeClose)
+}
+
+func recoverSessionControlRequest(message []byte) (sessioncontrol.Request, bool) {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(message, &fields); err != nil {
+		return sessioncontrol.Request{}, false
+	}
+	var id string
+	if err := json.Unmarshal(fields["id"], &id); err != nil || id == "" {
+		return sessioncontrol.Request{}, false
+	}
+	var version int
+	_ = json.Unmarshal(fields["version"], &version)
+	var messageType sessioncontrol.MessageType
+	_ = json.Unmarshal(fields["type"], &messageType)
+	return sessioncontrol.Request{Version: version, Type: messageType, ID: id}, true
+}
+
+func sessionControlError(request sessioncontrol.Request, code sessioncontrol.ErrorCode, message string) sessioncontrol.Response {
+	return sessioncontrol.Response{
+		Version:       sessioncontrol.Version,
+		Type:          sessioncontrol.TypeResult,
+		ID:            uuid.NewString(),
+		CorrelationID: request.ID,
+		Payload: sessioncontrol.ResponsePayload{
+			Operation: request.Type,
+			Status:    sessioncontrol.StatusError,
+			Error:     &sessioncontrol.Error{Code: code, Message: message},
+		},
 	}
 }
 

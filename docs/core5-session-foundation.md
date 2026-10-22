@@ -111,7 +111,9 @@ Create accepts an optional `external_conversation_ref`; select and close require
 `session_id`; list has an empty payload. The Core replies with
 `session.result`, a Core-generated message ID, the request ID in
 `correlation_id`, and a payload containing the operation, `ok` or `error`
-status, and any session data or deterministic error code.
+status, and any session data or deterministic error code. Malformed requests,
+unauthenticated requests, and missing handlers receive the same correlated
+response whenever the transport can recover a string request ID.
 
 All operations are scoped to the Body identity authenticated on that WebSocket.
 List returns only that Body's active sessions. Unknown, foreign, and closed
@@ -126,7 +128,8 @@ old explicit selection.
 
 Request IDs are scoped to one connection. The transport caches the 128 most
 recent responses and returns the original response for a duplicate ID without
-reapplying the operation. After reconnect, a client must list current sessions
+reapplying the operation. Reusing an ID with a different operation or payload
+returns `request_id_conflict` and does not mutate selection. After reconnect, a client must list current sessions
 instead of replaying an uncertain create request. This bounds retry state while
 making live-connection retries safe.
 
