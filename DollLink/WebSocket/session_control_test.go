@@ -43,6 +43,34 @@ type concurrentInteractionHandler struct {
 	release chan struct{}
 }
 
+type nilInteractionHandler struct{}
+
+func (nilInteractionHandler) HandleEvent(_ context.Context, event *events.Event) (*events.Event, error) {
+	response := events.NewResponse(event.ID, event.DollID, "legacy")
+	return &response, nil
+}
+
+func (nilInteractionHandler) HandleSessionInteraction(context.Context, string, string, *events.Event) (*events.Event, error) {
+	return nil, nil
+}
+
+type cancelInteractionHandler struct {
+	entered  chan struct{}
+	canceled chan struct{}
+}
+
+func (h *cancelInteractionHandler) HandleEvent(_ context.Context, event *events.Event) (*events.Event, error) {
+	response := events.NewResponse(event.ID, event.DollID, "legacy")
+	return &response, nil
+}
+
+func (h *cancelInteractionHandler) HandleSessionInteraction(ctx context.Context, _ string, _ string, _ *events.Event) (*events.Event, error) {
+	close(h.entered)
+	<-ctx.Done()
+	close(h.canceled)
+	return nil, ctx.Err()
+}
+
 func (h *concurrentInteractionHandler) HandleEvent(_ context.Context, event *events.Event) (*events.Event, error) {
 	response := events.NewResponse(event.ID, event.DollID, "legacy")
 	return &response, nil
@@ -237,6 +265,15 @@ func sendSessionInteraction(t *testing.T, body interface {
 	return response
 }
 
+func writeSessionInteraction(t *testing.T, body interface{ WriteJSON(any) error }, sessionID, eventID string) {
+	t.Helper()
+	event := events.NewDollMessage(eventID, "doll-one", "hello")
+	message := sessioncontrol.Interaction{Version: sessioncontrol.Version, Type: sessioncontrol.TypeInteraction, SessionID: sessionID, Event: event}
+	if err := body.WriteJSON(message); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestPerInteractionOverrideDoesNotChangeConnectionSelection(t *testing.T) {
 	handler := &selectionHandler{}
 	_, url := startWSTestServer(t, Config{AuthenticateExecution: bodyHeaderAuthenticator}, handler)
@@ -302,6 +339,89 @@ func TestPerInteractionOverridesRunConcurrently(t *testing.T) {
 		if err := body.ReadJSON(&response); err != nil {
 			t.Fatal(err)
 		}
+	}
+}
+
+func TestPerInteractionConcurrencyLimitAndRecovery(t *testing.T) {
+	handler := &concurrentInteractionHandler{entered: make(chan string, 3), release: make(chan struct{})}
+	_, url := startWSTestServer(t, Config{AuthenticateExecution: bodyHeaderAuthenticator, MaxConcurrentInteractions: 2}, handler)
+	body := dialTestBody(t, url, "body-one")
+	defer body.Close()
+	writeSessionInteraction(t, body, "session-one", "event-one")
+	writeSessionInteraction(t, body, "session-two", "event-two")
+	for range 2 {
+		select {
+		case <-handler.entered:
+		case <-time.After(2 * time.Second):
+			t.Fatal("interaction did not occupy capacity")
+		}
+	}
+	writeSessionInteraction(t, body, "session-three", "event-overload")
+	var overloaded events.Event
+	if err := body.ReadJSON(&overloaded); err != nil {
+		t.Fatal(err)
+	}
+	payload, ok := overloaded.Payload.(map[string]any)
+	if overloaded.CorrelationID != "event-overload" || !ok || payload["event"] != "error" || payload["data"] != "session interaction unavailable" {
+		t.Fatalf("overload response = %+v", overloaded)
+	}
+
+	close(handler.release)
+	for range 2 {
+		var response events.Event
+		if err := body.ReadJSON(&response); err != nil {
+			t.Fatal(err)
+		}
+	}
+	response := sendSessionInteraction(t, body, "session-four", "event-recovered")
+	if response.CorrelationID != "event-recovered" {
+		t.Fatalf("recovered response = %+v", response)
+	}
+}
+
+func TestPerInteractionNilResponseReturnsCorrelatedError(t *testing.T) {
+	_, url := startWSTestServer(t, Config{AuthenticateExecution: bodyHeaderAuthenticator}, nilInteractionHandler{})
+	body := dialTestBody(t, url, "body-one")
+	defer body.Close()
+	response := sendSessionInteraction(t, body, "session-one", "event-nil")
+	payload, ok := response.Payload.(map[string]any)
+	if response.CorrelationID != "event-nil" || !ok || payload["event"] != "error" || payload["data"] != "session interaction failed" {
+		t.Fatalf("nil response result = %+v", response)
+	}
+}
+
+func TestPerInteractionDisconnectCancelsAndJoinsWorker(t *testing.T) {
+	handler := &cancelInteractionHandler{entered: make(chan struct{}), canceled: make(chan struct{})}
+	server, url := startWSTestServer(t, Config{AuthenticateExecution: bodyHeaderAuthenticator, MaxConcurrentInteractions: 1}, handler)
+	body := dialTestBody(t, url, "body-one")
+	writeSessionInteraction(t, body, "session-one", "event-one")
+	select {
+	case <-handler.entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("interaction did not start")
+	}
+	server.mu.Lock()
+	var disconnected <-chan struct{}
+	for _, connection := range server.conns {
+		disconnected = connection.done
+		break
+	}
+	server.mu.Unlock()
+	if disconnected == nil {
+		t.Fatal("connection was not registered")
+	}
+	if err := body.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-handler.canceled:
+	case <-time.After(2 * time.Second):
+		t.Fatal("disconnect did not cancel interaction")
+	}
+	select {
+	case <-disconnected:
+	case <-time.After(2 * time.Second):
+		t.Fatal("disconnect did not join interaction worker")
 	}
 }
 

@@ -91,6 +91,7 @@ var upgrader = websocket.Upgrader{
 const writeTimeout = 10 * time.Second
 const defaultAuthenticationTimeout = 30 * time.Second
 const sessionResponseCacheSize = 128
+const defaultMaxConcurrentInteractions = 16
 
 // Server is a WebSocket transport for Doll Link.
 type Server struct {
@@ -102,18 +103,19 @@ type Server struct {
 	activationMu sync.Mutex
 	mu           sync.Mutex
 
-	conns                 map[string]*clientConn
-	execution             map[string]*clientConn
-	log                   Logger
-	listen                string
-	mux                   *http.ServeMux
-	httpSrv               *http.Server
-	handler               Handler
-	listenerAddr          string
-	authenticateExecution func(*http.Request) (string, error)
-	bodyAuthenticator     BodyAuthenticator
-	authenticationTimeout time.Duration
-	executionLifecycle    ExecutionSessionLifecycle
+	conns                     map[string]*clientConn
+	execution                 map[string]*clientConn
+	log                       Logger
+	listen                    string
+	mux                       *http.ServeMux
+	httpSrv                   *http.Server
+	handler                   Handler
+	listenerAddr              string
+	authenticateExecution     func(*http.Request) (string, error)
+	bodyAuthenticator         BodyAuthenticator
+	authenticationTimeout     time.Duration
+	executionLifecycle        ExecutionSessionLifecycle
+	maxConcurrentInteractions int
 
 	// listener is an optional pre-created net.Listener.
 	// When set (typically via SetListener before Start), the server
@@ -141,6 +143,7 @@ type clientConn struct {
 	interactionCtx     context.Context
 	cancelInteractions context.CancelFunc
 	interactionWG      sync.WaitGroup
+	interactionSlots   chan struct{}
 	done               chan struct{}
 }
 
@@ -174,6 +177,10 @@ type Config struct {
 	// AuthenticationTimeout bounds the complete in-band handshake, including
 	// clients that connect and send nothing. Zero uses 30 seconds.
 	AuthenticationTimeout time.Duration
+
+	// MaxConcurrentInteractions bounds explicit interaction workers on each
+	// connection. Zero uses 16.
+	MaxConcurrentInteractions int
 }
 
 // New creates a WS Server with the given config, logger, and event handler.
@@ -195,6 +202,10 @@ func New(cfg Config, log Logger, handler Handler) *Server {
 	s.authenticationTimeout = cfg.AuthenticationTimeout
 	if s.authenticationTimeout <= 0 {
 		s.authenticationTimeout = defaultAuthenticationTimeout
+	}
+	s.maxConcurrentInteractions = cfg.MaxConcurrentInteractions
+	if s.maxConcurrentInteractions <= 0 {
+		s.maxConcurrentInteractions = defaultMaxConcurrentInteractions
 	}
 
 	s.mux.HandleFunc("/ws", s.handleWS)
@@ -343,6 +354,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		remote:             r.RemoteAddr,
 		interactionCtx:     interactionCtx,
 		cancelInteractions: cancelInteractions,
+		interactionSlots:   make(chan struct{}, s.maxConcurrentInteractions),
 		done:               make(chan struct{}),
 	}
 	if s.bodyAuthenticator != nil {
@@ -625,8 +637,15 @@ func (s *Server) readLoop(cc *clientConn) {
 				}
 				continue
 			}
-			cc.interactionWG.Add(1)
-			go s.handleSessionInteraction(cc, handler, interaction)
+			select {
+			case cc.interactionSlots <- struct{}{}:
+				cc.interactionWG.Add(1)
+				go s.handleSessionInteraction(cc, handler, interaction)
+			default:
+				if err := s.writeJSON(cc, events.NewErrorResponse(interaction.Event.ID, interaction.Event.DollID, "session interaction unavailable")); err != nil {
+					return
+				}
+			}
 			continue
 		}
 		if envelope.Type == capabilities.Type {
@@ -715,11 +734,19 @@ func (s *Server) readLoop(cc *clientConn) {
 }
 
 func (s *Server) handleSessionInteraction(cc *clientConn, handler SessionInteractionHandler, interaction sessioncontrol.Interaction) {
-	defer cc.interactionWG.Done()
+	defer func() {
+		<-cc.interactionSlots
+		cc.interactionWG.Done()
+	}()
 	response, err := handler.HandleSessionInteraction(cc.interactionCtx, cc.bodyID, interaction.SessionID, &interaction.Event)
 	if err != nil {
 		s.log.Warn("ws session interaction rejected", map[string]any{"id": cc.id, "error": err.Error()})
 		_ = s.writeJSON(cc, events.NewErrorResponse(interaction.Event.ID, interaction.Event.DollID, "session is not available"))
+		return
+	}
+	if response == nil {
+		s.log.Warn("ws session interaction returned nil response", map[string]any{"id": cc.id})
+		_ = s.writeJSON(cc, events.NewErrorResponse(interaction.Event.ID, interaction.Event.DollID, "session interaction failed"))
 		return
 	}
 	if response.CorrelationID == "" {

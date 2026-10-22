@@ -154,5 +154,9 @@ never fall back to either the connection default or the implicit session.
 An override does not mutate connection selection. Concurrent overrides can be
 admitted independently while the transport retains one read-loop owner and
 serialized writes. Their workers are scoped to the connection and canceled and
-joined on disconnect. Legacy event envelopes are unchanged and continue to use
-the connection default, or `doll-link/default` when no default is selected.
+joined on disconnect. Each connection admits at most 16 explicit interactions
+by default; saturation returns an immediate correlated `session interaction
+unavailable` error rather than blocking the read loop. Capacity is released
+when work completes or is canceled. Legacy event envelopes are unchanged and
+continue to use the connection default, or `doll-link/default` when no default
+is selected.
