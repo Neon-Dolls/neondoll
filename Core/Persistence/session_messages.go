@@ -24,20 +24,36 @@ func (s *store) AppendSessionMessages(ctx context.Context, sessionID session.ID,
 		}
 		return []contextbuilder.HistoryMessage{}, nil
 	}
-	tx, err := s.db.BeginTx(ctx, nil)
+	conn, err := s.db.Conn(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("append session messages: %w", err)
+		return nil, fmt.Errorf("append session messages: acquire connection: %w", err)
 	}
-	defer tx.Rollback()
+	defer conn.Close()
+	// BEGIN IMMEDIATE acquires SQLite's write reservation before reading the
+	// current sequence. Concurrent appenders therefore cannot calculate the
+	// same starting sequence. busy_timeout lets the existing SQLite locking
+	// mechanism serialize writers without an application-level retry loop.
+	if _, err := conn.ExecContext(ctx, `PRAGMA busy_timeout = 5000`); err != nil {
+		return nil, fmt.Errorf("append session messages: configure writer: %w", err)
+	}
+	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
+		return nil, fmt.Errorf("append session messages: begin: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_, _ = conn.ExecContext(context.Background(), `ROLLBACK`)
+		}
+	}()
 	var exists int
-	if err := tx.QueryRowContext(ctx, `SELECT 1 FROM interaction_sessions WHERE session_id = ?`, sessionID).Scan(&exists); err != nil {
+	if err := conn.QueryRowContext(ctx, `SELECT 1 FROM interaction_sessions WHERE session_id = ?`, sessionID).Scan(&exists); err != nil {
 		if err == sql.ErrNoRows {
 			return nil, session.ErrNotFound
 		}
 		return nil, fmt.Errorf("append session messages: resolve session: %w", err)
 	}
 	var next int
-	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(sequence) + 1, 0) FROM interaction_session_messages WHERE session_id = ?`, sessionID).Scan(&next); err != nil {
+	if err := conn.QueryRowContext(ctx, `SELECT COALESCE(MAX(sequence) + 1, 0) FROM interaction_session_messages WHERE session_id = ?`, sessionID).Scan(&next); err != nil {
 		return nil, fmt.Errorf("append session messages: sequence: %w", err)
 	}
 	created := make([]contextbuilder.HistoryMessage, len(messages))
@@ -46,14 +62,15 @@ func (s *store) AppendSessionMessages(ctx context.Context, sessionID session.ID,
 			return nil, contextbuilder.ErrInvalidRequest
 		}
 		created[index] = contextbuilder.HistoryMessage{ID: uuid.NewString(), SessionID: sessionID, Sequence: next + index, Role: message.Role, Content: message.Content, CreatedAt: time.Now().UTC()}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO interaction_session_messages (session_id, sequence, message_id, role, content, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
+		if _, err := conn.ExecContext(ctx, `INSERT INTO interaction_session_messages (session_id, sequence, message_id, role, content, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
 			sessionID, created[index].Sequence, created[index].ID, created[index].Role, created[index].Content, formatTime(created[index].CreatedAt)); err != nil {
 			return nil, fmt.Errorf("append session messages: insert: %w", err)
 		}
 	}
-	if err := tx.Commit(); err != nil {
+	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
 		return nil, fmt.Errorf("append session messages: commit: %w", err)
 	}
+	committed = true
 	return created, nil
 }
 
