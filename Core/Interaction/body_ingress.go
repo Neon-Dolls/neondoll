@@ -66,6 +66,17 @@ func (i *BodyIngress) HandleSelectedSessionEvent(ctx context.Context, bodyID, se
 	return i.router.RouteInteraction(ctx, RouteRequest{SessionID: resolved.ID, Owner: owner, Event: event})
 }
 
+// HandleSessionInteraction routes one event through an explicit session. The
+// WebSocket transport retains ownership of its connection-wide selection, so
+// this operation cannot modify it.
+func (i *BodyIngress) HandleSessionInteraction(ctx context.Context, bodyID, sessionID string, event *events.Event) (*events.Event, error) {
+	if strings.TrimSpace(bodyID) == "" {
+		return nil, ErrUnauthenticatedBody
+	}
+	owner := session.Owner{Kind: session.OwnerBody, InstanceID: bodyID}
+	return i.router.RouteInteraction(ctx, RouteRequest{SessionID: session.ID(sessionID), Owner: owner, Event: event})
+}
+
 // HandleSessionControl applies an authenticated Body's session lifecycle
 // operation. selectedSessionID is transport-owned state and the returned value
 // replaces it only after the response has been produced.

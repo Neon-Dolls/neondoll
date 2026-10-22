@@ -57,6 +57,12 @@ type SessionControlHandler interface {
 	HandleSessionControl(context.Context, string, string, sessioncontrol.Request) (sessioncontrol.Response, string)
 }
 
+// SessionInteractionHandler routes an explicitly selected interaction. The
+// selector applies only to this call and never changes transport selection.
+type SessionInteractionHandler interface {
+	HandleSessionInteraction(context.Context, string, string, *events.Event) (*events.Event, error)
+}
+
 // ExecutionSessionLifecycle receives identities already verified by the
 // configured authentication boundary. sessionID is an opaque connection
 // generation used to reject stale updates and disconnects.
@@ -85,6 +91,7 @@ var upgrader = websocket.Upgrader{
 const writeTimeout = 10 * time.Second
 const defaultAuthenticationTimeout = 30 * time.Second
 const sessionResponseCacheSize = 128
+const defaultMaxConcurrentInteractions = 16
 
 // Server is a WebSocket transport for Doll Link.
 type Server struct {
@@ -96,18 +103,19 @@ type Server struct {
 	activationMu sync.Mutex
 	mu           sync.Mutex
 
-	conns                 map[string]*clientConn
-	execution             map[string]*clientConn
-	log                   Logger
-	listen                string
-	mux                   *http.ServeMux
-	httpSrv               *http.Server
-	handler               Handler
-	listenerAddr          string
-	authenticateExecution func(*http.Request) (string, error)
-	bodyAuthenticator     BodyAuthenticator
-	authenticationTimeout time.Duration
-	executionLifecycle    ExecutionSessionLifecycle
+	conns                     map[string]*clientConn
+	execution                 map[string]*clientConn
+	log                       Logger
+	listen                    string
+	mux                       *http.ServeMux
+	httpSrv                   *http.Server
+	handler                   Handler
+	listenerAddr              string
+	authenticateExecution     func(*http.Request) (string, error)
+	bodyAuthenticator         BodyAuthenticator
+	authenticationTimeout     time.Duration
+	executionLifecycle        ExecutionSessionLifecycle
+	maxConcurrentInteractions int
 
 	// listener is an optional pre-created net.Listener.
 	// When set (typically via SetListener before Start), the server
@@ -132,6 +140,10 @@ type clientConn struct {
 	selectedSessionID  string
 	sessionResponses   map[string]cachedSessionResponse
 	sessionResponseIDs []string
+	interactionCtx     context.Context
+	cancelInteractions context.CancelFunc
+	interactionWG      sync.WaitGroup
+	interactionSlots   chan struct{}
 	done               chan struct{}
 }
 
@@ -165,6 +177,10 @@ type Config struct {
 	// AuthenticationTimeout bounds the complete in-band handshake, including
 	// clients that connect and send nothing. Zero uses 30 seconds.
 	AuthenticationTimeout time.Duration
+
+	// MaxConcurrentInteractions bounds explicit interaction workers on each
+	// connection. Zero uses 16.
+	MaxConcurrentInteractions int
 }
 
 // New creates a WS Server with the given config, logger, and event handler.
@@ -186,6 +202,10 @@ func New(cfg Config, log Logger, handler Handler) *Server {
 	s.authenticationTimeout = cfg.AuthenticationTimeout
 	if s.authenticationTimeout <= 0 {
 		s.authenticationTimeout = defaultAuthenticationTimeout
+	}
+	s.maxConcurrentInteractions = cfg.MaxConcurrentInteractions
+	if s.maxConcurrentInteractions <= 0 {
+		s.maxConcurrentInteractions = defaultMaxConcurrentInteractions
 	}
 
 	s.mux.HandleFunc("/ws", s.handleWS)
@@ -327,11 +347,15 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	interactionCtx, cancelInteractions := context.WithCancel(context.Background())
 	cc := &clientConn{
-		id:     "conn-" + uuid.NewString(),
-		conn:   conn,
-		remote: r.RemoteAddr,
-		done:   make(chan struct{}),
+		id:                 "conn-" + uuid.NewString(),
+		conn:               conn,
+		remote:             r.RemoteAddr,
+		interactionCtx:     interactionCtx,
+		cancelInteractions: cancelInteractions,
+		interactionSlots:   make(chan struct{}, s.maxConcurrentInteractions),
+		done:               make(chan struct{}),
 	}
 	if s.bodyAuthenticator != nil {
 		if err := conn.SetReadDeadline(time.Now().Add(s.authenticationTimeout)); err != nil {
@@ -410,6 +434,8 @@ func (s *Server) readLoop(cc *clientConn) {
 			s.bodyAuthenticator.CancelAuthentication(cc.id)
 		}
 		cc.conn.Close()
+		cc.cancelInteractions()
+		cc.interactionWG.Wait()
 		if cc.execution != nil {
 			s.activationMu.Lock()
 			cc.execution.Close(execution.ErrDisconnected)
@@ -483,6 +509,11 @@ func (s *Server) readLoop(cc *clientConn) {
 				if isSessionControlType(envelope.Type) {
 					if request, ok := recoverSessionControlRequest(message); ok {
 						_ = s.writeValue(cc, sessionControlError(request, sessioncontrol.ErrorUnauthenticated, "authenticated Body required"))
+					}
+				}
+				if envelope.Type == string(sessioncontrol.TypeInteraction) {
+					if correlationID, dollID, ok := recoverSessionInteractionIdentity(message); ok {
+						_ = s.writeJSON(cc, events.NewErrorResponse(correlationID, dollID, "authenticated Body required"))
 					}
 				}
 				s.log.Warn("ws pre-authentication message rejected", map[string]any{"id": cc.id, "type": envelope.Type})
@@ -573,6 +604,50 @@ func (s *Server) readLoop(cc *clientConn) {
 			cc.selectedSessionID = selectedSessionID
 			continue
 		}
+		if envelope.Type == string(sessioncontrol.TypeInteraction) {
+			var interaction sessioncontrol.Interaction
+			if err := json.Unmarshal(message, &interaction); err != nil {
+				if correlationID, dollID, ok := recoverSessionInteractionIdentity(message); ok {
+					if err := s.writeJSON(cc, events.NewErrorResponse(correlationID, dollID, "invalid session interaction")); err != nil {
+						return
+					}
+				}
+				continue
+			}
+			if err := interaction.Validate(); err != nil {
+				message := "invalid session interaction"
+				if errors.Is(err, sessioncontrol.ErrUnsupportedVersion) {
+					message = "unsupported session interaction version"
+				}
+				if err := s.writeJSON(cc, events.NewErrorResponse(interaction.Event.ID, interaction.Event.DollID, message)); err != nil {
+					return
+				}
+				continue
+			}
+			if cc.bodyID == "" {
+				if err := s.writeJSON(cc, events.NewErrorResponse(interaction.Event.ID, interaction.Event.DollID, "authenticated Body required")); err != nil {
+					return
+				}
+				continue
+			}
+			handler, ok := s.handler.(SessionInteractionHandler)
+			if !ok {
+				if err := s.writeJSON(cc, events.NewErrorResponse(interaction.Event.ID, interaction.Event.DollID, "session interaction handler unavailable")); err != nil {
+					return
+				}
+				continue
+			}
+			select {
+			case cc.interactionSlots <- struct{}{}:
+				cc.interactionWG.Add(1)
+				go s.handleSessionInteraction(cc, handler, interaction)
+			default:
+				if err := s.writeJSON(cc, events.NewErrorResponse(interaction.Event.ID, interaction.Event.DollID, "session interaction unavailable")); err != nil {
+					return
+				}
+			}
+			continue
+		}
 		if envelope.Type == capabilities.Type {
 			s.mu.Lock()
 			lifecycle := s.executionLifecycle
@@ -658,6 +733,30 @@ func (s *Server) readLoop(cc *clientConn) {
 	}
 }
 
+func (s *Server) handleSessionInteraction(cc *clientConn, handler SessionInteractionHandler, interaction sessioncontrol.Interaction) {
+	defer func() {
+		<-cc.interactionSlots
+		cc.interactionWG.Done()
+	}()
+	response, err := handler.HandleSessionInteraction(cc.interactionCtx, cc.bodyID, interaction.SessionID, &interaction.Event)
+	if err != nil {
+		s.log.Warn("ws session interaction rejected", map[string]any{"id": cc.id, "error": err.Error()})
+		_ = s.writeJSON(cc, events.NewErrorResponse(interaction.Event.ID, interaction.Event.DollID, "session is not available"))
+		return
+	}
+	if response == nil {
+		s.log.Warn("ws session interaction returned nil response", map[string]any{"id": cc.id})
+		_ = s.writeJSON(cc, events.NewErrorResponse(interaction.Event.ID, interaction.Event.DollID, "session interaction failed"))
+		return
+	}
+	if response.CorrelationID == "" {
+		response.CorrelationID = interaction.Event.ID
+	}
+	if err := s.writeJSON(cc, *response); err != nil {
+		s.log.Warn("ws session interaction write failed", map[string]any{"id": cc.id, "error": err.Error()})
+	}
+}
+
 func isSessionControlType(messageType string) bool {
 	return messageType == string(sessioncontrol.TypeCreate) || messageType == string(sessioncontrol.TypeList) ||
 		messageType == string(sessioncontrol.TypeSelect) || messageType == string(sessioncontrol.TypeClose)
@@ -677,6 +776,19 @@ func recoverSessionControlRequest(message []byte) (sessioncontrol.Request, bool)
 	var messageType sessioncontrol.MessageType
 	_ = json.Unmarshal(fields["type"], &messageType)
 	return sessioncontrol.Request{Version: version, Type: messageType, ID: id}, true
+}
+
+func recoverSessionInteractionIdentity(message []byte) (string, string, bool) {
+	var wrapper struct {
+		Event struct {
+			ID     string `json:"id"`
+			DollID string `json:"doll_id"`
+		} `json:"event"`
+	}
+	if err := json.Unmarshal(message, &wrapper); err != nil || wrapper.Event.ID == "" {
+		return "", "", false
+	}
+	return wrapper.Event.ID, wrapper.Event.DollID, true
 }
 
 func sessionControlError(request sessioncontrol.Request, code sessioncontrol.ErrorCode, message string) sessioncontrol.Response {
