@@ -12,18 +12,27 @@ type Service struct {
 	sessions  session.Service
 	history   HistoryStore
 	estimator TokenEstimator
+	policy    WindowPolicy
 }
 
 var _ Builder = (*Service)(nil)
 
 func New(sessions session.Service, history HistoryStore, estimator TokenEstimator) (*Service, error) {
+	return NewWithPolicy(sessions, history, estimator, SlidingWindowPolicy{})
+}
+
+// NewWithPolicy constructs a Builder with an explicit history-window policy.
+func NewWithPolicy(sessions session.Service, history HistoryStore, estimator TokenEstimator, policy WindowPolicy) (*Service, error) {
 	if sessions == nil || history == nil {
 		return nil, ErrInvalidRequest
 	}
 	if estimator == nil {
 		estimator = ApproximateEstimator{}
 	}
-	return &Service{sessions: sessions, history: history, estimator: estimator}, nil
+	if policy == nil {
+		return nil, ErrInvalidRequest
+	}
+	return &Service{sessions: sessions, history: history, estimator: estimator, policy: policy}, nil
 }
 
 // ApproximateEstimator is deterministic and provider-independent. It charges
@@ -48,6 +57,10 @@ func (builder *Service) Build(ctx context.Context, request Request) (Result, err
 	}
 
 	result := Result{SessionID: request.SessionID, Metadata: Metadata{TokenBudget: request.TokenBudget, HistoryMessages: len(history)}}
+	if len(history) > 0 {
+		result.Metadata.HistoryStartSequence = sequencePointer(history[0].Sequence)
+		result.Metadata.HistoryEndSequence = sequencePointer(history[len(history)-1].Sequence)
+	}
 	for _, instruction := range request.SystemInstructions {
 		message := Message{Role: RoleSystem, Content: instruction}
 		cost := estimate(builder.estimator, message)
@@ -58,49 +71,40 @@ func (builder *Service) Build(ctx context.Context, request Request) (Result, err
 		result.Metadata.EstimatedTokens += cost
 	}
 
-	costs := make([]int, len(history))
-	required := result.Metadata.EstimatedTokens
+	items := make([]WindowItem, len(history))
 	for index, stored := range history {
 		if !validRole(stored.Role) {
 			return Result{}, ErrInvalidRequest
 		}
-		costs[index] = estimate(builder.estimator, Message{Role: stored.Role, Content: stored.Content})
-		if stored.Role == RoleSystem {
-			required += costs[index]
+		items[index] = WindowItem{
+			Message:         stored,
+			EstimatedTokens: estimate(builder.estimator, Message{Role: stored.Role, Content: stored.Content}),
+			Required:        stored.Role == RoleSystem,
 		}
 	}
-	if required > request.TokenBudget {
-		return Result{}, ErrRequiredContextExceedsBudget
+	window, err := builder.policy.Select(WindowRequest{
+		Items:       items,
+		TokenBudget: request.TokenBudget - result.Metadata.EstimatedTokens,
+	})
+	if err != nil {
+		return Result{}, err
 	}
-
-	remaining := request.TokenBudget - required
-	cutoff := 0
-	for index := len(history) - 1; index >= 0; index-- {
-		if history[index].Role == RoleSystem {
-			continue
-		}
-		if costs[index] > remaining {
-			cutoff = index + 1
-			break
-		}
-		remaining -= costs[index]
-	}
-
-	for index, stored := range history {
-		included := stored.Role == RoleSystem || index >= cutoff
-		if included {
-			result.Messages = append(result.Messages, Message{Role: stored.Role, Content: stored.Content})
-			result.Metadata.EstimatedTokens += costs[index]
-			result.Metadata.IncludedHistoryMessages++
-			result.Metadata.IncludedMessageIDs = append(result.Metadata.IncludedMessageIDs, stored.ID)
-			continue
-		}
-		result.Metadata.OmittedHistoryMessages++
-		result.Metadata.OmittedMessages = append(result.Metadata.OmittedMessages, OmittedMessage{
-			ID: stored.ID, Sequence: stored.Sequence, EstimatedTokens: costs[index], Reason: OmittedBudget,
-		})
+	result.Metadata.EstimatedTokens += window.EstimatedTokens
+	result.Metadata.WindowStartSequence = window.StartSequence
+	result.Metadata.WindowEndSequence = window.EndSequence
+	result.Metadata.IncludedHistoryMessages = len(window.Items)
+	result.Metadata.OmittedHistoryMessages = len(window.OmittedMessages)
+	result.Metadata.OmittedMessages = window.OmittedMessages
+	for _, item := range window.Items {
+		result.Messages = append(result.Messages, Message{Role: item.Message.Role, Content: item.Message.Content})
+		result.Metadata.IncludedMessageIDs = append(result.Metadata.IncludedMessageIDs, item.Message.ID)
 	}
 	return result, nil
+}
+
+func sequencePointer(sequence int) *int {
+	value := sequence
+	return &value
 }
 
 func estimate(estimator TokenEstimator, message Message) int {
