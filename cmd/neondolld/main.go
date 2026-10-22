@@ -26,6 +26,7 @@ import (
 	"github.com/Neon-Dolls/neondoll/Core/Persistence"
 	"github.com/Neon-Dolls/neondoll/Core/Pulse"
 	"github.com/Neon-Dolls/neondoll/Core/Runtime"
+	"github.com/Neon-Dolls/neondoll/Core/Session"
 	"github.com/Neon-Dolls/neondoll/DollLink/WebSocket"
 	"github.com/Neon-Dolls/neondoll/DollState"
 	"github.com/Neon-Dolls/neondoll/pkg/logger"
@@ -97,6 +98,26 @@ func main() {
 	// Create the base context for all services.
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+
+	// Construct process-local Core services over the daemon's existing durable
+	// store. The session service owns no transport or model context and remains
+	// available to future internal Gateway hosts through this runtime boundary.
+	sessionStore, ok := store.(session.Store)
+	if !ok {
+		log.Error("store does not implement Interaction Session Store")
+		os.Exit(1)
+	}
+	coreServices, err := runtime.NewServices(ctx, sessionStore)
+	if err != nil {
+		log.Error("Core runtime services setup error", map[string]any{"error": err.Error()})
+		os.Exit(1)
+	}
+	activeSessions, err := coreServices.Sessions().ListActive(ctx, nil)
+	if err != nil {
+		log.Error("Interaction Session reconstruction error", map[string]any{"error": err.Error()})
+		os.Exit(1)
+	}
+	log.Info("Interaction Session service ready", map[string]any{"active_sessions": len(activeSessions)})
 
 	// Load or create the Doll Network state for WireGuard overlay.
 	ns, ok := store.(network.NetworkStore)
