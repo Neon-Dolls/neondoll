@@ -188,7 +188,7 @@ func main() {
 		log.Error("Interaction Session router setup error", map[string]any{"error": err.Error()})
 		os.Exit(1)
 	}
-	bodyIngress, err := interaction.NewBodyIngress(coreServices.Sessions(), interactionRouter, interactionSvc)
+	bodyIngress, err := interaction.NewBodyIngress(coreServices.Sessions(), interactionRouter)
 	if err != nil {
 		log.Error("authenticated Body interaction ingress setup error", map[string]any{"error": err.Error()})
 		os.Exit(1)

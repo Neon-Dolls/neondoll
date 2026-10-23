@@ -120,11 +120,11 @@ func (w *wsLogger) Error(msg string, fields ...map[string]any) {
 	w.inner.Error(msg, slog.Any("fields", fields))
 }
 
-// ── echoHandler implements websocket.Handler ──────────────────────────────────
+// ── echoHandler implements websocket.SelectedSessionHandler ──────────────────
 
 type echoHandler struct{}
 
-func (echoHandler) HandleEvent(_ context.Context, event *events.Event) (*events.Event, error) {
+func (echoHandler) HandleSelectedSessionEvent(_ context.Context, _, _ string, event *events.Event) (*events.Event, error) {
 	payloadText := ""
 	if p, ok := event.Payload.(map[string]any); ok {
 		if t, ok := p["text"].(string); ok {

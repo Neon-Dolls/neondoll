@@ -2,7 +2,6 @@ package ws
 
 import (
 	"context"
-	"sync/atomic"
 	"testing"
 
 	"github.com/gorilla/websocket"
@@ -11,17 +10,10 @@ import (
 )
 
 type authenticatedEventHandler struct {
-	legacyCalls atomic.Int32
-	bodyIDs     chan string
+	bodyIDs chan string
 }
 
-func (h *authenticatedEventHandler) HandleEvent(_ context.Context, event *events.Event) (*events.Event, error) {
-	h.legacyCalls.Add(1)
-	response := events.NewResponse(event.ID, event.DollID, "legacy")
-	return &response, nil
-}
-
-func (h *authenticatedEventHandler) HandleAuthenticatedEvent(_ context.Context, bodyID string, event *events.Event) (*events.Event, error) {
+func (h *authenticatedEventHandler) HandleSelectedSessionEvent(_ context.Context, bodyID, _ string, event *events.Event) (*events.Event, error) {
 	h.bodyIDs <- bodyID
 	response := events.NewResponse(event.ID, event.DollID, "authenticated")
 	return &response, nil
@@ -50,9 +42,6 @@ func TestEventIngressUsesConnectionAuthenticatedBodyIdentity(t *testing.T) {
 	if bodyID := <-handler.bodyIDs; bodyID != "body-1" {
 		t.Fatalf("authenticated BodyID = %q, want body-1", bodyID)
 	}
-	if handler.legacyCalls.Load() != 0 {
-		t.Fatalf("authenticated event used legacy handler %d times", handler.legacyCalls.Load())
-	}
 }
 
 func TestAuthenticatedEventHandlerFailsClosedWithoutBodyIdentity(t *testing.T) {
@@ -76,7 +65,7 @@ func TestAuthenticatedEventHandlerFailsClosedWithoutBodyIdentity(t *testing.T) {
 	if !ok || payload["event"] != "error" || payload["data"] != "authenticated Body required" {
 		t.Fatalf("unauthenticated response = %+v", response)
 	}
-	if handler.legacyCalls.Load() != 0 || len(handler.bodyIDs) != 0 {
+	if len(handler.bodyIDs) != 0 {
 		t.Fatal("unauthenticated event reached a handler")
 	}
 }

@@ -16,30 +16,19 @@ const BodyConversationReference = "doll-link/default"
 
 var ErrUnauthenticatedBody = errors.New("interaction: authenticated Body required")
 
-type EventHandler interface {
-	HandleEvent(context.Context, *events.Event) (*events.Event, error)
-}
-
 // BodyIngress adapts authenticated Doll Link events to the Core session
 // router. Each enrolled Body has one implicit Doll Link conversation because
 // the existing event contract carries no Core session selector.
 type BodyIngress struct {
 	sessions session.Service
 	router   SessionRouter
-	legacy   EventHandler
 }
 
-func NewBodyIngress(sessions session.Service, router SessionRouter, legacy EventHandler) (*BodyIngress, error) {
-	if sessions == nil || router == nil || legacy == nil {
+func NewBodyIngress(sessions session.Service, router SessionRouter) (*BodyIngress, error) {
+	if sessions == nil || router == nil {
 		return nil, ErrInvalidRoute
 	}
-	return &BodyIngress{sessions: sessions, router: router, legacy: legacy}, nil
-}
-
-// HandleEvent preserves the legacy Core 4 event path for transports that do
-// not expose authenticated Body identity.
-func (i *BodyIngress) HandleEvent(ctx context.Context, event *events.Event) (*events.Event, error) {
-	return i.legacy.HandleEvent(ctx, event)
+	return &BodyIngress{sessions: sessions, router: router}, nil
 }
 
 // HandleAuthenticatedEvent derives ownership exclusively from the BodyID

@@ -120,13 +120,18 @@ the beginning of the model input, the persisted rolling history is selected by
 the shared policy, and `RequiredMessages` reserves the current user input at
 the end. A completed inference atomically appends its user/assistant pair to
 session history; a failed inference appends neither. Each later invocation
-reconstructs a fresh window, including after Core/store restart.
+reconstructs a fresh window, including after Core/store restart. The complete
+build, inference, and history-append sequence is serialized per Session ID;
+different sessions remain concurrent. Cancellation while waiting does not
+retain lock state.
 
-The remaining production inference path outside Context Builder is the legacy
-unauthenticated Core 4 `Interaction.Service.HandleEvent` compatibility path.
-It has no authenticated Core Interaction Session ID, so it cannot safely use a
-session source. All internal DollMind and session-aware Interaction inference
-paths use bounded construction. Model-profile-specific budgets and routing
+`HandleInteraction` is the only external inference entry point. Authenticated
+Doll Link ingress resolves or selects a real Core Interaction Session and
+routes through it; the transport has no sessionless handler fallback. Missing
+authentication, unknown or closed sessions, and empty or unsupported message
+payloads fail before inference and are never persisted. Consequently every
+production external inference path and every internal DollMind inference path
+uses shared bounded construction. Model-profile-specific budgets and routing
 remain deferred.
 
 `New` installs the stateless `SlidingWindowPolicy`. `NewWithPolicy` accepts a

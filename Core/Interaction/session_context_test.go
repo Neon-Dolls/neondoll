@@ -5,9 +5,11 @@ import (
 	"errors"
 	"io"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	contextbuilder "github.com/Neon-Dolls/neondoll/Core/ContextBuilder"
 	"github.com/Neon-Dolls/neondoll/Core/Inference"
@@ -22,6 +24,26 @@ type sessionContextProvider struct {
 	responses []string
 	requests  []inference.Request
 	err       error
+}
+
+type blockingSessionProvider struct {
+	entered chan inference.Request
+	release chan struct{}
+}
+
+func (provider *blockingSessionProvider) ID() inference.ProviderID { return "blocking-session" }
+func (provider *blockingSessionProvider) Infer(ctx context.Context, request inference.Request) (*inference.Response, error) {
+	select {
+	case provider.entered <- request:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	select {
+	case <-provider.release:
+		return &inference.Response{Content: "answer", ProviderID: provider.ID()}, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
 }
 
 func (provider *sessionContextProvider) ID() inference.ProviderID { return "session-context" }
@@ -202,6 +224,130 @@ func TestFailedSessionInferenceDoesNotPersistTurn(t *testing.T) {
 	stored, err := history.ListSessionMessages(context.Background(), created.ID)
 	if err != nil || len(stored) != 0 {
 		t.Fatalf("failed inference history = %+v, %v", stored, err)
+	}
+}
+
+func TestSameSessionInteractionsAreSerializedAcrossHistoryAppend(t *testing.T) {
+	store := openStore(t)
+	seedDoll(t, store, "ordered-doll", "OrderedDoll")
+	sessions, _ := interactionSessionStores(t, store)
+	created := createInteractionSession(t, sessions, "body-ordered")
+	provider := &blockingSessionProvider{entered: make(chan inference.Request, 2), release: make(chan struct{}, 2)}
+	service := New(store, provider, logger.New(logger.ErrorLevel, io.Discard))
+
+	done := make(chan error, 2)
+	first := newResponse("ordered-doll", "first")
+	second := newResponse("ordered-doll", "second")
+	go func() { _, err := service.HandleInteraction(context.Background(), created, &first); done <- err }()
+	<-provider.entered
+	go func() { _, err := service.HandleInteraction(context.Background(), created, &second); done <- err }()
+	waitForSessionLockReferences(t, service, string(created.ID), 2)
+	select {
+	case <-provider.entered:
+		t.Fatal("second inference entered before first interaction appended history")
+	default:
+	}
+	provider.release <- struct{}{}
+	secondRequest := <-provider.entered
+	contents := messageContents(secondRequest.Messages)
+	if !containsString(contents, "first") || !containsString(contents, "answer") || !containsString(contents, "second") {
+		t.Fatalf("second request does not contain completed first turn: %v", contents)
+	}
+	provider.release <- struct{}{}
+	for range 2 {
+		if err := <-done; err != nil {
+			t.Fatal(err)
+		}
+	}
+	service.sessions.mu.Lock()
+	defer service.sessions.mu.Unlock()
+	if len(service.sessions.entries) != 0 {
+		t.Fatalf("session lock entries retained: %d", len(service.sessions.entries))
+	}
+}
+
+func waitForSessionLockReferences(t *testing.T, service *Service, key string, want int) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		service.sessions.mu.Lock()
+		entry := service.sessions.entries[key]
+		got := 0
+		if entry != nil {
+			got = entry.refs
+		}
+		service.sessions.mu.Unlock()
+		if got == want {
+			return
+		}
+		runtime.Gosched()
+	}
+	t.Fatalf("session lock references did not reach %d", want)
+}
+
+func TestDifferentSessionInteractionsRemainConcurrent(t *testing.T) {
+	store := openStore(t)
+	seedDoll(t, store, "concurrent-doll", "ConcurrentDoll")
+	sessions, _ := interactionSessionStores(t, store)
+	firstSession := createInteractionSession(t, sessions, "body-concurrent")
+	secondSession := createInteractionSession(t, sessions, "body-concurrent")
+	provider := &blockingSessionProvider{entered: make(chan inference.Request, 2), release: make(chan struct{}, 2)}
+	service := New(store, provider, logger.New(logger.ErrorLevel, io.Discard))
+	done := make(chan error, 2)
+
+	for _, item := range []struct {
+		resolved *session.InteractionSession
+		text     string
+	}{{firstSession, "first session"}, {secondSession, "second session"}} {
+		item := item
+		go func() {
+			event := newResponse("concurrent-doll", item.text)
+			_, err := service.HandleInteraction(context.Background(), item.resolved, &event)
+			done <- err
+		}()
+	}
+	for range 2 {
+		select {
+		case <-provider.entered:
+		case <-time.After(time.Second):
+			t.Fatal("different sessions did not reach inference concurrently")
+		}
+	}
+	provider.release <- struct{}{}
+	provider.release <- struct{}{}
+	for range 2 {
+		if err := <-done; err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestCanceledSessionWaiterReleasesLockBookkeeping(t *testing.T) {
+	store := openStore(t)
+	seedDoll(t, store, "cancel-doll", "CancelDoll")
+	sessions, _ := interactionSessionStores(t, store)
+	created := createInteractionSession(t, sessions, "body-cancel")
+	provider := &blockingSessionProvider{entered: make(chan inference.Request, 1), release: make(chan struct{}, 1)}
+	service := New(store, provider, logger.New(logger.ErrorLevel, io.Discard))
+	firstDone := make(chan error, 1)
+	first := newResponse("cancel-doll", "first")
+	go func() { _, err := service.HandleInteraction(context.Background(), created, &first); firstDone <- err }()
+	<-provider.entered
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	second := newResponse("cancel-doll", "second")
+	if _, err := service.HandleInteraction(ctx, created, &second); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled waiter error = %v", err)
+	}
+	provider.release <- struct{}{}
+	if err := <-firstDone; err != nil {
+		t.Fatal(err)
+	}
+	service.sessions.mu.Lock()
+	defer service.sessions.mu.Unlock()
+	if len(service.sessions.entries) != 0 {
+		t.Fatalf("session lock entries retained: %d", len(service.sessions.entries))
 	}
 }
 
