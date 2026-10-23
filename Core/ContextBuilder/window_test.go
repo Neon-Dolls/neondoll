@@ -21,7 +21,7 @@ func TestSlidingWindowPolicyPreservesRequiredItemsAndOrdering(t *testing.T) {
 	}
 	got := make([]string, len(window.Items))
 	for index, item := range window.Items {
-		got[index] = item.Message.ID
+		got[index] = item.Record.ID
 	}
 	if !reflect.DeepEqual(got, []string{"system", "middle", "new"}) {
 		t.Fatalf("selected IDs = %v", got)
@@ -46,7 +46,7 @@ func TestSlidingWindowPolicyRejectsRequiredContextOverBudget(t *testing.T) {
 
 func windowItem(id string, sequence, tokens int, required bool) contextbuilder.WindowItem {
 	return contextbuilder.WindowItem{
-		Message: contextbuilder.HistoryMessage{
+		Record: contextbuilder.ContextRecord{
 			ID:       id,
 			Sequence: sequence,
 			Role:     contextbuilder.RoleUser,

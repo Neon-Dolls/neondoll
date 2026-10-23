@@ -1,8 +1,8 @@
 # Core 5 Context Builder foundation
 
-`Core/ContextBuilder` constructs a disposable, bounded model context for one
-persisted Interaction Session. It does not store model context, mutate history,
-or treat a context window as continuity-bearing state.
+`Core/ContextBuilder` constructs a disposable, bounded model context from an
+authorized context source. It does not store model context, mutate source
+records, or treat a context window as continuity-bearing state.
 
 The transport-independent API is:
 
@@ -15,12 +15,39 @@ type WindowPolicy interface {
     Select(WindowRequest) (Window, error)
 }
 
+type SourceResolver interface {
+    Resolve(context.Context, ContextSource) (ResolvedSource, error)
+}
+
+type SourceBuilder interface {
+    Builder
+    BuildSource(context.Context, SourceRequest) (Result, error)
+}
+
 type Request struct {
     SessionID          session.ID
     TokenBudget        int
     SystemInstructions []string
 }
 ```
+
+`ContextSource` is a typed identity reference (`interaction_session` or the
+reserved `cognition_run` kind). It does not grant authority. `SourceResolver`
+validates source existence and resolves records within trusted Core, then
+returns source-tagged ordered `ContextRecord` values. It is not a separate
+caller-authorization layer: ingress and action authority remain enforced at
+their existing Core boundaries. The builder verifies the resolved identity, every
+record's source tag, and strict sequence ordering before constructing context;
+cross-source resolver output fails closed.
+
+`SourceBuilder.BuildSource` is the generalized entry point. The original
+`Builder` interface and `Build(Request)` API remain unchanged; `Build` maps
+`SessionID` to an Interaction Session source.
+The compatibility constructor is an internal trusted-call boundary. The
+existing Session service plus `HistoryStore` are adapted internally, so
+callers and the SQLite schema do not change. Cognition Run persistence and
+execution are intentionally not implemented in this milestone; the default
+session resolver rejects that source kind as unsupported.
 
 `New` installs the stateless `SlidingWindowPolicy`. `NewWithPolicy` accepts a
 replacement policy without changing the Builder, history store, or token
