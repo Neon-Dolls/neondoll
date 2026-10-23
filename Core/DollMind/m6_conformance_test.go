@@ -36,7 +36,19 @@ func (p *scriptedProvider) ID() inference.ProviderID {
 }
 
 func (p *scriptedProvider) Infer(_ context.Context, req inference.Request) (*inference.Response, error) {
-	p.lastReqs = append(p.lastReqs, req)
+	// Capture the semantic tool contract independent of whether a legacy
+	// caller uses top-level fields or Context Builder binds metadata to the
+	// already-budgeted message.
+	captured := req
+	for _, message := range req.Messages {
+		if len(captured.Tools) == 0 && len(message.Tools) > 0 {
+			captured.Tools = append([]inference.Tool(nil), message.Tools...)
+		}
+		if message.ToolResult != nil {
+			captured.ToolResults = append(captured.ToolResults, *message.ToolResult)
+		}
+	}
+	p.lastReqs = append(p.lastReqs, captured)
 	i := int(p.idx.Add(1) - 1)
 	if i >= len(p.acts) {
 		// Fallback: return a no-op Plan so the test doesn't hang.

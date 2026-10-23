@@ -11,6 +11,7 @@ import (
 	contextbuilder "github.com/Neon-Dolls/neondoll/Core/ContextBuilder"
 	"github.com/Neon-Dolls/neondoll/Core/Inference"
 	"github.com/Neon-Dolls/neondoll/Core/Pulse"
+	"github.com/Neon-Dolls/neondoll/DollLink/Events"
 	"github.com/Neon-Dolls/neondoll/DollState"
 	"github.com/Neon-Dolls/neondoll/pkg/logger"
 )
@@ -78,20 +79,21 @@ func TestPulseToolLoopRebuildsBoundedContextEachIteration(t *testing.T) {
 	}
 }
 
-func TestPulseToolLoopRejectsOversizedRequiredResult(t *testing.T) {
+func TestDirectPlanToolLoopRejectsOversizedRequiredResult(t *testing.T) {
 	largeBody := &largeOutputBody{output: strings.Repeat("oversized-result-", CognitiveContextTokenBudget*3)}
 	provider := &toolContextProvider{responses: []*inference.Response{
-		{Content: `{"summary":"use tool","matters":true,"reason":"need large output"}`},
 		{ToolCalls: []inference.ToolCall{{ID: "large_call", Name: "large.output__read"}}},
 		{Content: makePlanJSON("must not be reached")},
 	}}
 	scheduler := newPulseToolScheduler(provider, largeBody)
 
-	err := scheduler.EnterPulseWake(context.Background(), pulse.PulseWake{Pressure: 0.8, EffectivePressure: 0.7})
+	_, _, err := scheduler.Plan(context.Background(), events.TypeMessage, "read the large output", &Orientation{
+		Summary: "large output requested", Matters: true, Reason: "direct test",
+	})
 	if err == nil || !strings.Contains(err.Error(), contextbuilder.ErrRequiredContextExceedsBudget.Error()) {
-		t.Fatalf("EnterPulseWake error = %v, want required-context budget failure", err)
+		t.Fatalf("Plan error = %v, want required-context budget failure", err)
 	}
-	if len(provider.requests) != 2 {
+	if len(provider.requests) != 1 {
 		t.Fatalf("provider received %d requests; oversized result must fail before the next invocation", len(provider.requests))
 	}
 }

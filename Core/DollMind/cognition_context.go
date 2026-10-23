@@ -6,6 +6,8 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/google/uuid"
+
 	contextbuilder "github.com/Neon-Dolls/neondoll/Core/ContextBuilder"
 	"github.com/Neon-Dolls/neondoll/Core/Inference"
 )
@@ -42,6 +44,19 @@ func newCognitionRunExecution(id, objective, wakeEvidence string, mind MindAPI) 
 	return &cognitionRunExecution{id: id, resolver: resolver, builder: builder}, nil
 }
 
+// ensureCognitionRun creates the one ephemeral run owned by an execution
+// boundary, or reuses the run already carried by a nested cognition call.
+func (s *Scheduler) ensureCognitionRun(ctx context.Context, objective, evidence string) (context.Context, *cognitionRunExecution, error) {
+	if run := cognitionRunFromContext(ctx); run != nil {
+		return ctx, run, nil
+	}
+	run, err := newCognitionRunExecution(uuid.NewString(), objective, evidence, s.mindAPI)
+	if err != nil {
+		return ctx, nil, err
+	}
+	return withCognitionRun(ctx, run), run, nil
+}
+
 func withCognitionRun(ctx context.Context, run *cognitionRunExecution) context.Context {
 	return context.WithValue(ctx, cognitionRunContextKey{}, run)
 }
@@ -62,9 +77,12 @@ func CognitionRunID(ctx context.Context) string {
 }
 
 func (run *cognitionRunExecution) appendWorking(role contextbuilder.Role, content string) error {
+	return run.appendRecord(contextbuilder.CognitionWorkingRecord{Role: role, Content: content})
+}
+
+func (run *cognitionRunExecution) appendRecord(record contextbuilder.CognitionWorkingRecord) error {
 	run.mu.Lock()
 	defer run.mu.Unlock()
-	record := contextbuilder.CognitionWorkingRecord{Role: role, Content: content}
 	if err := run.resolver.Append(record); err != nil {
 		return err
 	}

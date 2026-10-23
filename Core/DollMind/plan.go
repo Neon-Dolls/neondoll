@@ -278,29 +278,26 @@ func (s *Scheduler) Plan(ctx context.Context, eventType events.Type, input strin
 		return nil, false, fmt.Errorf("plan requires a non-nil orientation")
 	}
 
-	var messages []inference.Message
-	var contextInstruction string
-	if run := cognitionRunFromContext(ctx); run != nil {
-		orientationJSON, err := json.Marshal(orientation)
-		if err != nil {
-			return nil, false, fmt.Errorf("plan encode orientation: %w", err)
-		}
-		if err := run.appendWorking("assistant", "L1 Orientation:\n"+string(orientationJSON)); err != nil {
-			return nil, false, fmt.Errorf("plan append orientation: %w", err)
-		}
-		contextInstruction = planInstruction(eventType, input, orientation)
-		messages, err = run.messages(ctx, contextInstruction)
-		if err != nil {
-			return nil, false, fmt.Errorf("plan context: %w", err)
-		}
-	} else {
-		state := s.mindAPI.State()
-		messages = []inference.Message{{Role: "system", Content: buildPlanPrompt(state, eventType, input, orientation)}}
+	ctx, run, err := s.ensureCognitionRun(ctx, planObjective(eventType), "")
+	if err != nil {
+		return nil, false, fmt.Errorf("plan cognition run: %w", err)
+	}
+	orientationJSON, err := json.Marshal(orientation)
+	if err != nil {
+		return nil, false, fmt.Errorf("plan encode orientation: %w", err)
+	}
+	if err := run.appendWorking("assistant", "L1 Orientation:\n"+string(orientationJSON)); err != nil {
+		return nil, false, fmt.Errorf("plan append orientation: %w", err)
+	}
+	contextInstruction := planInstruction(eventType, input, orientation)
+	messages, err := run.messages(ctx, contextInstruction)
+	if err != nil {
+		return nil, false, fmt.Errorf("plan context: %w", err)
 	}
 
 	// ── Tool-enabled path ──────────────────────────────────────────────
 	if s.toolExecutor != nil {
-		plan, err := s.toolCognize(ctx, messages, contextInstruction)
+		plan, err := s.toolCognize(ctx, contextInstruction)
 		if err != nil {
 			return nil, false, fmt.Errorf("plan tool cognize: %w", err)
 		}
@@ -353,6 +350,21 @@ func (s *Scheduler) Plan(ctx context.Context, eventType events.Type, input strin
 	obsDirty := s.materialiseExperience(plan)
 	dirty = dirty || obsDirty
 	return plan, dirty, nil
+}
+
+func planObjective(eventType events.Type) string {
+	switch eventType {
+	case events.TypeInternalWake:
+		return "Plan an appropriate response to the due internal intention."
+	case events.TypeCommand:
+		return "Plan an appropriate response to the command."
+	case events.TypeMessage:
+		return "Plan an appropriate response to the incoming message."
+	case events.TypePulseSpontaneous:
+		return "Plan an appropriate response to the spontaneous internal wake."
+	default:
+		return "Plan an appropriate response to the cognition event."
+	}
 }
 
 // materialiseIntention converts a Plan's future cognition request into a
@@ -464,10 +476,13 @@ func (s *Scheduler) materialiseExperience(plan *Plan) bool {
 //
 // ALL continuations belong to the SAME Cognition Run. No new Intention,
 // Interaction Session, or inbound Doll Link event is created.
-func (s *Scheduler) toolCognize(ctx context.Context, messages []inference.Message, contextInstruction string) (*Plan, error) {
+func (s *Scheduler) toolCognize(ctx context.Context, contextInstruction string) (*Plan, error) {
 	tools := s.toolExecutor.Tools()
 	toolMap := buildToolMap(tools)
 	run := cognitionRunFromContext(ctx)
+	if run == nil {
+		return nil, fmt.Errorf("tool cognition requires an active cognition run")
+	}
 
 	// Limit: prevent runaway loops by counting actual tool calls executed.
 	// Phase 6 enforces the maximum and propagates context cancellation.
@@ -477,19 +492,10 @@ func (s *Scheduler) toolCognize(ctx context.Context, messages []inference.Messag
 
 	st := &loopState{}
 
-	req := inference.Request{
-		Messages:    messages,
-		Temperature: 0.3,
-		MaxTokens:   1024,
-		Purpose:     inference.PurposePlan,
-		Tools:       tools,
-	}
-	var baseWorking []contextbuilder.CognitionWorkingRecord
+	var req inference.Request
+	baseWorking := run.snapshotWorking()
 	var toolHistory []contextbuilder.CognitionWorkingRecord
 	var toolExchanges []cognitionToolExchange
-	if run != nil {
-		baseWorking = run.snapshotWorking()
-	}
 
 	for {
 		// Phase 6 — context cancellation and deadline propagation
@@ -499,24 +505,22 @@ func (s *Scheduler) toolCognize(ctx context.Context, messages []inference.Messag
 		default:
 		}
 
-		if run != nil {
-			working := append(append([]contextbuilder.CognitionWorkingRecord(nil), baseWorking...), toolHistory...)
-			if err := run.replaceWorking(working); err != nil {
-				return nil, fmt.Errorf("plan tool context working state: %w", err)
-			}
-			freshMessages, err := run.messages(ctx, contextInstruction, inference.FormatToolsForPrompt(tools))
-			if err != nil {
-				return nil, fmt.Errorf("plan tool context: %w", err)
-			}
-			if err := bindCognitionToolMetadata(freshMessages, tools, toolExchanges); err != nil {
-				return nil, fmt.Errorf("plan tool protocol context: %w", err)
-			}
-			req = inference.Request{
-				Messages:    freshMessages,
-				Temperature: 0.3,
-				MaxTokens:   1024,
-				Purpose:     inference.PurposePlan,
-			}
+		working := append(append([]contextbuilder.CognitionWorkingRecord(nil), baseWorking...), toolHistory...)
+		if err := run.replaceWorking(working); err != nil {
+			return nil, fmt.Errorf("plan tool context working state: %w", err)
+		}
+		freshMessages, err := run.messages(ctx, contextInstruction, inference.FormatToolsForPrompt(tools))
+		if err != nil {
+			return nil, fmt.Errorf("plan tool context: %w", err)
+		}
+		if err := bindCognitionToolMetadata(freshMessages, tools, toolExchanges); err != nil {
+			return nil, fmt.Errorf("plan tool protocol context: %w", err)
+		}
+		req = inference.Request{
+			Messages:    freshMessages,
+			Temperature: 0.3,
+			MaxTokens:   1024,
+			Purpose:     inference.PurposePlan,
 		}
 
 		resp, err := s.provider.Infer(ctx, req)
@@ -528,12 +532,10 @@ func (s *Scheduler) toolCognize(ctx context.Context, messages []inference.Messag
 		if len(resp.ToolCalls) == 0 {
 			return parsePlan(resp.Content)
 		}
-		if run != nil {
-			// A new provider response resolves the prior exchange. It remains
-			// available to the sliding policy but is no longer mandatory.
-			for index := range toolHistory {
-				toolHistory[index].Required = false
-			}
+		// A new provider response resolves the prior exchange. It remains
+		// available to the sliding policy but is no longer mandatory.
+		for index := range toolHistory {
+			toolHistory[index].Required = false
 		}
 
 		// Execute tool calls sequentially (Phase 6: sequential, not concurrent)
@@ -547,10 +549,6 @@ func (s *Scheduler) toolCognize(ctx context.Context, messages []inference.Messag
 
 			result := s.toolExecutor.ExecuteCall(ctx, call, toolMap[call.Name])
 
-			if run == nil {
-				req.ToolResults = append(req.ToolResults, result)
-				continue
-			}
 			record, err := cognitionToolRecord(call, result)
 			if err != nil {
 				return nil, fmt.Errorf("plan tool context record: %w", err)

@@ -102,11 +102,20 @@ through without injection. Future native adapters must consume `Message.Tools`,
 `Message.ToolCall`, and `Message.ToolResult` as a replacement representation of
 that message. Top-level and message-bound tool contracts must not be combined.
 
-Production inference paths not yet integrated with Context Builder are
-deliberately unchanged and remain follow-up work: `DollMind.Run`, non-Pulse
-`DollMind.Orient`/`Plan` (including their legacy tool-loop request handling),
-and `Interaction.Service.HandleEvent`. They do not share the Pulse Cognitive
-Run source, and this milestone does not invent a source or lifecycle for them.
+M2.6 extends the same ephemeral boundary to every internal DollMind inference
+path. `Scheduler.Enter` creates one run after L0 selects the Orient path;
+internal Intention wakes therefore reuse one identity across Orient and Plan.
+Standalone `Orient` and `Plan` calls defensively create a run at their public
+entry boundary, and `DollMind.Run` creates a direct-execution run with its input
+as a required working record. Nested calls reuse the run already carried by
+`context.Context`, so every inference and tool continuation in one execution
+has one identity while separate executions remain isolated. The shared helper
+is the only run initializer; none of these runs or transcripts is persisted.
+
+The remaining production inference path outside Context Builder is
+`Interaction.Service.HandleEvent`. It is an Interaction Session concern and is
+deliberately deferred rather than being attached to a Cognitive Run. There are
+no remaining internal DollMind provider calls that bypass bounded construction.
 Model-profile-specific budgets and routing also remain deferred.
 
 `New` installs the stateless `SlidingWindowPolicy`. `NewWithPolicy` accepts a
