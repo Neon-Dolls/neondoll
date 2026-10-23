@@ -26,7 +26,11 @@ func NewWithPolicy(sessions session.Service, history HistoryStore, estimator Tok
 	if sessions == nil || history == nil {
 		return nil, ErrInvalidRequest
 	}
-	return NewWithResolver(newInteractionSessionSourceResolver(sessions, history), estimator, policy)
+	resolver, err := NewInteractionSessionSourceResolver(sessions, history)
+	if err != nil {
+		return nil, err
+	}
+	return NewWithResolver(resolver, estimator, policy)
 }
 
 // NewWithResolver constructs the shared Builder over an explicit authorized
