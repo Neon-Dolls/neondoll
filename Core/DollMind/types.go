@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/Neon-Dolls/neondoll/Core/Inference"
 	"github.com/Neon-Dolls/neondoll/Core/Pulse"
 	"github.com/Neon-Dolls/neondoll/DollLink/Events"
@@ -328,7 +330,18 @@ func (s *Scheduler) Run(ctx context.Context, level Level, input string) (*Result
 // responsibility.
 func (s *Scheduler) EnterPulseWake(ctx context.Context, wake pulse.PulseWake) error {
 	input := FormatWakeEvidence(wake)
-	_, err := s.Enter(ctx, events.TypePulseSpontaneous, input)
+	run, err := newCognitionRunExecution(
+		uuid.NewString(),
+		"Orient to this spontaneous internal wake and plan only if it matters.",
+		input,
+		s.mindAPI,
+	)
+	if err != nil {
+		return fmt.Errorf("enter pulse wake: %w", err)
+	}
+	ctx = withCognitionRun(ctx, run)
+	s.log.Info("pulse cognition run starting", map[string]any{"run_id": run.id})
+	_, err = s.Enter(ctx, events.TypePulseSpontaneous, input)
 	if err != nil {
 		s.log.Warn("pulse wake cognition failed",
 			map[string]any{"error": err.Error(), "pressure": wake.Pressure})

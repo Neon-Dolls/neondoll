@@ -15,6 +15,7 @@ import (
 
 	"github.com/google/uuid"
 
+	contextbuilder "github.com/Neon-Dolls/neondoll/Core/ContextBuilder"
 	"github.com/Neon-Dolls/neondoll/Core/Inference"
 	"github.com/Neon-Dolls/neondoll/DollLink/Events"
 	"github.com/Neon-Dolls/neondoll/DollState"
@@ -191,6 +192,16 @@ If you do not want to take any outbound action, omit the field or set it to null
 	return strings.Join(parts, "\n\n")
 }
 
+// planInstruction retains the established structured-output contract while
+// leaving authoritative Mind state to the shared Context Builder. Pulse wake
+// evidence is already a cognition-source record, so it is not duplicated here.
+func planInstruction(eventType events.Type, input string, orientation *Orientation) string {
+	if eventType == events.TypePulseSpontaneous {
+		input = ""
+	}
+	return buildPlanPrompt(&dollstate.DollState{}, eventType, input, orientation)
+}
+
 // parsePlan extracts and validates a structured Plan from raw model output.
 // It strips common wrapping (markdown code fences, leading/trailing whitespace)
 // before JSON parsing.
@@ -267,12 +278,29 @@ func (s *Scheduler) Plan(ctx context.Context, eventType events.Type, input strin
 		return nil, false, fmt.Errorf("plan requires a non-nil orientation")
 	}
 
-	state := s.mindAPI.State()
-	prompt := buildPlanPrompt(state, eventType, input, orientation)
+	var messages []inference.Message
+	var contextInstruction string
+	if run := cognitionRunFromContext(ctx); run != nil {
+		orientationJSON, err := json.Marshal(orientation)
+		if err != nil {
+			return nil, false, fmt.Errorf("plan encode orientation: %w", err)
+		}
+		if err := run.appendWorking("assistant", "L1 Orientation:\n"+string(orientationJSON)); err != nil {
+			return nil, false, fmt.Errorf("plan append orientation: %w", err)
+		}
+		contextInstruction = planInstruction(eventType, input, orientation)
+		messages, err = run.messages(ctx, contextInstruction)
+		if err != nil {
+			return nil, false, fmt.Errorf("plan context: %w", err)
+		}
+	} else {
+		state := s.mindAPI.State()
+		messages = []inference.Message{{Role: "system", Content: buildPlanPrompt(state, eventType, input, orientation)}}
+	}
 
 	// ── Tool-enabled path ──────────────────────────────────────────────
 	if s.toolExecutor != nil {
-		plan, err := s.toolCognize(ctx, prompt)
+		plan, err := s.toolCognize(ctx, messages, contextInstruction)
 		if err != nil {
 			return nil, false, fmt.Errorf("plan tool cognize: %w", err)
 		}
@@ -296,9 +324,7 @@ func (s *Scheduler) Plan(ctx context.Context, eventType events.Type, input strin
 
 	// ── Original no-tool path ──────────────────────────────────────────
 	resp, err := s.provider.Infer(ctx, inference.Request{
-		Messages: []inference.Message{
-			{Role: "system", Content: prompt},
-		},
+		Messages:    messages,
 		Temperature: 0.3,
 		MaxTokens:   1024,
 		Purpose:     inference.PurposePlan,
@@ -438,9 +464,10 @@ func (s *Scheduler) materialiseExperience(plan *Plan) bool {
 //
 // ALL continuations belong to the SAME Cognition Run. No new Intention,
 // Interaction Session, or inbound Doll Link event is created.
-func (s *Scheduler) toolCognize(ctx context.Context, prompt string) (*Plan, error) {
+func (s *Scheduler) toolCognize(ctx context.Context, messages []inference.Message, contextInstruction string) (*Plan, error) {
 	tools := s.toolExecutor.Tools()
 	toolMap := buildToolMap(tools)
+	run := cognitionRunFromContext(ctx)
 
 	// Limit: prevent runaway loops by counting actual tool calls executed.
 	// Phase 6 enforces the maximum and propagates context cancellation.
@@ -451,13 +478,17 @@ func (s *Scheduler) toolCognize(ctx context.Context, prompt string) (*Plan, erro
 	st := &loopState{}
 
 	req := inference.Request{
-		Messages: []inference.Message{
-			{Role: "system", Content: prompt},
-		},
+		Messages:    messages,
 		Temperature: 0.3,
 		MaxTokens:   1024,
 		Purpose:     inference.PurposePlan,
 		Tools:       tools,
+	}
+	var baseWorking []contextbuilder.CognitionWorkingRecord
+	var toolHistory []contextbuilder.CognitionWorkingRecord
+	var toolExchanges []cognitionToolExchange
+	if run != nil {
+		baseWorking = run.snapshotWorking()
 	}
 
 	for {
@@ -468,6 +499,26 @@ func (s *Scheduler) toolCognize(ctx context.Context, prompt string) (*Plan, erro
 		default:
 		}
 
+		if run != nil {
+			working := append(append([]contextbuilder.CognitionWorkingRecord(nil), baseWorking...), toolHistory...)
+			if err := run.replaceWorking(working); err != nil {
+				return nil, fmt.Errorf("plan tool context working state: %w", err)
+			}
+			freshMessages, err := run.messages(ctx, contextInstruction, inference.FormatToolsForPrompt(tools))
+			if err != nil {
+				return nil, fmt.Errorf("plan tool context: %w", err)
+			}
+			if err := bindCognitionToolMetadata(freshMessages, tools, toolExchanges); err != nil {
+				return nil, fmt.Errorf("plan tool protocol context: %w", err)
+			}
+			req = inference.Request{
+				Messages:    freshMessages,
+				Temperature: 0.3,
+				MaxTokens:   1024,
+				Purpose:     inference.PurposePlan,
+			}
+		}
+
 		resp, err := s.provider.Infer(ctx, req)
 		if err != nil {
 			return nil, fmt.Errorf("plan tool inference: %w", err)
@@ -476,6 +527,13 @@ func (s *Scheduler) toolCognize(ctx context.Context, prompt string) (*Plan, erro
 		// No tool calls → final content, parse as Plan
 		if len(resp.ToolCalls) == 0 {
 			return parsePlan(resp.Content)
+		}
+		if run != nil {
+			// A new provider response resolves the prior exchange. It remains
+			// available to the sliding policy but is no longer mandatory.
+			for index := range toolHistory {
+				toolHistory[index].Required = false
+			}
 		}
 
 		// Execute tool calls sequentially (Phase 6: sequential, not concurrent)
@@ -489,9 +547,76 @@ func (s *Scheduler) toolCognize(ctx context.Context, prompt string) (*Plan, erro
 
 			result := s.toolExecutor.ExecuteCall(ctx, call, toolMap[call.Name])
 
-			req.ToolResults = append(req.ToolResults, result)
+			if run == nil {
+				req.ToolResults = append(req.ToolResults, result)
+				continue
+			}
+			record, err := cognitionToolRecord(call, result)
+			if err != nil {
+				return nil, fmt.Errorf("plan tool context record: %w", err)
+			}
+			toolHistory = append(toolHistory, record)
+			toolExchanges = append(toolExchanges, cognitionToolExchange{call: call, result: result})
 		}
 	}
+}
+
+type cognitionToolExchange struct {
+	call   inference.ToolCall
+	result inference.ToolResult
+}
+
+func cognitionToolRecord(call inference.ToolCall, result inference.ToolResult) (contextbuilder.CognitionWorkingRecord, error) {
+	content, err := cognitionToolContent(call, result)
+	if err != nil {
+		return contextbuilder.CognitionWorkingRecord{}, err
+	}
+	return contextbuilder.CognitionWorkingRecord{
+		Role:       contextbuilder.RoleTool,
+		Content:    content,
+		Provenance: "cognition_run.tool_exchange",
+		Required:   true,
+	}, nil
+}
+
+func cognitionToolContent(call inference.ToolCall, result inference.ToolResult) (string, error) {
+	encodedCall, err := json.Marshal(call)
+	if err != nil {
+		return "", err
+	}
+	return "Tool call:\n" + string(encodedCall) + "\n" + inference.FormatToolResultForPrompt(result), nil
+}
+
+func bindCognitionToolMetadata(messages []inference.Message, tools []inference.Tool, exchanges []cognitionToolExchange) error {
+	for index := range messages {
+		if messages[index].Role == "system" {
+			messages[index].Tools = append([]inference.Tool(nil), tools...)
+			break
+		}
+	}
+	for index := range messages {
+		if messages[index].Provenance != "cognition_run.tool_exchange" {
+			continue
+		}
+		matched := false
+		for exchangeIndex := range exchanges {
+			content, err := cognitionToolContent(exchanges[exchangeIndex].call, exchanges[exchangeIndex].result)
+			if err != nil {
+				return err
+			}
+			if content != messages[index].Content {
+				continue
+			}
+			messages[index].ToolCall = &exchanges[exchangeIndex].call
+			messages[index].ToolResult = &exchanges[exchangeIndex].result
+			matched = true
+			break
+		}
+		if !matched {
+			return fmt.Errorf("tool exchange metadata missing")
+		}
+	}
+	return nil
 }
 
 // buildToolMap builds a lookup table from tool name → *Tool for efficient

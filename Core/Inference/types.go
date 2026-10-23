@@ -1,6 +1,9 @@
 package inference
 
-import "context"
+import (
+	"context"
+	"errors"
+)
 
 // ProviderID identifies an inference provider.
 type ProviderID string
@@ -119,10 +122,46 @@ type Request struct {
 	ToolResults []ToolResult
 }
 
+var (
+	ErrMixedToolContext = errors.New("inference: top-level and message-bound tool context cannot be combined")
+	ErrToolCorrelation  = errors.New("inference: tool call/result correlation mismatch")
+)
+
+// ValidateToolContext enforces the provider request contract. Legacy callers
+// use top-level Tools/ToolResults. Context-Builder callers attach structured
+// metadata to already-budgeted Messages. A request may use either form, never
+// both, and a combined call/result message must retain its correlation ID.
+func (request Request) ValidateToolContext() error {
+	messageBound := false
+	for _, message := range request.Messages {
+		if len(message.Tools) > 0 || message.ToolCall != nil || message.ToolResult != nil {
+			messageBound = true
+		}
+		if message.ToolCall != nil && message.ToolResult != nil && message.ToolCall.ID != message.ToolResult.ToolCallID {
+			return ErrToolCorrelation
+		}
+	}
+	if messageBound && (len(request.Tools) > 0 || len(request.ToolResults) > 0) {
+		return ErrMixedToolContext
+	}
+	return nil
+}
+
 // Message in a conversation.
 type Message struct {
-	Role    string
-	Content string
+	Role       string
+	Content    string
+	Provenance string
+
+	// Structured tool metadata is attached to the same budgeted message whose
+	// Content is its text representation. Provider adapters may replace that
+	// representation with a native protocol item, but must never append a
+	// second model-visible copy. Top-level Request Tools/ToolResults remain the
+	// legacy, not-yet-budgeted input contract and are mutually exclusive with
+	// message-bound tool metadata.
+	Tools      []Tool
+	ToolCall   *ToolCall
+	ToolResult *ToolResult
 }
 
 // Response from inference.
@@ -158,6 +197,9 @@ func NewMockProvider(id ProviderID, response string) *MockProvider {
 }
 
 func (m *MockProvider) Infer(_ context.Context, req Request) (*Response, error) {
+	if err := req.ValidateToolContext(); err != nil {
+		return nil, err
+	}
 	return &Response{
 		Content:    m.response,
 		ProviderID: m.id,

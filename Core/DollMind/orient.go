@@ -159,13 +159,20 @@ func (s *Scheduler) Orient(ctx context.Context, eventType events.Type, input str
 		return nil, fmt.Errorf("mind API not set: cannot access state")
 	}
 
-	state := s.mindAPI.State()
-	prompt := buildOrientPrompt(state, eventType, input)
+	var messages []inference.Message
+	if run := cognitionRunFromContext(ctx); run != nil {
+		var err error
+		messages, err = run.messages(ctx, orientInstruction(eventType, input))
+		if err != nil {
+			return nil, fmt.Errorf("orient context: %w", err)
+		}
+	} else {
+		state := s.mindAPI.State()
+		messages = []inference.Message{{Role: "system", Content: buildOrientPrompt(state, eventType, input)}}
+	}
 
 	resp, err := s.provider.Infer(ctx, inference.Request{
-		Messages: []inference.Message{
-			{Role: "system", Content: prompt},
-		},
+		Messages:    messages,
 		Temperature: 0.3,
 		MaxTokens:   512,
 		Purpose:     inference.PurposeOrient,
@@ -187,4 +194,15 @@ func (s *Scheduler) Orient(ctx context.Context, eventType events.Type, input str
 		})
 
 	return orient, nil
+}
+
+func orientInstruction(eventType events.Type, input string) string {
+	var parts []string
+	if eventType == events.TypeInternalWake {
+		parts = append(parts, "An intention from within your own mind has become due.\n\n"+input)
+	} else if eventType != events.TypePulseSpontaneous {
+		parts = append(parts, "Event type: "+string(eventType)+"\nEvent: "+input)
+	}
+	parts = append(parts, `Your task is ORIENTATION: interpret what is happening, decide whether it matters (requires further planning), and explain why. Return ONLY valid JSON with no markdown formatting or code blocks around it. Use this exact format: {"summary":"...","matters":true,"reason":"..."}`)
+	return strings.Join(parts, "\n\n")
 }

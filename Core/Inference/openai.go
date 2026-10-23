@@ -111,6 +111,9 @@ func (p *OpenAIProvider) ID() ProviderID {
 
 // Infer sends a chat completion request and returns the generated response.
 func (p *OpenAIProvider) Infer(ctx context.Context, req Request) (*Response, error) {
+	if err := req.ValidateToolContext(); err != nil {
+		return nil, err
+	}
 	maxTokens := p.maxTokens
 	if req.MaxTokens > 0 {
 		maxTokens = req.MaxTokens

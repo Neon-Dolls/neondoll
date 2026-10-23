@@ -26,8 +26,10 @@ type CognitionRun struct {
 }
 
 type CognitionWorkingRecord struct {
-	Role    Role
-	Content string
+	Role       Role
+	Content    string
+	Provenance string
+	Required   bool
 }
 
 // CognitionRunResolver adapts one active, ephemeral Cognition Run to the
@@ -66,14 +68,34 @@ func (resolver *CognitionRunResolver) Source() ContextSource { return resolver.s
 // Append adds available working state for subsequent builds in this run. It
 // does not persist transcript or mutate Doll Mind state.
 func (resolver *CognitionRunResolver) Append(records ...CognitionWorkingRecord) error {
+	if err := validateCognitionWorking(records); err != nil {
+		return err
+	}
+	resolver.mu.Lock()
+	defer resolver.mu.Unlock()
+	resolver.working = append(resolver.working, records...)
+	return nil
+}
+
+// ReplaceWorking atomically replaces the ephemeral working set used by later
+// builds. It allows an execution runtime to make a resolved tool exchange
+// selectable while keeping the currently unresolved exchange required.
+func (resolver *CognitionRunResolver) ReplaceWorking(records []CognitionWorkingRecord) error {
+	if err := validateCognitionWorking(records); err != nil {
+		return err
+	}
+	resolver.mu.Lock()
+	defer resolver.mu.Unlock()
+	resolver.working = append(resolver.working[:0], records...)
+	return nil
+}
+
+func validateCognitionWorking(records []CognitionWorkingRecord) error {
 	for _, record := range records {
 		if !validRole(record.Role) || record.Role == RoleSystem || strings.TrimSpace(record.Content) == "" {
 			return ErrInvalidRequest
 		}
 	}
-	resolver.mu.Lock()
-	defer resolver.mu.Unlock()
-	resolver.working = append(resolver.working, records...)
 	return nil
 }
 
@@ -98,13 +120,18 @@ func (resolver *CognitionRunResolver) Resolve(_ context.Context, source ContextS
 		return ResolvedSource{}, err
 	}
 	for _, record := range working {
+		provenance := record.Provenance
+		if provenance == "" {
+			provenance = "cognition_run.working"
+		}
 		records = append(records, ContextRecord{
 			ID:         fmt.Sprintf("%s/working/%d", source.ID, len(records)),
 			Source:     source,
 			Sequence:   len(records),
 			Role:       record.Role,
 			Content:    record.Content,
-			Provenance: "cognition_run.working",
+			Provenance: provenance,
+			Required:   record.Required,
 		})
 	}
 	return ResolvedSource{Source: source, Records: records}, nil
