@@ -19,7 +19,8 @@ const (
 	RoleAssistant Role = "assistant"
 	RoleTool      Role = "tool"
 
-	OmittedBudget = "token_budget"
+	OmittedBudget         = "token_budget"
+	OmittedIncompleteTurn = "incomplete_turn"
 )
 
 var (
@@ -56,7 +57,13 @@ type ContextRecord struct {
 	Content    string        `json:"content"`
 	Provenance string        `json:"provenance,omitempty"`
 	Required   bool          `json:"required,omitempty"`
-	CreatedAt  time.Time     `json:"created_at"`
+	// WindowGroup makes records an atomic window-selection unit. Empty means
+	// the record is independently selectable.
+	WindowGroup string `json:"window_group,omitempty"`
+	// OmitReason makes malformed or incomplete source records unavailable to
+	// the model while retaining explicit omission metadata.
+	OmitReason string    `json:"omit_reason,omitempty"`
+	CreatedAt  time.Time `json:"created_at"`
 }
 
 type ResolvedSource struct {

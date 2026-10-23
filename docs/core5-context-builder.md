@@ -158,13 +158,22 @@ turns through that interface without coupling the builder to SQLite.
 The sliding policy always preserves explicitly required records (including
 supplied instructions, persisted Interaction Session system messages, and
 required tail messages such as the current input), then includes the largest
-whole-record chronological suffix that fits the remaining budget. Required
+whole-record chronological suffix that fits the remaining budget. For an
+Interaction Session, its resolver groups each adjacent `user`/`assistant` pair
+as one disposable selection unit, so a window contains both records or neither.
+The durable history schema has no turn identifier; adjacency is the only
+available pairing signal, and the production interaction path appends completed
+pairs atomically. A standalone user record remains independently selectable.
+An assistant record without an immediately preceding user is omitted as an
+`incomplete_turn` rather than exposed without its initiating request. Cognitive
+Run records carry no conversation group and retain generic record-by-record
+selection. Required
 instructions precede history and required tail messages follow it. Once a
-record does not fit, it and all older optional records are omitted. Individual
-records are never truncated. If required context does not fit, construction
-fails explicitly. The policy stores no cursor: appending history, changing a
-budget, or reopening the persistent store deterministically derives a new
-window from source records.
+record or conversation group does not fit, it and all older optional groups are
+omitted. Individual records are never truncated. If required context does not
+fit, construction fails explicitly. The policy stores no cursor: appending
+history, changing a budget, or reopening the persistent store deterministically
+derives a new window from source records.
 
 The default deterministic estimator charges four framing tokens plus one token
 per four Unicode code points, rounded up. `TokenEstimator` is replaceable so a

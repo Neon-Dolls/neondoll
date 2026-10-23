@@ -73,19 +73,52 @@ func (resolver *interactionSessionSourceResolver) Resolve(ctx context.Context, s
 		return ResolvedSource{}, err
 	}
 	resolved := ResolvedSource{Source: source, Records: make([]ContextRecord, len(history))}
+	groups := interactionTurnGroups(history)
 	for index, message := range history {
 		if message.SessionID != sessionID {
 			return ResolvedSource{}, ErrSourceIsolation
 		}
 		resolved.Records[index] = ContextRecord{
-			ID:        message.ID,
-			Source:    source,
-			Sequence:  message.Sequence,
-			Role:      message.Role,
-			Content:   message.Content,
-			Required:  message.Role == RoleSystem,
-			CreatedAt: message.CreatedAt,
+			ID:          message.ID,
+			Source:      source,
+			Sequence:    message.Sequence,
+			Role:        message.Role,
+			Content:     message.Content,
+			Required:    message.Role == RoleSystem,
+			WindowGroup: groups[index].group,
+			OmitReason:  groups[index].omitReason,
+			CreatedAt:   message.CreatedAt,
 		}
 	}
 	return resolved, nil
+}
+
+type turnSelection struct {
+	group      string
+	omitReason string
+}
+
+// interactionTurnGroups derives disposable window metadata from ordered
+// history. Persistence remains message-oriented: a user immediately followed
+// by an assistant is one atomic turn, an incomplete user remains selectable,
+// and an assistant without its initiating user is never model-visible.
+func interactionTurnGroups(history []HistoryMessage) []turnSelection {
+	result := make([]turnSelection, len(history))
+	for index := 0; index < len(history); index++ {
+		message := history[index]
+		switch message.Role {
+		case RoleUser:
+			group := "message:" + message.ID
+			if index+1 < len(history) && history[index+1].Role == RoleAssistant {
+				group = "turn:" + message.ID
+				result[index+1].group = group
+			}
+			result[index].group = group
+		case RoleAssistant:
+			if result[index].group == "" {
+				result[index].omitReason = OmittedIncompleteTurn
+			}
+		}
+	}
+	return result
 }
