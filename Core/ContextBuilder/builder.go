@@ -65,6 +65,7 @@ func (builder *Service) Build(ctx context.Context, request Request) (Result, err
 		Source:             InteractionSessionSource(request.SessionID),
 		TokenBudget:        request.TokenBudget,
 		SystemInstructions: request.SystemInstructions,
+		RequiredMessages:   request.RequiredMessages,
 	})
 	if err != nil {
 		return Result{}, err
@@ -113,6 +114,18 @@ func (builder *Service) BuildSource(ctx context.Context, request SourceRequest) 
 		result.Messages = append(result.Messages, message)
 		result.Metadata.EstimatedTokens += cost
 	}
+	requiredTail := make([]Message, len(request.RequiredMessages))
+	for index, message := range request.RequiredMessages {
+		if !validRole(message.Role) || strings.TrimSpace(message.Content) == "" {
+			return Result{}, ErrInvalidRequest
+		}
+		cost := estimate(builder.estimator, message)
+		if result.Metadata.EstimatedTokens+cost > request.TokenBudget {
+			return Result{}, ErrRequiredContextExceedsBudget
+		}
+		requiredTail[index] = message
+		result.Metadata.EstimatedTokens += cost
+	}
 
 	items := make([]WindowItem, len(resolved.Records))
 	for index, record := range resolved.Records {
@@ -142,6 +155,7 @@ func (builder *Service) BuildSource(ctx context.Context, request SourceRequest) 
 		result.Messages = append(result.Messages, Message{Role: item.Record.Role, Content: item.Record.Content, Provenance: item.Record.Provenance})
 		result.Metadata.IncludedMessageIDs = append(result.Metadata.IncludedMessageIDs, item.Record.ID)
 	}
+	result.Messages = append(result.Messages, requiredTail...)
 	return result, nil
 }
 

@@ -28,6 +28,7 @@ type Request struct {
     SessionID          session.ID
     TokenBudget        int
     SystemInstructions []string
+    RequiredMessages   []Message
 }
 ```
 
@@ -112,11 +113,21 @@ as a required working record. Nested calls reuse the run already carried by
 has one identity while separate executions remain isolated. The shared helper
 is the only run initializer; none of these runs or transcripts is persisted.
 
-The remaining production inference path outside Context Builder is
-`Interaction.Service.HandleEvent`. It is an Interaction Session concern and is
-deliberately deferred rather than being attached to a Cognitive Run. There are
-no remaining internal DollMind provider calls that bypass bounded construction.
-Model-profile-specific budgets and routing also remain deferred.
+M2.7 connects the session-aware `Interaction.Service.HandleInteraction` path.
+It uses the real router-resolved Core Session ID and the existing SQLite
+`interaction_session_messages` history. Required instructions are reserved at
+the beginning of the model input, the persisted rolling history is selected by
+the shared policy, and `RequiredMessages` reserves the current user input at
+the end. A completed inference atomically appends its user/assistant pair to
+session history; a failed inference appends neither. Each later invocation
+reconstructs a fresh window, including after Core/store restart.
+
+The remaining production inference path outside Context Builder is the legacy
+unauthenticated Core 4 `Interaction.Service.HandleEvent` compatibility path.
+It has no authenticated Core Interaction Session ID, so it cannot safely use a
+session source. All internal DollMind and session-aware Interaction inference
+paths use bounded construction. Model-profile-specific budgets and routing
+remain deferred.
 
 `New` installs the stateless `SlidingWindowPolicy`. `NewWithPolicy` accepts a
 replacement policy without changing the Builder, history store, or token
@@ -140,13 +151,15 @@ context and from portable Doll Memory. The store implements
 turns through that interface without coupling the builder to SQLite.
 
 The sliding policy always preserves explicitly required records (including
-supplied instructions and persisted Interaction Session system messages), then
-includes the largest whole-record chronological suffix that fits the remaining
-budget. Once a record does not fit, it and all older optional records are
-omitted. Individual records are never truncated. If required context does not
-fit, construction fails explicitly. The policy stores no cursor: appending
-history, changing a budget, or reopening the persistent store deterministically
-derives a new window from source records.
+supplied instructions, persisted Interaction Session system messages, and
+required tail messages such as the current input), then includes the largest
+whole-record chronological suffix that fits the remaining budget. Required
+instructions precede history and required tail messages follow it. Once a
+record does not fit, it and all older optional records are omitted. Individual
+records are never truncated. If required context does not fit, construction
+fails explicitly. The policy stores no cursor: appending history, changing a
+budget, or reopening the persistent store deterministically derives a new
+window from source records.
 
 The default deterministic estimator charges four framing tokens plus one token
 per four Unicode code points, rounded up. `TokenEstimator` is replaceable so a
