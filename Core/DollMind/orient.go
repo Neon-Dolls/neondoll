@@ -159,16 +159,13 @@ func (s *Scheduler) Orient(ctx context.Context, eventType events.Type, input str
 		return nil, fmt.Errorf("mind API not set: cannot access state")
 	}
 
-	var messages []inference.Message
-	if run := cognitionRunFromContext(ctx); run != nil {
-		var err error
-		messages, err = run.messages(ctx, orientInstruction(eventType, input))
-		if err != nil {
-			return nil, fmt.Errorf("orient context: %w", err)
-		}
-	} else {
-		state := s.mindAPI.State()
-		messages = []inference.Message{{Role: "system", Content: buildOrientPrompt(state, eventType, input)}}
+	ctx, run, err := s.ensureCognitionRun(ctx, cognitionObjective(eventType), "")
+	if err != nil {
+		return nil, fmt.Errorf("orient cognition run: %w", err)
+	}
+	messages, err := run.messages(ctx, orientInstruction(eventType, input))
+	if err != nil {
+		return nil, fmt.Errorf("orient context: %w", err)
 	}
 
 	resp, err := s.provider.Infer(ctx, inference.Request{

@@ -5,8 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/google/uuid"
-
+	contextbuilder "github.com/Neon-Dolls/neondoll/Core/ContextBuilder"
 	"github.com/Neon-Dolls/neondoll/Core/Inference"
 	"github.com/Neon-Dolls/neondoll/Core/Pulse"
 	"github.com/Neon-Dolls/neondoll/DollLink/Events"
@@ -167,6 +166,11 @@ func (s *Scheduler) Enter(ctx context.Context, eventType events.Type, input stri
 			map[string]any{"event_type": string(eventType)})
 		return &Result{Level: LevelReflex}, nil
 	case PathOrient:
+		var err error
+		ctx, _, err = s.ensureCognitionRun(ctx, cognitionObjective(eventType), "")
+		if err != nil {
+			return nil, fmt.Errorf("enter cognition run: %w", err)
+		}
 		s.log.Info("cognition orient — L1 orientation requested",
 			map[string]any{"event_type": string(eventType)})
 		orient, err := s.Orient(ctx, eventType, input)
@@ -287,11 +291,27 @@ func (s *Scheduler) completeIntention(id string) {
 
 // Run executes a cognition cycle at the given level, always calling the provider.
 func (s *Scheduler) Run(ctx context.Context, level Level, input string) (*Result, error) {
+	ctx, run, err := s.ensureCognitionRun(ctx, "Execute direct "+level.String()+" cognition.", "")
+	if err != nil {
+		return nil, fmt.Errorf("run cognition context: %w", err)
+	}
+	if err := run.appendRecord(contextbuilder.CognitionWorkingRecord{
+		Role:       contextbuilder.RoleUser,
+		Content:    input,
+		Provenance: "cognition_run.input",
+		Required:   true,
+	}); err != nil {
+		return nil, fmt.Errorf("run cognition input: %w", err)
+	}
+	messages, err := run.messages(ctx, "Respond to the direct cognition input at level "+level.String()+".")
+	if err != nil {
+		return nil, fmt.Errorf("run cognition context: %w", err)
+	}
 	s.log.Info("cognition run starting",
-		map[string]any{"level": level.String(), "input_len": len(input)})
+		map[string]any{"level": level.String(), "input_len": len(input), "run_id": run.id})
 
 	resp, err := s.provider.Infer(ctx, inference.Request{
-		Messages: []inference.Message{{Role: "user", Content: input}},
+		Messages: messages,
 		Purpose:  inference.PurposeRespond,
 	})
 	if err != nil {
@@ -330,16 +350,14 @@ func (s *Scheduler) Run(ctx context.Context, level Level, input string) (*Result
 // responsibility.
 func (s *Scheduler) EnterPulseWake(ctx context.Context, wake pulse.PulseWake) error {
 	input := FormatWakeEvidence(wake)
-	run, err := newCognitionRunExecution(
-		uuid.NewString(),
+	ctx, run, err := s.ensureCognitionRun(
+		ctx,
 		"Orient to this spontaneous internal wake and plan only if it matters.",
 		input,
-		s.mindAPI,
 	)
 	if err != nil {
 		return fmt.Errorf("enter pulse wake: %w", err)
 	}
-	ctx = withCognitionRun(ctx, run)
 	s.log.Info("pulse cognition run starting", map[string]any{"run_id": run.id})
 	_, err = s.Enter(ctx, events.TypePulseSpontaneous, input)
 	if err != nil {
@@ -348,6 +366,21 @@ func (s *Scheduler) EnterPulseWake(ctx context.Context, wake pulse.PulseWake) er
 		return fmt.Errorf("enter pulse wake: %w", err)
 	}
 	return nil
+}
+
+func cognitionObjective(eventType events.Type) string {
+	switch eventType {
+	case events.TypeInternalWake:
+		return "Reconsider the due internal intention and plan only if it matters."
+	case events.TypeCommand:
+		return "Orient to the command and plan an appropriate response if it matters."
+	case events.TypeMessage:
+		return "Orient to the incoming message and plan an appropriate response if it matters."
+	case events.TypePulseSpontaneous:
+		return "Orient to this spontaneous internal wake and plan only if it matters."
+	default:
+		return "Orient to the internal cognition event and plan only if it matters."
+	}
 }
 
 // FormatWakeEvidence formats a PulseWake as inference-facing context text
