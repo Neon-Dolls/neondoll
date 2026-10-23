@@ -26,7 +26,11 @@ func NewWithPolicy(sessions session.Service, history HistoryStore, estimator Tok
 	if sessions == nil || history == nil {
 		return nil, ErrInvalidRequest
 	}
-	return NewWithResolver(newInteractionSessionSourceResolver(sessions, history), estimator, policy)
+	resolver, err := NewInteractionSessionSourceResolver(sessions, history)
+	if err != nil {
+		return nil, err
+	}
+	return NewWithResolver(resolver, estimator, policy)
 }
 
 // NewWithResolver constructs the shared Builder over an explicit authorized
@@ -117,8 +121,8 @@ func (builder *Service) BuildSource(ctx context.Context, request SourceRequest) 
 		}
 		items[index] = WindowItem{
 			Record:          record,
-			EstimatedTokens: estimate(builder.estimator, Message{Role: record.Role, Content: record.Content}),
-			Required:        record.Role == RoleSystem,
+			EstimatedTokens: estimate(builder.estimator, Message{Role: record.Role, Content: record.Content, Provenance: record.Provenance}),
+			Required:        record.Required,
 		}
 	}
 	window, err := builder.policy.Select(WindowRequest{
@@ -135,7 +139,7 @@ func (builder *Service) BuildSource(ctx context.Context, request SourceRequest) 
 	result.Metadata.OmittedHistoryMessages = len(window.OmittedMessages)
 	result.Metadata.OmittedMessages = window.OmittedMessages
 	for _, item := range window.Items {
-		result.Messages = append(result.Messages, Message{Role: item.Record.Role, Content: item.Record.Content})
+		result.Messages = append(result.Messages, Message{Role: item.Record.Role, Content: item.Record.Content, Provenance: item.Record.Provenance})
 		result.Metadata.IncludedMessageIDs = append(result.Metadata.IncludedMessageIDs, item.Record.ID)
 	}
 	return result, nil

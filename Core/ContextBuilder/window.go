@@ -57,6 +57,7 @@ func (SlidingWindowPolicy) Select(request WindowRequest) (Window, error) {
 			Sequence:        item.Record.Sequence,
 			EstimatedTokens: item.EstimatedTokens,
 			Reason:          OmittedBudget,
+			Provenance:      item.Record.Provenance,
 		})
 	}
 	return window, nil

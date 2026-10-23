@@ -19,8 +19,36 @@ type interactionSessionSourceResolver struct {
 	history  HistoryStore
 }
 
-func newInteractionSessionSourceResolver(sessions session.Service, history HistoryStore) SourceResolver {
-	return &interactionSessionSourceResolver{sessions: sessions, history: history}
+// NewInteractionSessionSourceResolver adapts existing session lifecycle and
+// history storage for composition with other source resolvers.
+func NewInteractionSessionSourceResolver(sessions session.Service, history HistoryStore) (SourceResolver, error) {
+	if sessions == nil || history == nil {
+		return nil, ErrInvalidRequest
+	}
+	return &interactionSessionSourceResolver{sessions: sessions, history: history}, nil
+}
+
+// SourceMux routes each source kind to its dedicated resolver. The mux owns no
+// records and does not permit fallback between source kinds.
+type SourceMux struct {
+	InteractionSessions SourceResolver
+	CognitionRuns       SourceResolver
+}
+
+func (mux SourceMux) Resolve(ctx context.Context, source ContextSource) (ResolvedSource, error) {
+	var resolver SourceResolver
+	switch source.Kind {
+	case SourceInteractionSession:
+		resolver = mux.InteractionSessions
+	case SourceCognitionRun:
+		resolver = mux.CognitionRuns
+	default:
+		return ResolvedSource{}, ErrInvalidSource
+	}
+	if resolver == nil {
+		return ResolvedSource{}, ErrSourceUnsupported
+	}
+	return resolver.Resolve(ctx, source)
 }
 
 func (resolver *interactionSessionSourceResolver) Resolve(ctx context.Context, source ContextSource) (ResolvedSource, error) {
@@ -55,6 +83,7 @@ func (resolver *interactionSessionSourceResolver) Resolve(ctx context.Context, s
 			Sequence:  message.Sequence,
 			Role:      message.Role,
 			Content:   message.Content,
+			Required:  message.Role == RoleSystem,
 			CreatedAt: message.CreatedAt,
 		}
 	}

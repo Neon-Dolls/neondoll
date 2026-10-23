@@ -49,6 +49,37 @@ callers and the SQLite schema do not change. Cognition Run persistence and
 execution are intentionally not implemented in this milestone; the default
 session resolver rejects that source kind as unsupported.
 
+M2.4 adds `CognitionRunResolver`, an ephemeral adapter for one active run. It
+accepts an explicit Core-owned run ID, objective, optional wake evidence, and
+available working records. On every resolution it reads current authoritative
+state through the `State() *dollstate.DollState` subset already provided by
+`DollMind.MindAPI`; it does not copy Doll State into a second authority. Only a
+compact Doll identity (`doll_id` and canonical name) and the run objective are
+required. Soul/Owner/Self/Drives, Goals, Intentions, the five most recent
+Memory records, and wake evidence are budget-selectable contextual records.
+Authentication state and secrets are not projected.
+
+Required selection is explicit record metadata rather than an inference from
+the model-facing role. Each Cognitive Run record carries provenance such as
+`doll_mind.goals` or `cognition_run.wake_evidence`; included messages and
+omission metadata preserve it. This keeps authoritative Mind data identifiable
+as data rather than presenting it as a user message or instruction. The
+Interaction Session adapter explicitly marks persisted system messages as
+required, preserving its prior behavior and API.
+
+Run-local working records can advance between builds through `Append`. They
+remain ephemeral and are selected by the same `WindowPolicy` as session
+records. `SourceMux` composes Interaction Session and Cognitive Run resolvers
+without fallback between identities or lifecycles. There is no Cognitive Run
+database table or synthetic Interaction Session.
+
+The current Pulse/Doll Mind lifecycle exposes run occupancy and wake evidence,
+but not a durable run ID or persisted semantic working-state model. Callers
+therefore assign the temporary run ID and supply working records while the run
+is active. Wiring Context Builder output into Orient/Plan inference awaits the
+separate inference integration/profile milestone; this change does not alter
+the Pulse scheduler or existing cognition engine.
+
 `New` installs the stateless `SlidingWindowPolicy`. `NewWithPolicy` accepts a
 replacement policy without changing the Builder, history store, or token
 estimator interfaces. A policy receives chronologically ordered `WindowItem`
@@ -70,13 +101,14 @@ context and from portable Doll Memory. The store implements
 `contextbuilder.HistoryStore`; future interaction wiring can append completed
 turns through that interface without coupling the builder to SQLite.
 
-The sliding policy always preserves supplied and persisted system messages,
-then includes the largest whole-message chronological suffix that fits the
-remaining budget. Once a message does not fit, it and all older non-system
-messages are omitted. Individual messages are never truncated. If required
-system context does not fit, construction fails explicitly. The policy stores
-no cursor: appending history, changing a budget, or reopening the persistent
-store deterministically derives a new window from durable history.
+The sliding policy always preserves explicitly required records (including
+supplied instructions and persisted Interaction Session system messages), then
+includes the largest whole-record chronological suffix that fits the remaining
+budget. Once a record does not fit, it and all older optional records are
+omitted. Individual records are never truncated. If required context does not
+fit, construction fails explicitly. The policy stores no cursor: appending
+history, changing a budget, or reopening the persistent store deterministically
+derives a new window from source records.
 
 The default deterministic estimator charges four framing tokens plus one token
 per four Unicode code points, rounded up. `TokenEstimator` is replaceable so a
@@ -84,7 +116,7 @@ future inference profile can supply model-specific accounting without changing
 history or builder consumers.
 
 This milestone does not connect the builder to the current inference request,
-choose an inference profile, retrieve Doll Memory, summarize, compact, or
-automatically persist interaction turns. Those are later integration and
-policy milestones; this foundation provides the durable history and bounded
+choose an inference profile, perform semantic Memory retrieval, summarize,
+compact, or automatically persist interaction/run turns. Those are later
+integration and policy milestones; this foundation provides the bounded
 construction boundaries they consume.

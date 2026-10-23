@@ -49,12 +49,14 @@ type ContextSource struct {
 // ContextRecord is a source-neutral ordered input record. Source tagging lets
 // Service reject resolver output that crosses source boundaries.
 type ContextRecord struct {
-	ID        string        `json:"record_id"`
-	Source    ContextSource `json:"source"`
-	Sequence  int           `json:"sequence"`
-	Role      Role          `json:"role"`
-	Content   string        `json:"content"`
-	CreatedAt time.Time     `json:"created_at"`
+	ID         string        `json:"record_id"`
+	Source     ContextSource `json:"source"`
+	Sequence   int           `json:"sequence"`
+	Role       Role          `json:"role"`
+	Content    string        `json:"content"`
+	Provenance string        `json:"provenance,omitempty"`
+	Required   bool          `json:"required,omitempty"`
+	CreatedAt  time.Time     `json:"created_at"`
 }
 
 type ResolvedSource struct {
@@ -70,8 +72,9 @@ type SourceResolver interface {
 
 // Message is provider-neutral, model-ready text context.
 type Message struct {
-	Role    Role   `json:"role"`
-	Content string `json:"content"`
+	Role       Role   `json:"role"`
+	Content    string `json:"content"`
+	Provenance string `json:"provenance,omitempty"`
 }
 
 // HistoryMessage is one durable conversation record owned by an Interaction
@@ -153,6 +156,7 @@ type OmittedMessage struct {
 	Sequence        int    `json:"sequence"`
 	EstimatedTokens int    `json:"estimated_tokens"`
 	Reason          string `json:"reason"`
+	Provenance      string `json:"provenance,omitempty"`
 }
 
 type Metadata struct {
