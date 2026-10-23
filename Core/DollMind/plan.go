@@ -191,6 +191,16 @@ If you do not want to take any outbound action, omit the field or set it to null
 	return strings.Join(parts, "\n\n")
 }
 
+// planInstruction retains the established structured-output contract while
+// leaving authoritative Mind state to the shared Context Builder. Pulse wake
+// evidence is already a cognition-source record, so it is not duplicated here.
+func planInstruction(eventType events.Type, input string, orientation *Orientation) string {
+	if eventType == events.TypePulseSpontaneous {
+		input = ""
+	}
+	return buildPlanPrompt(&dollstate.DollState{}, eventType, input, orientation)
+}
+
 // parsePlan extracts and validates a structured Plan from raw model output.
 // It strips common wrapping (markdown code fences, leading/trailing whitespace)
 // before JSON parsing.
@@ -267,12 +277,27 @@ func (s *Scheduler) Plan(ctx context.Context, eventType events.Type, input strin
 		return nil, false, fmt.Errorf("plan requires a non-nil orientation")
 	}
 
-	state := s.mindAPI.State()
-	prompt := buildPlanPrompt(state, eventType, input, orientation)
+	var messages []inference.Message
+	if run := cognitionRunFromContext(ctx); run != nil {
+		orientationJSON, err := json.Marshal(orientation)
+		if err != nil {
+			return nil, false, fmt.Errorf("plan encode orientation: %w", err)
+		}
+		if err := run.appendWorking("assistant", "L1 Orientation:\n"+string(orientationJSON)); err != nil {
+			return nil, false, fmt.Errorf("plan append orientation: %w", err)
+		}
+		messages, err = run.messages(ctx, planInstruction(eventType, input, orientation))
+		if err != nil {
+			return nil, false, fmt.Errorf("plan context: %w", err)
+		}
+	} else {
+		state := s.mindAPI.State()
+		messages = []inference.Message{{Role: "system", Content: buildPlanPrompt(state, eventType, input, orientation)}}
+	}
 
 	// ── Tool-enabled path ──────────────────────────────────────────────
 	if s.toolExecutor != nil {
-		plan, err := s.toolCognize(ctx, prompt)
+		plan, err := s.toolCognize(ctx, messages)
 		if err != nil {
 			return nil, false, fmt.Errorf("plan tool cognize: %w", err)
 		}
@@ -296,9 +321,7 @@ func (s *Scheduler) Plan(ctx context.Context, eventType events.Type, input strin
 
 	// ── Original no-tool path ──────────────────────────────────────────
 	resp, err := s.provider.Infer(ctx, inference.Request{
-		Messages: []inference.Message{
-			{Role: "system", Content: prompt},
-		},
+		Messages:    messages,
 		Temperature: 0.3,
 		MaxTokens:   1024,
 		Purpose:     inference.PurposePlan,
@@ -438,7 +461,7 @@ func (s *Scheduler) materialiseExperience(plan *Plan) bool {
 //
 // ALL continuations belong to the SAME Cognition Run. No new Intention,
 // Interaction Session, or inbound Doll Link event is created.
-func (s *Scheduler) toolCognize(ctx context.Context, prompt string) (*Plan, error) {
+func (s *Scheduler) toolCognize(ctx context.Context, messages []inference.Message) (*Plan, error) {
 	tools := s.toolExecutor.Tools()
 	toolMap := buildToolMap(tools)
 
@@ -451,9 +474,7 @@ func (s *Scheduler) toolCognize(ctx context.Context, prompt string) (*Plan, erro
 	st := &loopState{}
 
 	req := inference.Request{
-		Messages: []inference.Message{
-			{Role: "system", Content: prompt},
-		},
+		Messages:    messages,
 		Temperature: 0.3,
 		MaxTokens:   1024,
 		Purpose:     inference.PurposePlan,
