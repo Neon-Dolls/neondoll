@@ -32,9 +32,11 @@ type Request struct {
 ```
 
 `ContextSource` is a typed identity reference (`interaction_session` or the
-reserved `cognition_run` kind). It is not authorization. `SourceResolver`
-validates existence and caller access, then returns source-tagged ordered
-`ContextRecord` values. The builder verifies the resolved identity, every
+reserved `cognition_run` kind). It does not grant authority. `SourceResolver`
+validates source existence and resolves records within trusted Core, then
+returns source-tagged ordered `ContextRecord` values. It is not a separate
+caller-authorization layer: ingress and action authority remain enforced at
+their existing Core boundaries. The builder verifies the resolved identity, every
 record's source tag, and strict sequence ordering before constructing context;
 cross-source resolver output fails closed.
 
