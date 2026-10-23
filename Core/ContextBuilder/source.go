@@ -83,6 +83,7 @@ func (resolver *interactionSessionSourceResolver) Resolve(ctx context.Context, s
 			Sequence:  message.Sequence,
 			Role:      message.Role,
 			Content:   message.Content,
+			Required:  message.Role == RoleSystem,
 			CreatedAt: message.CreatedAt,
 		}
 	}

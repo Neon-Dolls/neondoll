@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -54,7 +55,7 @@ func TestPulseCognitionRunBuildsWithoutInteractionSession(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	request := contextbuilder.SourceRequest{Source: resolver.Source(), TokenBudget: 8}
+	request := contextbuilder.SourceRequest{Source: resolver.Source(), TokenBudget: 9}
 	first, err := builder.BuildSource(context.Background(), request)
 	if err != nil {
 		t.Fatal(err)
@@ -111,6 +112,70 @@ func TestCognitionRunReadsCurrentAuthoritativeMindState(t *testing.T) {
 	}
 	if strings.Contains(joinContents(before), "Updated goal") || !strings.Contains(joinContents(after), "Updated goal") {
 		t.Fatalf("builder did not read current authoritative state: before=%q after=%q", joinContents(before), joinContents(after))
+	}
+}
+
+func TestCognitionRunLargeOptionalMindStateFitsSmallBudget(t *testing.T) {
+	state := cognitionDollState()
+	large := strings.Repeat("context ", 80)
+	for index := range 100 {
+		state.Goals.Items = append(state.Goals.Items, dollstate.GoalItem{
+			ID:          "large-goal-" + strconv.Itoa(index),
+			Name:        "Large goal",
+			Description: large,
+			State:       dollstate.GoalStateActive,
+		})
+		state.Intentions.Items = append(state.Intentions.Items, dollstate.IntentionItem{
+			ID:          "large-intention-" + strconv.Itoa(index),
+			Subject:     "Large intention",
+			Description: large,
+			State:       dollstate.IntentionStatePending,
+		})
+		state.Memories.Items = append(state.Memories.Items, dollstate.MemoryItem{
+			ID:       "large-memory-" + strconv.Itoa(index),
+			Kind:     dollstate.KindObservation,
+			Content:  large,
+			Sequence: index + 1,
+		})
+	}
+	resolver, err := contextbuilder.NewCognitionRunResolver(
+		contextbuilder.CognitionRun{ID: "large-run", Objective: "Review current state."},
+		&mindStateFixture{state: state}, nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	builder, err := contextbuilder.NewWithResolver(resolver, nil, contextbuilder.SlidingWindowPolicy{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	small, err := builder.BuildSource(context.Background(), contextbuilder.SourceRequest{Source: resolver.Source(), TokenBudget: 50})
+	if err != nil {
+		t.Fatalf("small bounded context failed: %v", err)
+	}
+	if small.Metadata.EstimatedTokens > 50 {
+		t.Fatalf("small context estimate = %d", small.Metadata.EstimatedTokens)
+	}
+	if !hasProvenance(small.Messages, "doll.identity") || !hasProvenance(small.Messages, "cognition_run.objective") {
+		t.Fatalf("small context omitted essentials: %+v", small.Messages)
+	}
+	for _, omitted := range small.Metadata.OmittedMessages {
+		if omitted.Provenance == "doll_mind.goals" || omitted.Provenance == "doll_mind.intentions" || omitted.Provenance == "doll_mind.memory" {
+			goto optionalOmitted
+		}
+	}
+	t.Fatal("large optional Mind context was not reported as omitted")
+
+optionalOmitted:
+	largeResult, err := builder.BuildSource(context.Background(), contextbuilder.SourceRequest{Source: resolver.Source(), TokenBudget: 100000})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, provenance := range []string{"doll_mind.state", "doll_mind.goals", "doll_mind.intentions", "doll_mind.memory"} {
+		if !hasProvenance(largeResult.Messages, provenance) {
+			t.Errorf("large context omitted optional provenance %q", provenance)
+		}
 	}
 }
 
@@ -195,4 +260,13 @@ func latestContents(result contextbuilder.Result, count int) []string {
 		contents[index] = message.Content
 	}
 	return contents
+}
+
+func hasProvenance(messages []contextbuilder.Message, provenance string) bool {
+	for _, message := range messages {
+		if message.Provenance == provenance {
+			return true
+		}
+	}
+	return false
 }

@@ -205,6 +205,22 @@ func TestBuildRejectsRequiredSystemContextOverBudget(t *testing.T) {
 	}
 }
 
+func TestBuildPreservesPersistedSessionSystemMessages(t *testing.T) {
+	fx := newFixture(t)
+	created := fx.createSession(t, "body-one")
+	fx.append(t, created.ID,
+		contextbuilder.NewHistoryMessage{Role: contextbuilder.RoleSystem, Content: "required"},
+		contextbuilder.NewHistoryMessage{Role: contextbuilder.RoleUser, Content: "optional message is too large"},
+	)
+	result, err := fx.builder.Build(context.Background(), contextbuilder.Request{SessionID: created.ID, TokenBudget: 8})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Messages) != 1 || result.Messages[0] != (contextbuilder.Message{Role: contextbuilder.RoleSystem, Content: "required"}) {
+		t.Fatalf("messages = %+v", result.Messages)
+	}
+}
+
 func TestConcurrentBuildsRemainSessionIsolated(t *testing.T) {
 	fx := newFixture(t)
 	first := fx.createSession(t, "body-one")

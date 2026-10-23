@@ -99,11 +99,12 @@ func (resolver *CognitionRunResolver) Resolve(_ context.Context, source ContextS
 	}
 	for _, record := range working {
 		records = append(records, ContextRecord{
-			ID:       fmt.Sprintf("%s/working/%d", source.ID, len(records)),
-			Source:   source,
-			Sequence: len(records),
-			Role:     record.Role,
-			Content:  record.Content,
+			ID:         fmt.Sprintf("%s/working/%d", source.ID, len(records)),
+			Source:     source,
+			Sequence:   len(records),
+			Role:       record.Role,
+			Content:    record.Content,
+			Provenance: "cognition_run.working",
 		})
 	}
 	return ResolvedSource{Source: source, Records: records}, nil
@@ -111,11 +112,14 @@ func (resolver *CognitionRunResolver) Resolve(_ context.Context, source ContextS
 
 func (resolver *CognitionRunResolver) stateRecords(state *dollstate.DollState) ([]ContextRecord, error) {
 	type mindState struct {
-		Identity dollstate.Identity `json:"identity"`
-		Soul     dollstate.Soul     `json:"soul"`
-		Owner    dollstate.Owner    `json:"owner"`
-		Self     dollstate.Self     `json:"self"`
-		Drives   dollstate.Drives   `json:"drives"`
+		Soul   dollstate.Soul   `json:"soul"`
+		Owner  dollstate.Owner  `json:"owner"`
+		Self   dollstate.Self   `json:"self"`
+		Drives dollstate.Drives `json:"drives"`
+	}
+	type essentialIdentity struct {
+		DollID        string `json:"doll_id"`
+		CanonicalName string `json:"canonical_name"`
 	}
 
 	memories := state.Memories.Items
@@ -123,45 +127,62 @@ func (resolver *CognitionRunResolver) stateRecords(state *dollstate.DollState) (
 		memories = memories[len(memories)-recentCognitionMemories:]
 	}
 	sections := []struct {
-		id      string
-		heading string
-		value   any
+		id         string
+		heading    string
+		provenance string
+		value      any
 	}{
-		{id: "mind", heading: "Authoritative Doll Mind state", value: mindState{
-			Identity: state.Identity, Soul: state.Soul, Owner: state.Owner, Self: state.Self, Drives: state.Drives,
+		{id: "mind", heading: "Context data — authoritative Doll Mind state", provenance: "doll_mind.state", value: mindState{
+			Soul: state.Soul, Owner: state.Owner, Self: state.Self, Drives: state.Drives,
 		}},
-		{id: "goals", heading: "Authoritative Goals", value: state.Goals},
-		{id: "intentions", heading: "Authoritative Intentions", value: state.Intentions},
-		{id: "memory", heading: "Recent Memory references", value: memories},
+		{id: "goals", heading: "Context data — authoritative Goals", provenance: "doll_mind.goals", value: state.Goals},
+		{id: "intentions", heading: "Context data — authoritative Intentions", provenance: "doll_mind.intentions", value: state.Intentions},
+		{id: "memory", heading: "Context data — recent Memory references", provenance: "doll_mind.memory", value: memories},
 	}
-	records := make([]ContextRecord, 0, len(sections)+2)
+	identity, err := json.Marshal(essentialIdentity{DollID: state.Identity.DollID, CanonicalName: state.Identity.CanonicalName})
+	if err != nil {
+		return nil, fmt.Errorf("resolve cognition run identity: %w", err)
+	}
+	records := []ContextRecord{{
+		ID:         resolver.source.ID + "/identity",
+		Source:     resolver.source,
+		Sequence:   0,
+		Role:       RoleSystem,
+		Content:    "Doll identity:\n" + string(identity),
+		Provenance: "doll.identity",
+		Required:   true,
+	}}
 	for _, section := range sections {
 		encoded, err := json.Marshal(section.value)
 		if err != nil {
 			return nil, fmt.Errorf("resolve cognition run %s: %w", section.id, err)
 		}
 		records = append(records, ContextRecord{
-			ID:       resolver.source.ID + "/" + section.id,
-			Source:   resolver.source,
-			Sequence: len(records),
-			Role:     RoleSystem,
-			Content:  section.heading + ":\n" + string(encoded),
+			ID:         resolver.source.ID + "/" + section.id,
+			Source:     resolver.source,
+			Sequence:   len(records),
+			Role:       RoleSystem,
+			Content:    section.heading + ":\n" + string(encoded),
+			Provenance: section.provenance,
 		})
 	}
 	records = append(records, ContextRecord{
-		ID:       resolver.source.ID + "/objective",
-		Source:   resolver.source,
-		Sequence: len(records),
-		Role:     RoleSystem,
-		Content:  "Cognition Run objective:\n" + resolver.objective,
+		ID:         resolver.source.ID + "/objective",
+		Source:     resolver.source,
+		Sequence:   len(records),
+		Role:       RoleSystem,
+		Content:    "Cognition Run objective:\n" + resolver.objective,
+		Provenance: "cognition_run.objective",
+		Required:   true,
 	})
 	if resolver.wakeEvidence != "" {
 		records = append(records, ContextRecord{
-			ID:       resolver.source.ID + "/wake",
-			Source:   resolver.source,
-			Sequence: len(records),
-			Role:     RoleSystem,
-			Content:  "Cognition Run wake evidence:\n" + resolver.wakeEvidence,
+			ID:         resolver.source.ID + "/wake",
+			Source:     resolver.source,
+			Sequence:   len(records),
+			Role:       RoleSystem,
+			Content:    "Context data — Cognition Run wake evidence:\n" + resolver.wakeEvidence,
+			Provenance: "cognition_run.wake_evidence",
 		})
 	}
 	return records, nil
