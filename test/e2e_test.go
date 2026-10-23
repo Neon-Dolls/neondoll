@@ -241,8 +241,8 @@ func TestE2E_SparkSpeaksRealInference(t *testing.T) {
 		inference.WithBaseURL(baseURL),
 	)
 	svc := interaction.New(store2, provider, log)
-
-	wsServer := ws.New(ws.Config{Listen: "127.0.0.1:0"}, log, svc)
+	ingress, wsConfig := newAuthenticatedInteractionIngress(t, store2, svc)
+	wsServer := ws.New(wsConfig, log, ingress)
 
 	startErr := make(chan error, 1)
 	go func() {
@@ -380,7 +380,8 @@ func TestE2E_InferenceFails(t *testing.T) {
 		inference.WithBaseURL("http://127.0.0.1:15999"),
 	)
 	svc := interaction.New(store2, badProvider, log)
-	wsServer := ws.New(ws.Config{Listen: "127.0.0.1:0"}, log, svc)
+	ingress, wsConfig := newAuthenticatedInteractionIngress(t, store2, svc)
+	wsServer := ws.New(wsConfig, log, ingress)
 
 	startErr := make(chan error, 1)
 	go func() {

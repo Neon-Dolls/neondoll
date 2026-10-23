@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/http"
 	"net/netip"
 	"path/filepath"
 	"sync"
@@ -419,7 +420,9 @@ func TestM3RealPath(t *testing.T) {
 		t.Fatalf("Core netstack ListenTCP for WS: %v", err)
 	}
 
-	wsSrv := ws.New(ws.Config{}, &wsLogger{inner: log}, echoHandler{})
+	wsSrv := ws.New(ws.Config{AuthenticateExecution: func(*http.Request) (string, error) {
+		return string(bID.Identity.BodyID), nil
+	}}, &wsLogger{inner: log}, echoHandler{})
 	wsSrv.SetListener(wsLn)
 	go func() {
 		if err := wsSrv.Start(ctx); err != nil {
