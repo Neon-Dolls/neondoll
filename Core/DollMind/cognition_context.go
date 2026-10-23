@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 
 	contextbuilder "github.com/Neon-Dolls/neondoll/Core/ContextBuilder"
 	"github.com/Neon-Dolls/neondoll/Core/Inference"
@@ -20,6 +21,9 @@ type cognitionRunExecution struct {
 	id       string
 	resolver *contextbuilder.CognitionRunResolver
 	builder  contextbuilder.SourceBuilder
+
+	mu      sync.Mutex
+	working []contextbuilder.CognitionWorkingRecord
 }
 
 func newCognitionRunExecution(id, objective, wakeEvidence string, mind MindAPI) (*cognitionRunExecution, error) {
@@ -58,14 +62,37 @@ func CognitionRunID(ctx context.Context) string {
 }
 
 func (run *cognitionRunExecution) appendWorking(role contextbuilder.Role, content string) error {
-	return run.resolver.Append(contextbuilder.CognitionWorkingRecord{Role: role, Content: content})
+	run.mu.Lock()
+	defer run.mu.Unlock()
+	record := contextbuilder.CognitionWorkingRecord{Role: role, Content: content}
+	if err := run.resolver.Append(record); err != nil {
+		return err
+	}
+	run.working = append(run.working, record)
+	return nil
 }
 
-func (run *cognitionRunExecution) messages(ctx context.Context, instruction string) ([]inference.Message, error) {
+func (run *cognitionRunExecution) snapshotWorking() []contextbuilder.CognitionWorkingRecord {
+	run.mu.Lock()
+	defer run.mu.Unlock()
+	return append([]contextbuilder.CognitionWorkingRecord(nil), run.working...)
+}
+
+func (run *cognitionRunExecution) replaceWorking(records []contextbuilder.CognitionWorkingRecord) error {
+	run.mu.Lock()
+	defer run.mu.Unlock()
+	if err := run.resolver.ReplaceWorking(records); err != nil {
+		return err
+	}
+	run.working = append(run.working[:0], records...)
+	return nil
+}
+
+func (run *cognitionRunExecution) messages(ctx context.Context, instructions ...string) ([]inference.Message, error) {
 	result, err := run.builder.BuildSource(ctx, contextbuilder.SourceRequest{
 		Source:             run.resolver.Source(),
 		TokenBudget:        CognitiveContextTokenBudget,
-		SystemInstructions: []string{instruction},
+		SystemInstructions: instructions,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("build cognition context: %w", err)

@@ -117,6 +117,11 @@ type Request struct {
 	// provider for continuation turns in the same Cognition Run.
 	// Set on subsequent loop iterations; nil/empty on the first call.
 	ToolResults []ToolResult
+
+	// ToolContextBudgeted means Messages already contain the model-visible
+	// tool definitions and correlated tool exchanges selected by Context
+	// Builder. Prompt adapters must not inject a second unbudgeted copy.
+	ToolContextBudgeted bool
 }
 
 // Message in a conversation.

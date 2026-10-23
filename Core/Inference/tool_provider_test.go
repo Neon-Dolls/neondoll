@@ -168,6 +168,43 @@ func (r *toolCallResponder) Infer(_ context.Context, req Request) (*Response, er
 
 func (r *toolCallResponder) ID() ProviderID { return r.ProviderID }
 
+type requestCaptureProvider struct{ request Request }
+
+func (provider *requestCaptureProvider) ID() ProviderID { return "capture" }
+func (provider *requestCaptureProvider) Infer(_ context.Context, request Request) (*Response, error) {
+	provider.request = request
+	return &Response{Content: "done", ProviderID: provider.ID()}, nil
+}
+
+func TestToolEnabledProvider_DoesNotDuplicateBudgetedToolContext(t *testing.T) {
+	inner := &requestCaptureProvider{}
+	provider := NewToolEnabledProvider(inner)
+	messages := []Message{
+		{Role: "system", Content: FormatToolsForPrompt([]Tool{{Name: "runtime.info__read", Description: "read"}})},
+		{Role: "tool", Content: "Tool result for call call-1: SUCCESS"},
+	}
+	_, err := provider.Infer(context.Background(), Request{
+		Messages: messages,
+		Tools:    []Tool{{Name: "runtime.info__read", Description: "read"}},
+		ToolResults: []ToolResult{{
+			ToolCallID: "call-1",
+			Status:     ToolResultSuccess,
+		}},
+		ToolContextBudgeted: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(inner.request.Messages) != len(messages) {
+		t.Fatalf("inner messages = %d, want %d without adapter injection", len(inner.request.Messages), len(messages))
+	}
+	for index := range messages {
+		if inner.request.Messages[index] != messages[index] {
+			t.Fatalf("inner message %d = %+v, want %+v", index, inner.request.Messages[index], messages[index])
+		}
+	}
+}
+
 func TestToolEnabledProvider_AdapterRoundTrip(t *testing.T) {
 	// Full adapter-level flow:
 	//   1. Request with tools → provider gets tool text → provider responds

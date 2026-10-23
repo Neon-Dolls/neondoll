@@ -73,12 +73,29 @@ records. `SourceMux` composes Interaction Session and Cognitive Run resolvers
 without fallback between identities or lifecycles. There is no Cognitive Run
 database table or synthetic Interaction Session.
 
-The current Pulse/Doll Mind lifecycle exposes run occupancy and wake evidence,
-but not a durable run ID or persisted semantic working-state model. Callers
-therefore assign the temporary run ID and supply working records while the run
-is active. Wiring Context Builder output into Orient/Plan inference awaits the
-separate inference integration/profile milestone; this change does not alter
-the Pulse scheduler or existing cognition engine.
+M2.5 connects Pulse-originated cognition at the existing production path:
+`Pulse.Runner -> Scheduler.EnterPulseWake -> Orient -> Plan`. Each admitted
+wake receives an ephemeral UUID carried through `context.Context`; Orient,
+Plan, and every tool-loop provider round trip share that identity. The run ID,
+working records, and selected model context are not persisted.
+
+Orient and Plan build fresh provider messages from `CognitionRunResolver`.
+Before Plan, the structured L1 orientation is appended as run-local working
+state. Tool-enabled Plan rebuilds again before every provider invocation.
+Tool definitions and each correlated call/result exchange are represented in
+the same bounded construction: the current unresolved exchange is required,
+while exchanges already consumed by a later provider response become
+budget-selectable. Structured `ToolResults` remain on the provider request for
+protocol correlation, but prompt adapters do not inject an unbudgeted duplicate.
+If the unresolved call/result pair cannot fit, construction fails explicitly
+before another provider invocation.
+
+Production inference paths not yet integrated with Context Builder are
+deliberately unchanged and remain follow-up work: `DollMind.Run`, non-Pulse
+`DollMind.Orient`/`Plan` (including their legacy tool-loop request handling),
+and `Interaction.Service.HandleEvent`. They do not share the Pulse Cognitive
+Run source, and this milestone does not invent a source or lifecycle for them.
+Model-profile-specific budgets and routing also remain deferred.
 
 `New` installs the stateless `SlidingWindowPolicy`. `NewWithPolicy` accepts a
 replacement policy without changing the Builder, history store, or token
@@ -115,8 +132,6 @@ per four Unicode code points, rounded up. `TokenEstimator` is replaceable so a
 future inference profile can supply model-specific accounting without changing
 history or builder consumers.
 
-This milestone does not connect the builder to the current inference request,
-choose an inference profile, perform semantic Memory retrieval, summarize,
-compact, or automatically persist interaction/run turns. Those are later
-integration and policy milestones; this foundation provides the bounded
-construction boundaries they consume.
+This milestone does not choose an inference profile, perform semantic Memory
+retrieval, summarize, compact, or persist Cognitive Run turns. Those remain
+later integration and policy milestones.

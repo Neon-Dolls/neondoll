@@ -51,17 +51,19 @@ func (t *ToolEnabledProvider) Infer(ctx context.Context, req Request) (*Response
 
 	// Inject tool definitions as a system message so the model knows what it can call.
 	reqWithTools := req
-	toolText := formatToolsForPrompt(req.Tools)
-	reqWithTools.Messages = append([]Message{
-		{Role: "system", Content: toolText},
-	}, reqWithTools.Messages...)
+	if !req.ToolContextBudgeted {
+		toolText := FormatToolsForPrompt(req.Tools)
+		reqWithTools.Messages = append([]Message{
+			{Role: "system", Content: toolText},
+		}, reqWithTools.Messages...)
 
-	// Format tool results from prior turns as system messages too.
-	for _, tr := range req.ToolResults {
-		reqWithTools.Messages = append(reqWithTools.Messages, Message{
-			Role:    "system",
-			Content: formatToolResultForPrompt(tr),
-		})
+		// Format tool results from prior turns as system messages too.
+		for _, tr := range req.ToolResults {
+			reqWithTools.Messages = append(reqWithTools.Messages, Message{
+				Role:    "system",
+				Content: FormatToolResultForPrompt(tr),
+			})
+		}
 	}
 
 	resp, err := t.inner.Infer(ctx, reqWithTools)
@@ -200,8 +202,8 @@ func parseToolCallsFromText(content string) []ToolCall {
 	return calls
 }
 
-// formatToolsForPrompt creates a textual description of available tools.
-func formatToolsForPrompt(tools []Tool) string {
+// FormatToolsForPrompt creates the canonical prompt representation of tools.
+func FormatToolsForPrompt(tools []Tool) string {
 	if len(tools) == 0 {
 		return ""
 	}
@@ -213,8 +215,9 @@ func formatToolsForPrompt(tools []Tool) string {
 	return result
 }
 
-// formatToolResultForPrompt creates a textual description of a tool result.
-func formatToolResultForPrompt(tr ToolResult) string {
+// FormatToolResultForPrompt creates the canonical prompt representation of a
+// correlated tool result.
+func FormatToolResultForPrompt(tr ToolResult) string {
 	status := "SUCCESS"
 	if tr.Status == ToolResultFailure {
 		status = "FAILURE"
