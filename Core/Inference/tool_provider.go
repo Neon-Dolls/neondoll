@@ -45,25 +45,37 @@ func NewToolEnabledProvider(inner Provider) *ToolEnabledProvider {
 // Response.Content is left empty (tool call turn). Otherwise the response
 // is treated as final content.
 func (t *ToolEnabledProvider) Infer(ctx context.Context, req Request) (*Response, error) {
-	if len(req.Tools) == 0 {
+	if err := req.ValidateToolContext(); err != nil {
+		return nil, err
+	}
+	messageTools := false
+	for _, message := range req.Messages {
+		if len(message.Tools) > 0 || message.ToolCall != nil || message.ToolResult != nil {
+			messageTools = true
+			break
+		}
+	}
+	if len(req.Tools) == 0 && !messageTools {
 		return t.inner.Infer(ctx, req)
 	}
 
-	// Inject tool definitions as a system message so the model knows what it can call.
+	// Legacy callers supply top-level tools/results, which this prompt adapter
+	// projects into messages. Context-Builder callers bind structured metadata
+	// to existing budgeted messages and leave these top-level fields empty, so
+	// the adapter passes their model-visible content through exactly once.
 	reqWithTools := req
-	if !req.ToolContextBudgeted {
+	if len(req.Tools) > 0 {
 		toolText := FormatToolsForPrompt(req.Tools)
 		reqWithTools.Messages = append([]Message{
 			{Role: "system", Content: toolText},
 		}, reqWithTools.Messages...)
 
-		// Format tool results from prior turns as system messages too.
-		for _, tr := range req.ToolResults {
-			reqWithTools.Messages = append(reqWithTools.Messages, Message{
-				Role:    "system",
-				Content: FormatToolResultForPrompt(tr),
-			})
-		}
+	}
+	for _, tr := range req.ToolResults {
+		reqWithTools.Messages = append(reqWithTools.Messages, Message{
+			Role:    "system",
+			Content: FormatToolResultForPrompt(tr),
+		})
 	}
 
 	resp, err := t.inner.Infer(ctx, reqWithTools)

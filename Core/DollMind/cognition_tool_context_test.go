@@ -57,18 +57,18 @@ func TestPulseToolLoopRebuildsBoundedContextEachIteration(t *testing.T) {
 		}
 	}
 	for index, request := range provider.requests[1:] {
-		if !request.ToolContextBudgeted {
-			t.Errorf("Plan iteration %d did not mark tool context as budgeted", index)
-		}
 		if tokens := estimatedInferenceTokens(request.Messages); tokens > CognitiveContextTokenBudget {
 			t.Errorf("Plan iteration %d estimate = %d, budget = %d", index, tokens, CognitiveContextTokenBudget)
 		}
+		if len(request.Tools) != 0 || len(request.ToolResults) != 0 {
+			t.Errorf("Plan iteration %d carried legacy unbudgeted tool fields", index)
+		}
 	}
-	if got := provider.requests[2].ToolResults; len(got) != 1 || got[0].ToolCallID != "call_A" {
-		t.Fatalf("second Plan iteration results = %+v, want only call_A", got)
+	if got := messageToolResults(provider.requests[2].Messages); len(got) != 1 || got[0].ToolCallID != "call_A" {
+		t.Fatalf("second Plan iteration message results = %+v, want only call_A", got)
 	}
-	if got := provider.requests[3].ToolResults; len(got) != 1 || got[0].ToolCallID != "call_B" {
-		t.Fatalf("third Plan iteration results = %+v, want only call_B", got)
+	if got := messageToolResults(provider.requests[3].Messages); len(got) != 2 || got[0].ToolCallID != "call_A" || got[1].ToolCallID != "call_B" {
+		t.Fatalf("third Plan iteration message results = %+v, want correlated call_A and call_B history", got)
 	}
 	lastContext := joinedInferenceContent(provider.requests[3].Messages)
 	for _, evidence := range []string{"call_A", "call_B", "Tool result for call call_B"} {
@@ -116,6 +116,16 @@ func estimatedInferenceTokens(messages []inference.Message) int {
 		total += estimator.EstimateTokens(contextbuilder.Message{Role: contextbuilder.Role(message.Role), Content: message.Content})
 	}
 	return total
+}
+
+func messageToolResults(messages []inference.Message) []inference.ToolResult {
+	var results []inference.ToolResult
+	for _, message := range messages {
+		if message.ToolResult != nil {
+			results = append(results, *message.ToolResult)
+		}
+	}
+	return results
 }
 
 type largeOutputBody struct{ output string }

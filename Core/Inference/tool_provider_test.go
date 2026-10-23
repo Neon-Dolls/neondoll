@@ -2,6 +2,7 @@ package inference
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"testing"
 )
@@ -176,22 +177,67 @@ func (provider *requestCaptureProvider) Infer(_ context.Context, request Request
 	return &Response{Content: "done", ProviderID: provider.ID()}, nil
 }
 
+type structuredToolConsumer struct {
+	seenCallID string
+	seenOutput any
+	legacySeen int
+}
+
+func (provider *structuredToolConsumer) ID() ProviderID { return "structured-consumer" }
+func (provider *structuredToolConsumer) Infer(_ context.Context, request Request) (*Response, error) {
+	provider.legacySeen = len(request.ToolResults)
+	for _, message := range request.Messages {
+		if message.ToolResult == nil {
+			continue
+		}
+		provider.seenCallID = message.ToolResult.ToolCallID
+		provider.seenOutput = message.ToolResult.Result["output"]
+	}
+	return &Response{Content: "done", ProviderID: provider.ID()}, nil
+}
+
+func TestProviderDirectlyConsumesMessageBoundStructuredToolResult(t *testing.T) {
+	provider := &structuredToolConsumer{}
+	result := ToolResult{ToolCallID: "call-direct", Status: ToolResultSuccess, Result: map[string]any{"output": "bounded"}}
+	_, err := provider.Infer(context.Background(), Request{Messages: []Message{{
+		Role:       "tool",
+		Content:    FormatToolResultForPrompt(result),
+		ToolResult: &result,
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if provider.legacySeen != 0 {
+		t.Fatalf("provider received %d duplicate top-level results", provider.legacySeen)
+	}
+	if provider.seenCallID != "call-direct" || provider.seenOutput != "bounded" {
+		t.Fatalf("provider correlation = (%q, %v), want (call-direct, bounded)", provider.seenCallID, provider.seenOutput)
+	}
+}
+
+func TestToolEnabledProviderRejectsMixedToolContext(t *testing.T) {
+	provider := NewToolEnabledProvider(&requestCaptureProvider{})
+	result := ToolResult{ToolCallID: "call-mixed", Status: ToolResultSuccess}
+	_, err := provider.Infer(context.Background(), Request{
+		Messages:    []Message{{Role: "tool", Content: "budgeted", ToolResult: &result}},
+		ToolResults: []ToolResult{result},
+	})
+	if !errors.Is(err, ErrMixedToolContext) {
+		t.Fatalf("Infer error = %v, want ErrMixedToolContext", err)
+	}
+}
+
 func TestToolEnabledProvider_DoesNotDuplicateBudgetedToolContext(t *testing.T) {
 	inner := &requestCaptureProvider{}
 	provider := NewToolEnabledProvider(inner)
+	tools := []Tool{{Name: "runtime.info__read", Description: "read"}}
+	call := ToolCall{ID: "call-1", Name: "runtime.info__read"}
+	result := ToolResult{ToolCallID: "call-1", Status: ToolResultSuccess}
 	messages := []Message{
-		{Role: "system", Content: FormatToolsForPrompt([]Tool{{Name: "runtime.info__read", Description: "read"}})},
-		{Role: "tool", Content: "Tool result for call call-1: SUCCESS"},
+		{Role: "system", Content: FormatToolsForPrompt(tools), Tools: tools},
+		{Role: "tool", Content: FormatToolResultForPrompt(result), ToolCall: &call, ToolResult: &result},
 	}
-	_, err := provider.Infer(context.Background(), Request{
-		Messages: messages,
-		Tools:    []Tool{{Name: "runtime.info__read", Description: "read"}},
-		ToolResults: []ToolResult{{
-			ToolCallID: "call-1",
-			Status:     ToolResultSuccess,
-		}},
-		ToolContextBudgeted: true,
-	})
+	_, err := provider.Infer(context.Background(), Request{Messages: messages})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -199,9 +245,12 @@ func TestToolEnabledProvider_DoesNotDuplicateBudgetedToolContext(t *testing.T) {
 		t.Fatalf("inner messages = %d, want %d without adapter injection", len(inner.request.Messages), len(messages))
 	}
 	for index := range messages {
-		if inner.request.Messages[index] != messages[index] {
-			t.Fatalf("inner message %d = %+v, want %+v", index, inner.request.Messages[index], messages[index])
+		if inner.request.Messages[index].Content != messages[index].Content {
+			t.Fatalf("inner message %d content = %q, want %q", index, inner.request.Messages[index].Content, messages[index].Content)
 		}
+	}
+	if inner.request.Messages[1].ToolResult == nil || inner.request.Messages[1].ToolResult.ToolCallID != "call-1" || inner.request.Messages[1].ToolCall == nil || inner.request.Messages[1].ToolCall.ID != "call-1" {
+		t.Fatalf("structured correlation was not preserved: %+v", inner.request.Messages[1])
 	}
 }
 

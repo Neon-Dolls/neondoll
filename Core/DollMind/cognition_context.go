@@ -106,7 +106,7 @@ func (run *cognitionRunExecution) messages(ctx context.Context, instructions ...
 			messages[len(messages)-1].Content += "\n\n" + message.Content
 			continue
 		}
-		messages = append(messages, inference.Message{Role: string(message.Role), Content: message.Content})
+		messages = append(messages, inference.Message{Role: string(message.Role), Content: message.Content, Provenance: message.Provenance})
 	}
 	if len(messages) > 0 {
 		messages[0].Content = strings.TrimSpace(messages[0].Content)

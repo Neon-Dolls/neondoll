@@ -486,7 +486,7 @@ func (s *Scheduler) toolCognize(ctx context.Context, messages []inference.Messag
 	}
 	var baseWorking []contextbuilder.CognitionWorkingRecord
 	var toolHistory []contextbuilder.CognitionWorkingRecord
-	var pendingResults []inference.ToolResult
+	var toolExchanges []cognitionToolExchange
 	if run != nil {
 		baseWorking = run.snapshotWorking()
 	}
@@ -508,14 +508,14 @@ func (s *Scheduler) toolCognize(ctx context.Context, messages []inference.Messag
 			if err != nil {
 				return nil, fmt.Errorf("plan tool context: %w", err)
 			}
+			if err := bindCognitionToolMetadata(freshMessages, tools, toolExchanges); err != nil {
+				return nil, fmt.Errorf("plan tool protocol context: %w", err)
+			}
 			req = inference.Request{
-				Messages:            freshMessages,
-				Temperature:         0.3,
-				MaxTokens:           1024,
-				Purpose:             inference.PurposePlan,
-				Tools:               tools,
-				ToolResults:         append([]inference.ToolResult(nil), pendingResults...),
-				ToolContextBudgeted: true,
+				Messages:    freshMessages,
+				Temperature: 0.3,
+				MaxTokens:   1024,
+				Purpose:     inference.PurposePlan,
 			}
 		}
 
@@ -534,7 +534,6 @@ func (s *Scheduler) toolCognize(ctx context.Context, messages []inference.Messag
 			for index := range toolHistory {
 				toolHistory[index].Required = false
 			}
-			pendingResults = pendingResults[:0]
 		}
 
 		// Execute tool calls sequentially (Phase 6: sequential, not concurrent)
@@ -552,32 +551,72 @@ func (s *Scheduler) toolCognize(ctx context.Context, messages []inference.Messag
 				req.ToolResults = append(req.ToolResults, result)
 				continue
 			}
-			callRecord, resultRecord, err := cognitionToolRecords(call, result)
+			record, err := cognitionToolRecord(call, result)
 			if err != nil {
 				return nil, fmt.Errorf("plan tool context record: %w", err)
 			}
-			toolHistory = append(toolHistory, callRecord, resultRecord)
-			pendingResults = append(pendingResults, result)
+			toolHistory = append(toolHistory, record)
+			toolExchanges = append(toolExchanges, cognitionToolExchange{call: call, result: result})
 		}
 	}
 }
 
-func cognitionToolRecords(call inference.ToolCall, result inference.ToolResult) (contextbuilder.CognitionWorkingRecord, contextbuilder.CognitionWorkingRecord, error) {
-	encodedCall, err := json.Marshal(call)
+type cognitionToolExchange struct {
+	call   inference.ToolCall
+	result inference.ToolResult
+}
+
+func cognitionToolRecord(call inference.ToolCall, result inference.ToolResult) (contextbuilder.CognitionWorkingRecord, error) {
+	content, err := cognitionToolContent(call, result)
 	if err != nil {
-		return contextbuilder.CognitionWorkingRecord{}, contextbuilder.CognitionWorkingRecord{}, err
+		return contextbuilder.CognitionWorkingRecord{}, err
 	}
 	return contextbuilder.CognitionWorkingRecord{
-			Role:       contextbuilder.RoleAssistant,
-			Content:    "Tool call:\n" + string(encodedCall),
-			Provenance: "cognition_run.tool_call",
-			Required:   true,
-		}, contextbuilder.CognitionWorkingRecord{
-			Role:       contextbuilder.RoleTool,
-			Content:    inference.FormatToolResultForPrompt(result),
-			Provenance: "cognition_run.tool_result",
-			Required:   true,
-		}, nil
+		Role:       contextbuilder.RoleTool,
+		Content:    content,
+		Provenance: "cognition_run.tool_exchange",
+		Required:   true,
+	}, nil
+}
+
+func cognitionToolContent(call inference.ToolCall, result inference.ToolResult) (string, error) {
+	encodedCall, err := json.Marshal(call)
+	if err != nil {
+		return "", err
+	}
+	return "Tool call:\n" + string(encodedCall) + "\n" + inference.FormatToolResultForPrompt(result), nil
+}
+
+func bindCognitionToolMetadata(messages []inference.Message, tools []inference.Tool, exchanges []cognitionToolExchange) error {
+	for index := range messages {
+		if messages[index].Role == "system" {
+			messages[index].Tools = append([]inference.Tool(nil), tools...)
+			break
+		}
+	}
+	for index := range messages {
+		if messages[index].Provenance != "cognition_run.tool_exchange" {
+			continue
+		}
+		matched := false
+		for exchangeIndex := range exchanges {
+			content, err := cognitionToolContent(exchanges[exchangeIndex].call, exchanges[exchangeIndex].result)
+			if err != nil {
+				return err
+			}
+			if content != messages[index].Content {
+				continue
+			}
+			messages[index].ToolCall = &exchanges[exchangeIndex].call
+			messages[index].ToolResult = &exchanges[exchangeIndex].result
+			matched = true
+			break
+		}
+		if !matched {
+			return fmt.Errorf("tool exchange metadata missing")
+		}
+	}
+	return nil
 }
 
 // buildToolMap builds a lookup table from tool name → *Tool for efficient

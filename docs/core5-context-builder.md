@@ -85,10 +85,22 @@ state. Tool-enabled Plan rebuilds again before every provider invocation.
 Tool definitions and each correlated call/result exchange are represented in
 the same bounded construction: the current unresolved exchange is required,
 while exchanges already consumed by a later provider response become
-budget-selectable. Structured `ToolResults` remain on the provider request for
-protocol correlation, but prompt adapters do not inject an unbudgeted duplicate.
-If the unresolved call/result pair cannot fit, construction fails explicitly
-before another provider invocation.
+budget-selectable. Tool call/result metadata is bound to that same selected
+`inference.Message`. An adapter may translate the message to a provider-native
+tool item instead of its text representation, but must not append another
+model-visible copy. Context-Builder requests leave the legacy top-level
+`Request.Tools` and `Request.ToolResults` empty, making accidental independent
+serialization impossible. If the unresolved exchange cannot fit, construction
+fails explicitly before another provider invocation.
+
+The provider audit for M2.5 covers `MockProvider`, `OpenAIProvider`, and
+`ToolEnabledProvider`. Mock and OpenAI providers consume `Messages` only;
+OpenAI's wire adapter projects each message exactly once. `ToolEnabledProvider`
+continues to project top-level `Tools`/`ToolResults` for legacy callers, but
+recognizes message-bound tool metadata and passes its already-budgeted content
+through without injection. Future native adapters must consume `Message.Tools`,
+`Message.ToolCall`, and `Message.ToolResult` as a replacement representation of
+that message. Top-level and message-bound tool contracts must not be combined.
 
 Production inference paths not yet integrated with Context Builder are
 deliberately unchanged and remain follow-up work: `DollMind.Run`, non-Pulse
