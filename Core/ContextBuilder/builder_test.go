@@ -96,7 +96,7 @@ func TestBuildPreservesSystemInstructionsAndHistoryOrder(t *testing.T) {
 	}
 }
 
-func TestBuildUsesWholeMessageRollingBudget(t *testing.T) {
+func TestBuildSelectsCompleteConversationTurns(t *testing.T) {
 	fx := newFixture(t)
 	created := fx.createSession(t, "body-one")
 	stored := fx.append(t, created.ID,
@@ -108,13 +108,13 @@ func TestBuildUsesWholeMessageRollingBudget(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := []string{result.Messages[0].Content, result.Messages[1].Content}; !reflect.DeepEqual(got, []string{"222", "333"}) {
+	if got := messageContents(result.Messages); !reflect.DeepEqual(got, []string{"333"}) {
 		t.Fatalf("rolling messages = %v", got)
 	}
-	if result.Metadata.IncludedHistoryMessages != 2 || result.Metadata.OmittedHistoryMessages != 1 || len(result.Metadata.OmittedMessages) != 1 || result.Metadata.OmittedMessages[0].ID != stored[0].ID {
+	if result.Metadata.IncludedHistoryMessages != 1 || result.Metadata.OmittedHistoryMessages != 2 || len(result.Metadata.OmittedMessages) != 2 || result.Metadata.OmittedMessages[0].ID != stored[0].ID || result.Metadata.OmittedMessages[1].ID != stored[1].ID {
 		t.Fatalf("metadata = %+v", result.Metadata)
 	}
-	if *result.Metadata.HistoryStartSequence != 0 || *result.Metadata.HistoryEndSequence != 2 || *result.Metadata.WindowStartSequence != 1 || *result.Metadata.WindowEndSequence != 2 {
+	if *result.Metadata.HistoryStartSequence != 0 || *result.Metadata.HistoryEndSequence != 2 || *result.Metadata.WindowStartSequence != 2 || *result.Metadata.WindowEndSequence != 2 {
 		t.Fatalf("window boundaries = %+v", result.Metadata)
 	}
 }
@@ -138,7 +138,7 @@ func TestBuildWindowAdvancesAndRespondsToBudgetChanges(t *testing.T) {
 	}
 
 	initial := build(6)
-	if got := []string{initial.Messages[0].Content, initial.Messages[1].Content}; !reflect.DeepEqual(got, []string{"two", "six"}) {
+	if got := messageContents(initial.Messages); !reflect.DeepEqual(got, []string{"six"}) {
 		t.Fatalf("initial window = %v", got)
 	}
 	fx.append(t, created.ID, contextbuilder.NewHistoryMessage{Role: contextbuilder.RoleAssistant, Content: "ten"})
@@ -219,10 +219,7 @@ func TestBuildReservesRequiredTailAfterRollingHistory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []contextbuilder.Message{
-		{Role: contextbuilder.RoleAssistant, Content: "new"},
-		{Role: contextbuilder.RoleUser, Content: "current"},
-	}
+	want := []contextbuilder.Message{{Role: contextbuilder.RoleUser, Content: "current"}}
 	if !reflect.DeepEqual(result.Messages, want) {
 		t.Fatalf("messages = %+v, want %+v", result.Messages, want)
 	}
@@ -308,8 +305,56 @@ func TestBuildReconstructsPersistedHistoryAfterRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	result, err := builder.Build(ctx, contextbuilder.Request{SessionID: created.ID, TokenBudget: 3})
-	if err != nil || len(result.Messages) != 1 || result.Messages[0].Content != "new" || *result.Metadata.WindowStartSequence != 1 || *result.Metadata.WindowEndSequence != 1 {
+	result, err := builder.Build(ctx, contextbuilder.Request{SessionID: created.ID, TokenBudget: 6})
+	if err != nil || !reflect.DeepEqual(messageContents(result.Messages), []string{"old", "new"}) || *result.Metadata.WindowStartSequence != 0 || *result.Metadata.WindowEndSequence != 1 {
 		t.Fatalf("reconstructed result = %+v, %v", result, err)
 	}
+}
+
+func TestBuildOmitsOrphanedAssistantAndKeepsIncompleteUser(t *testing.T) {
+	fx := newFixture(t)
+	created := fx.createSession(t, "body-one")
+	stored := fx.append(t, created.ID,
+		contextbuilder.NewHistoryMessage{Role: contextbuilder.RoleAssistant, Content: "orphan"},
+		contextbuilder.NewHistoryMessage{Role: contextbuilder.RoleUser, Content: "incomplete user"},
+	)
+	result, err := fx.builder.Build(context.Background(), contextbuilder.Request{SessionID: created.ID, TokenBudget: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := messageContents(result.Messages); !reflect.DeepEqual(got, []string{"incomplete user"}) {
+		t.Fatalf("messages = %v", got)
+	}
+	if len(result.Metadata.OmittedMessages) != 1 || result.Metadata.OmittedMessages[0].ID != stored[0].ID || result.Metadata.OmittedMessages[0].Reason != contextbuilder.OmittedIncompleteTurn {
+		t.Fatalf("omissions = %+v", result.Metadata.OmittedMessages)
+	}
+}
+
+func TestBuildNeverPartiallyIncludesOversizedTurn(t *testing.T) {
+	fx := newFixture(t)
+	created := fx.createSession(t, "body-one")
+	fx.append(t, created.ID,
+		contextbuilder.NewHistoryMessage{Role: contextbuilder.RoleUser, Content: "1234"},
+		contextbuilder.NewHistoryMessage{Role: contextbuilder.RoleAssistant, Content: "5678"},
+	)
+	result, err := fx.builder.Build(context.Background(), contextbuilder.Request{SessionID: created.ID, TokenBudget: 7})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Messages) != 0 || result.Metadata.IncludedHistoryMessages != 0 || result.Metadata.OmittedHistoryMessages != 2 {
+		t.Fatalf("oversized turn was partially included: %+v", result)
+	}
+
+	exact, err := fx.builder.Build(context.Background(), contextbuilder.Request{SessionID: created.ID, TokenBudget: 8})
+	if err != nil || !reflect.DeepEqual(messageContents(exact.Messages), []string{"1234", "5678"}) {
+		t.Fatalf("exact-boundary turn = %+v, %v", exact, err)
+	}
+}
+
+func messageContents(messages []contextbuilder.Message) []string {
+	result := make([]string, len(messages))
+	for index, message := range messages {
+		result[index] = message.Content
+	}
+	return result
 }
