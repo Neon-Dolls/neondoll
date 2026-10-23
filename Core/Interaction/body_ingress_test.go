@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -14,18 +13,11 @@ import (
 )
 
 type ingressHandler struct {
-	legacyCalls atomic.Int32
-	mu          sync.Mutex
-	sessions    []session.ID
-	owners      []session.Owner
-	entered     chan session.ID
-	release     chan struct{}
-}
-
-func (h *ingressHandler) HandleEvent(_ context.Context, event *events.Event) (*events.Event, error) {
-	h.legacyCalls.Add(1)
-	response := events.NewResponse(event.ID, event.DollID, "legacy")
-	return &response, nil
+	mu       sync.Mutex
+	sessions []session.ID
+	owners   []session.Owner
+	entered  chan session.ID
+	release  chan struct{}
 }
 
 func (h *ingressHandler) HandleInteraction(ctx context.Context, resolved *session.InteractionSession, event *events.Event) (*events.Event, error) {
@@ -51,7 +43,7 @@ func newBodyIngress(t *testing.T, sessions session.Service, handler *ingressHand
 	if err != nil {
 		t.Fatalf("NewRouter: %v", err)
 	}
-	ingress, err := interaction.NewBodyIngress(sessions, router, handler)
+	ingress, err := interaction.NewBodyIngress(sessions, router)
 	if err != nil {
 		t.Fatalf("NewBodyIngress: %v", err)
 	}

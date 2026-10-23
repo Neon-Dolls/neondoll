@@ -143,12 +143,14 @@ type Request struct {
 	SessionID          session.ID
 	TokenBudget        int
 	SystemInstructions []string
+	RequiredMessages   []Message
 }
 
 type SourceRequest struct {
 	Source             ContextSource
 	TokenBudget        int
 	SystemInstructions []string
+	RequiredMessages   []Message
 }
 
 type OmittedMessage struct {

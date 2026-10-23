@@ -291,7 +291,8 @@ func TestIntegrationSparkThroughDollLink(t *testing.T) {
 	// Use a mock provider for deterministic integration testing.
 	mockProvider := inference.NewMockProvider("test", "Hello from Spark. I am here.")
 	svc := interaction.New(store2, mockProvider, log)
-	srv := ws.New(ws.Config{Listen: "127.0.0.1:0"}, log, svc)
+	ingress, wsConfig := newAuthenticatedInteractionIngress(t, store2, svc)
+	srv := ws.New(wsConfig, log, ingress)
 
 	startErr := make(chan error, 1)
 	go func() {

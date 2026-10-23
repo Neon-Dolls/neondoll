@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/http"
 	"net/netip"
 	"path/filepath"
 	"sync"
@@ -120,11 +121,11 @@ func (w *wsLogger) Error(msg string, fields ...map[string]any) {
 	w.inner.Error(msg, slog.Any("fields", fields))
 }
 
-// ── echoHandler implements websocket.Handler ──────────────────────────────────
+// ── echoHandler implements websocket.SelectedSessionHandler ──────────────────
 
 type echoHandler struct{}
 
-func (echoHandler) HandleEvent(_ context.Context, event *events.Event) (*events.Event, error) {
+func (echoHandler) HandleSelectedSessionEvent(_ context.Context, _, _ string, event *events.Event) (*events.Event, error) {
 	payloadText := ""
 	if p, ok := event.Payload.(map[string]any); ok {
 		if t, ok := p["text"].(string); ok {
@@ -419,7 +420,9 @@ func TestM3RealPath(t *testing.T) {
 		t.Fatalf("Core netstack ListenTCP for WS: %v", err)
 	}
 
-	wsSrv := ws.New(ws.Config{}, &wsLogger{inner: log}, echoHandler{})
+	wsSrv := ws.New(ws.Config{AuthenticateExecution: func(*http.Request) (string, error) {
+		return string(bID.Identity.BodyID), nil
+	}}, &wsLogger{inner: log}, echoHandler{})
 	wsSrv.SetListener(wsLn)
 	go func() {
 		if err := wsSrv.Start(ctx); err != nil {

@@ -72,8 +72,8 @@ func TestContinuity_MemorySurvivesStoreReopen(t *testing.T) {
 	}
 
 	svc := interaction.New(store2, mockProvider, log)
-
-	wsSrv := ws.New(ws.Config{Listen: "127.0.0.1:0"}, log, svc)
+	ingress, wsConfig := newAuthenticatedInteractionIngress(t, store2, svc)
+	wsSrv := ws.New(wsConfig, log, ingress)
 
 	startErr := make(chan error, 1)
 	go func() {

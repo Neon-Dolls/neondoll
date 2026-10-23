@@ -45,7 +45,7 @@ type concurrentInteractionHandler struct {
 
 type nilInteractionHandler struct{}
 
-func (nilInteractionHandler) HandleEvent(_ context.Context, event *events.Event) (*events.Event, error) {
+func (nilInteractionHandler) HandleSelectedSessionEvent(_ context.Context, _, _ string, event *events.Event) (*events.Event, error) {
 	response := events.NewResponse(event.ID, event.DollID, "legacy")
 	return &response, nil
 }
@@ -59,7 +59,7 @@ type cancelInteractionHandler struct {
 	canceled chan struct{}
 }
 
-func (h *cancelInteractionHandler) HandleEvent(_ context.Context, event *events.Event) (*events.Event, error) {
+func (h *cancelInteractionHandler) HandleSelectedSessionEvent(_ context.Context, _, _ string, event *events.Event) (*events.Event, error) {
 	response := events.NewResponse(event.ID, event.DollID, "legacy")
 	return &response, nil
 }
@@ -71,7 +71,7 @@ func (h *cancelInteractionHandler) HandleSessionInteraction(ctx context.Context,
 	return nil, ctx.Err()
 }
 
-func (h *concurrentInteractionHandler) HandleEvent(_ context.Context, event *events.Event) (*events.Event, error) {
+func (h *concurrentInteractionHandler) HandleSelectedSessionEvent(_ context.Context, _, _ string, event *events.Event) (*events.Event, error) {
 	response := events.NewResponse(event.ID, event.DollID, "legacy")
 	return &response, nil
 }
@@ -96,11 +96,6 @@ func (pendingBodyAuthenticator) ActivateAuthentication(context.Context, string, 
 }
 
 func (pendingBodyAuthenticator) CancelAuthentication(string) {}
-
-func (h *selectionHandler) HandleEvent(_ context.Context, event *events.Event) (*events.Event, error) {
-	response := events.NewResponse(event.ID, event.DollID, "legacy")
-	return &response, nil
-}
 
 func (h *selectionHandler) HandleSelectedSessionEvent(_ context.Context, _, selected string, event *events.Event) (*events.Event, error) {
 	h.mu.Lock()

@@ -205,6 +205,36 @@ func TestBuildRejectsRequiredSystemContextOverBudget(t *testing.T) {
 	}
 }
 
+func TestBuildReservesRequiredTailAfterRollingHistory(t *testing.T) {
+	fx := newFixture(t)
+	created := fx.createSession(t, "body-one")
+	fx.append(t, created.ID,
+		contextbuilder.NewHistoryMessage{Role: contextbuilder.RoleUser, Content: "old"},
+		contextbuilder.NewHistoryMessage{Role: contextbuilder.RoleAssistant, Content: "new"},
+	)
+	result, err := fx.builder.Build(context.Background(), contextbuilder.Request{
+		SessionID: created.ID, TokenBudget: 10,
+		RequiredMessages: []contextbuilder.Message{{Role: contextbuilder.RoleUser, Content: "current"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []contextbuilder.Message{
+		{Role: contextbuilder.RoleAssistant, Content: "new"},
+		{Role: contextbuilder.RoleUser, Content: "current"},
+	}
+	if !reflect.DeepEqual(result.Messages, want) {
+		t.Fatalf("messages = %+v, want %+v", result.Messages, want)
+	}
+	_, err = fx.builder.Build(context.Background(), contextbuilder.Request{
+		SessionID: created.ID, TokenBudget: 6,
+		RequiredMessages: []contextbuilder.Message{{Role: contextbuilder.RoleUser, Content: "current"}},
+	})
+	if !errors.Is(err, contextbuilder.ErrRequiredContextExceedsBudget) {
+		t.Fatalf("oversized required tail error = %v", err)
+	}
+}
+
 func TestBuildPreservesPersistedSessionSystemMessages(t *testing.T) {
 	fx := newFixture(t)
 	created := fx.createSession(t, "body-one")

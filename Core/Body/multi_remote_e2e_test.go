@@ -25,7 +25,7 @@ var m8BodyIDs = []BodyID{"remote::m8-a", "remote::m8-b", "remote::m8-c"}
 
 type m8EventHandler struct{}
 
-func (m8EventHandler) HandleEvent(_ context.Context, event *events.Event) (*events.Event, error) {
+func (m8EventHandler) HandleSelectedSessionEvent(_ context.Context, _, _ string, event *events.Event) (*events.Event, error) {
 	response := events.NewResponse(event.ID, event.DollID, "ack")
 	return &response, nil
 }

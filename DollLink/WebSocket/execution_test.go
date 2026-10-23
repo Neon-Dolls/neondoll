@@ -130,7 +130,7 @@ const testAuthHeader = "X-Neondoll-Test-Credential"
 
 type echoEventHandler struct{}
 
-func (echoEventHandler) HandleEvent(_ context.Context, event *events.Event) (*events.Event, error) {
+func (echoEventHandler) HandleSelectedSessionEvent(_ context.Context, _, _ string, event *events.Event) (*events.Event, error) {
 	response := events.NewResponse(event.ID, event.DollID, "echo")
 	return &response, nil
 }
@@ -142,7 +142,7 @@ func trustedTestAuthenticator(r *http.Request) (string, error) {
 	return "body-1", nil
 }
 
-func startWSTestServer(t *testing.T, cfg Config, handler Handler) (*Server, string) {
+func startWSTestServer(t *testing.T, cfg Config, handler SelectedSessionHandler) (*Server, string) {
 	t.Helper()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

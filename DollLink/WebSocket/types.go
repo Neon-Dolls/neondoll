@@ -31,19 +31,6 @@ type Logger interface {
 	Error(msg string, fields ...map[string]any)
 }
 
-// Handler processes incoming events and returns response events.
-type Handler interface {
-	HandleEvent(ctx context.Context, event *events.Event) (*events.Event, error)
-}
-
-// AuthenticatedHandler receives events together with the Body identity bound
-// to this connection by the configured authentication boundary. Implementing
-// this interface makes event ingress fail closed when no authenticated BodyID
-// is available; event fields are never used as identity proof.
-type AuthenticatedHandler interface {
-	HandleAuthenticatedEvent(ctx context.Context, bodyID string, event *events.Event) (*events.Event, error)
-}
-
 // SelectedSessionHandler receives the connection-local session selection.
 // An empty sessionID means the canonical implicit doll-link/default session.
 type SelectedSessionHandler interface {
@@ -109,7 +96,7 @@ type Server struct {
 	listen                    string
 	mux                       *http.ServeMux
 	httpSrv                   *http.Server
-	handler                   Handler
+	handler                   SelectedSessionHandler
 	listenerAddr              string
 	authenticateExecution     func(*http.Request) (string, error)
 	bodyAuthenticator         BodyAuthenticator
@@ -184,7 +171,7 @@ type Config struct {
 }
 
 // New creates a WS Server with the given config, logger, and event handler.
-func New(cfg Config, log Logger, handler Handler) *Server {
+func New(cfg Config, log Logger, handler SelectedSessionHandler) *Server {
 	mux := http.NewServeMux()
 	s := &Server{
 		conns:     make(map[string]*clientConn),
@@ -685,30 +672,16 @@ func (s *Server) readLoop(cc *clientConn) {
 			continue
 		}
 
-		// Process through the handler. Session-aware Core handlers receive only
-		// the Body identity already bound to this connection by authentication.
+		// Process only through authenticated, session-aware ingress. There is no
+		// sessionless event fallback: external inference requires a Core Session.
 		if s.handler != nil {
-			var response *events.Event
-			var err error
-			if selected, ok := s.handler.(SelectedSessionHandler); ok {
-				if cc.bodyID == "" {
-					s.log.Warn("ws unauthenticated event rejected", map[string]any{"id": cc.id})
-					errResp := events.NewErrorResponse(event.ID, event.DollID, "authenticated Body required")
-					s.writeJSON(cc, errResp)
-					continue
-				}
-				response, err = selected.HandleSelectedSessionEvent(context.Background(), cc.bodyID, cc.selectedSessionID, &event)
-			} else if authenticated, ok := s.handler.(AuthenticatedHandler); ok {
-				if cc.bodyID == "" {
-					s.log.Warn("ws unauthenticated event rejected", map[string]any{"id": cc.id})
-					errResp := events.NewErrorResponse(event.ID, event.DollID, "authenticated Body required")
-					s.writeJSON(cc, errResp)
-					continue
-				}
-				response, err = authenticated.HandleAuthenticatedEvent(context.Background(), cc.bodyID, &event)
-			} else {
-				response, err = s.handler.HandleEvent(context.Background(), &event)
+			if cc.bodyID == "" {
+				s.log.Warn("ws unauthenticated event rejected", map[string]any{"id": cc.id})
+				errResp := events.NewErrorResponse(event.ID, event.DollID, "authenticated Body required")
+				s.writeJSON(cc, errResp)
+				continue
 			}
+			response, err := s.handler.HandleSelectedSessionEvent(context.Background(), cc.bodyID, cc.selectedSessionID, &event)
 			if err != nil {
 				s.log.Error("ws handler error", map[string]any{"id": cc.id, "error": err.Error()})
 				errResp := events.NewErrorResponse(event.ID, event.DollID, fmt.Sprintf("handler error: %v", err))
