@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/Neon-Dolls/neondoll/Core/Config"
 	"github.com/Neon-Dolls/neondoll/Core/Inference"
 	"github.com/Neon-Dolls/neondoll/DollLink/Events"
 	"github.com/Neon-Dolls/neondoll/DollState"
@@ -163,7 +164,7 @@ func (s *Scheduler) Orient(ctx context.Context, eventType events.Type, input str
 	if err != nil {
 		return nil, fmt.Errorf("orient cognition run: %w", err)
 	}
-	inputBudget, err := s.inputTokenBudget()
+	selected, inputBudget, err := s.modelForTask(config.InferenceTaskOrient)
 	if err != nil {
 		return nil, fmt.Errorf("orient model context budget: %w", err)
 	}
@@ -172,11 +173,11 @@ func (s *Scheduler) Orient(ctx context.Context, eventType events.Type, input str
 		return nil, fmt.Errorf("orient context: %w", err)
 	}
 
-	resp, err := s.provider.Infer(ctx, inference.Request{
-		Model:       s.modelConfiguration.Model,
+	resp, err := selected.provider.Infer(ctx, inference.Request{
+		Model:       selected.configuration.Model,
 		Messages:    messages,
 		Temperature: 0.3,
-		MaxTokens:   s.modelConfiguration.Budget.OutputTokens,
+		MaxTokens:   selected.configuration.Budget.OutputTokens,
 		Purpose:     inference.PurposeOrient,
 	})
 	if err != nil {
