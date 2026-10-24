@@ -4,12 +4,19 @@ import (
 	"context"
 	"testing"
 
+	"github.com/Neon-Dolls/neondoll/Core/Config"
 	"github.com/Neon-Dolls/neondoll/Core/Inference"
 	"github.com/Neon-Dolls/neondoll/DollState"
 	"github.com/Neon-Dolls/neondoll/pkg/logger"
 )
 
 var defaultCognitiveInputBudget, _ = inference.DefaultModelContextBudget().InputTokens()
+
+func testModelConfiguration(name string, budget inference.ModelContextBudget) config.ModelConfiguration {
+	return config.ModelConfiguration{
+		Name: name, Provider: "openai", Model: name, Endpoint: inference.DefaultBaseURL, Budget: budget,
+	}
+}
 
 type mockMindAPI struct {
 	s *dollstate.DollState

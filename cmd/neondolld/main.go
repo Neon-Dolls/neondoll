@@ -73,10 +73,6 @@ func main() {
 		os.Exit(1)
 	}
 	defaultModel := modelResolver.Default()
-	if defaultModel.Provider != "openai" {
-		log.Error("unsupported inference provider", map[string]any{"provider": defaultModel.Provider})
-		os.Exit(1)
-	}
 
 	// Ensure database directory exists.
 	if err := os.MkdirAll(cfg.Paths.DataDir, 0o755); err != nil {
@@ -165,10 +161,11 @@ func main() {
 	defer rt.Stop()
 
 	// Create the inference provider.
-	inferenceProvider := inference.NewOpenAIProvider(
-		inference.WithBaseURL(defaultModel.Endpoint),
-	)
-	modelBudget := defaultModel.Budget
+	inferenceProvider, err := inference.NewProvider(defaultModel.Provider, defaultModel.Endpoint)
+	if err != nil {
+		log.Error("inference provider setup error", map[string]any{"error": err.Error()})
+		os.Exit(1)
+	}
 	log.Info("inference provider created", map[string]any{
 		"provider": defaultModel.Provider,
 		"model":    defaultModel.Name,
@@ -189,7 +186,9 @@ func main() {
 	defer acceptanceControl()
 
 	// Create the Interaction service (Doll Link ↔ Persistence bridge).
-	interactionSvc := interaction.New(store, inferenceProvider, log, interaction.WithModelContextBudget(modelBudget))
+	interactionSvc := interaction.New(store, inferenceProvider, log,
+		interaction.WithModelConfiguration(defaultModel),
+	)
 	interactionRouter, err := coreServices.InteractionRouter(interactionSvc)
 	if err != nil {
 		log.Error("Interaction Session router setup error", map[string]any{"error": err.Error()})
@@ -326,7 +325,9 @@ func main() {
 		mindAPI := &productionMindAPI{state: dollState, store: store, provider: inferenceProvider}
 
 		// Create the Scheduler with the real provider and persist-backed API.
-		scheduler := dollmind.New(inferenceProvider, log, mindAPI, dollmind.WithModelContextBudget(modelBudget))
+		scheduler := dollmind.New(inferenceProvider, log, mindAPI,
+			dollmind.WithModelConfiguration(defaultModel),
+		)
 
 		// Wire the Scheduler as Pulse's MindEntrance.
 		pulseRunner = pulse.NewRunner(cfg.Core.Pulse, pulse.NewRealClock(), pulse.NewProductionRNG(), log, scheduler)

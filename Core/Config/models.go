@@ -31,6 +31,19 @@ type ModelResolver struct {
 	models       map[string]ModelConfiguration
 }
 
+// ValidateModelConfiguration verifies that a resolved model is complete and
+// usable at a runtime inference boundary.
+func ValidateModelConfiguration(model ModelConfiguration) error {
+	if strings.TrimSpace(model.Name) == "" || strings.TrimSpace(model.Provider) == "" ||
+		strings.TrimSpace(model.Model) == "" || strings.TrimSpace(model.Endpoint) == "" {
+		return fmt.Errorf("%w: resolved model requires name, provider, model, and endpoint", ErrInvalidModelConfiguration)
+	}
+	if _, err := model.Budget.InputTokens(); err != nil {
+		return fmt.Errorf("%w: model %q budget: %w", ErrInvalidModelConfiguration, model.Name, err)
+	}
+	return nil
+}
+
 // UnmarshalJSON keeps inference configuration strict without changing the
 // historically permissive decoding of unrelated Core configuration sections.
 func (config *InferenceConfig) UnmarshalJSON(data []byte) error {
@@ -59,14 +72,11 @@ func NewModelResolver(config InferenceConfig) (*ModelResolver, error) {
 		model.Provider = strings.TrimSpace(model.Provider)
 		model.Model = strings.TrimSpace(model.Model)
 		model.Endpoint = strings.TrimSpace(model.Endpoint)
-		if model.Provider == "" || model.Model == "" || model.Endpoint == "" {
-			return nil, fmt.Errorf("%w: model %q requires provider, model, and endpoint", ErrInvalidModelConfiguration, name)
-		}
 		if model.Budget.ContextTokens == 0 {
 			model.Budget.ContextTokens = inference.DefaultContextTokens
 		}
-		if _, err := model.Budget.InputTokens(); err != nil {
-			return nil, fmt.Errorf("%w: model %q budget: %w", ErrInvalidModelConfiguration, name, err)
+		if err := ValidateModelConfiguration(model); err != nil {
+			return nil, err
 		}
 		models[name] = model
 	}
