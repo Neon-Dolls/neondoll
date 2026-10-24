@@ -68,8 +68,11 @@ type PathConfig struct {
 
 // InferenceConfig for the inference provider.
 type InferenceConfig struct {
-	Provider string `json:"provider"`
-	BaseURL  string `json:"base_url"`
+	Provider               string `json:"provider"`
+	BaseURL                string `json:"base_url"`
+	ContextTokens          int    `json:"context_tokens"`
+	MaxOutputTokens        int    `json:"max_output_tokens"`
+	RequiredOverheadTokens int    `json:"required_overhead_tokens"`
 }
 
 // LinkConfig for transport connectivity.
@@ -102,8 +105,11 @@ func Defaults() Config {
 			Prompt:  "> ",
 		},
 		Inference: InferenceConfig{
-			Provider: "openai",
-			BaseURL:  "http://localhost:8080",
+			Provider:               "openai",
+			BaseURL:                "http://localhost:8080",
+			ContextTokens:          32768,
+			MaxOutputTokens:        1024,
+			RequiredOverheadTokens: 256,
 		},
 		Paths: PathConfig{
 			StateDir:   "data/state",

@@ -12,6 +12,12 @@ import (
 	"github.com/Neon-Dolls/neondoll/pkg/logger"
 )
 
+var testModelContextBudget = inference.ModelContextBudget{
+	ContextTokens: 9216, OutputTokens: 768, RequiredOverheadTokens: 256,
+}
+
+const testInputTokenBudget = 8192
+
 func seedDoll(t *testing.T, store persistence.Store, dollID, name string) {
 	t.Helper()
 	state := dollstate.DollState{Version: dollstate.CurrentStateVersion}
@@ -43,7 +49,7 @@ func TestSessionInteractionCreatesDollMemory(t *testing.T) {
 	seedDoll(t, store, "test-doll", "TestDoll")
 	sessions, _ := interactionSessionStores(t, store)
 	created := createInteractionSession(t, sessions, "body-one")
-	service := New(store, inference.NewMockProvider("mock", "Hello from TestDoll!"), logger.New(logger.ErrorLevel, io.Discard))
+	service := New(store, inference.NewMockProvider("mock", "Hello from TestDoll!"), logger.New(logger.ErrorLevel, io.Discard), WithModelContextBudget(testModelContextBudget))
 	event := newResponse("test-doll", "Hello, who are you?")
 
 	response, err := service.HandleInteraction(context.Background(), created, &event)
@@ -68,7 +74,7 @@ func TestSessionInteractionRejectsInvalidPayloadWithoutPersistence(t *testing.T)
 	sessions, history := interactionSessionStores(t, store)
 	created := createInteractionSession(t, sessions, "body-one")
 	provider := &sessionContextProvider{}
-	service := New(store, provider, logger.New(logger.ErrorLevel, io.Discard))
+	service := New(store, provider, logger.New(logger.ErrorLevel, io.Discard), WithModelContextBudget(testModelContextBudget))
 
 	for name, payload := range map[string]any{"empty": events.MessagePayload{Text: "   "}, "unsupported": map[string]string{"text": "hello"}} {
 		t.Run(name, func(t *testing.T) {

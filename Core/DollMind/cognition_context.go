@@ -13,8 +13,9 @@ import (
 )
 
 // CognitiveContextTokenBudget bounds the provider input assembled for an
-// internal cognition invocation. Model-profile-specific budgets remain a
-// later Core 5 concern.
+// internal cognition invocation. Cognition does not yet have production model
+// selection/configuration wiring; M2.11 therefore does not pretend this value
+// was resolved from a selected model.
 const CognitiveContextTokenBudget = 8192
 
 type cognitionRunContextKey struct{}

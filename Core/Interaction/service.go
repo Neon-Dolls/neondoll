@@ -29,6 +29,7 @@ type Service struct {
 	history  contextbuilder.HistoryStore
 	sessions keyedLocks
 	dolls    keyedLocks
+	budget   inference.ModelContextBudget
 }
 
 var _ SessionHandler = (*Service)(nil)
@@ -51,11 +52,20 @@ func (s *Service) HandleInteraction(ctx context.Context, resolved *session.Inter
 
 // New creates an Interaction service with the given persistence store and
 // inference provider.
-func New(store persistence.Store, provider inference.Provider, log *logger.Logger) *Service {
+type Option func(*Service)
+
+func WithModelContextBudget(budget inference.ModelContextBudget) Option {
+	return func(service *Service) { service.budget = budget }
+}
+
+func New(store persistence.Store, provider inference.Provider, log *logger.Logger, opts ...Option) *Service {
 	service := &Service{
 		store:    store,
 		provider: provider,
 		log:      log,
+	}
+	for _, opt := range opts {
+		opt(service)
 	}
 	sessionStore, sessionOK := store.(session.Store)
 	history, historyOK := store.(contextbuilder.HistoryStore)
@@ -65,10 +75,6 @@ func New(store persistence.Store, provider inference.Provider, log *logger.Logge
 	}
 	return service
 }
-
-// InteractionContextTokenBudget bounds every session inference input. A
-// model-profile-specific budget remains a later Core 5 concern.
-const InteractionContextTokenBudget = 8192
 
 func (s *Service) handleInteraction(ctx context.Context, sessionID session.ID, turnID session.TurnID, event *events.Event) (*events.Event, error) {
 	if event == nil {
@@ -98,10 +104,16 @@ func (s *Service) handleInteraction(ctx context.Context, sessionID session.ID, t
 		return nil, fmt.Errorf("interaction turn %s: load doll: %w", turnID, err)
 	}
 
-	inferenceReq := inference.Request{Model: event.DollID, Temperature: 0.7, TurnID: turnID}
+	inputBudget, budgetErr := s.budget.InputTokens()
+	if budgetErr != nil {
+		s.log.Error("interaction model context budget unavailable", diagnostics)
+		errResp := events.NewErrorResponse(event.ID, event.DollID, "interaction context unavailable")
+		return &errResp, nil
+	}
+	inferenceReq := inference.Request{Model: event.DollID, Temperature: 0.7, MaxTokens: s.budget.OutputTokens, TurnID: turnID}
 	built, buildErr := s.builder.Build(ctx, contextbuilder.Request{
 		SessionID:          sessionID,
-		TokenBudget:        InteractionContextTokenBudget,
+		TokenBudget:        inputBudget,
 		SystemInstructions: interactionInstructions(state),
 		RequiredMessages: []contextbuilder.Message{{
 			Role: contextbuilder.RoleUser, Content: currentInput,

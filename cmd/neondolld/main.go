@@ -163,6 +163,14 @@ func main() {
 	inferenceProvider := inference.NewOpenAIProvider(
 		inference.WithBaseURL(cfg.Inference.BaseURL),
 	)
+	modelBudget := inference.ModelContextBudget{
+		ContextTokens: cfg.Inference.ContextTokens, OutputTokens: cfg.Inference.MaxOutputTokens,
+		RequiredOverheadTokens: cfg.Inference.RequiredOverheadTokens,
+	}
+	if _, err := modelBudget.InputTokens(); err != nil {
+		log.Error("invalid inference context budget", map[string]any{"error": err.Error()})
+		os.Exit(1)
+	}
 	log.Info("inference provider created", map[string]any{
 		"provider": cfg.Inference.Provider,
 		"base_url": cfg.Inference.BaseURL,
@@ -182,7 +190,7 @@ func main() {
 	defer acceptanceControl()
 
 	// Create the Interaction service (Doll Link ↔ Persistence bridge).
-	interactionSvc := interaction.New(store, inferenceProvider, log)
+	interactionSvc := interaction.New(store, inferenceProvider, log, interaction.WithModelContextBudget(modelBudget))
 	interactionRouter, err := coreServices.InteractionRouter(interactionSvc)
 	if err != nil {
 		log.Error("Interaction Session router setup error", map[string]any{"error": err.Error()})
