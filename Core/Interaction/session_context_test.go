@@ -1,6 +1,7 @@
 package interaction
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -20,10 +21,11 @@ import (
 )
 
 type sessionContextProvider struct {
-	mu        sync.Mutex
-	responses []string
-	requests  []inference.Request
-	err       error
+	mu             sync.Mutex
+	responses      []string
+	requests       []inference.Request
+	contextTurnIDs []session.TurnID
+	err            error
 }
 
 type blockingSessionProvider struct {
@@ -47,10 +49,12 @@ func (provider *blockingSessionProvider) Infer(ctx context.Context, request infe
 }
 
 func (provider *sessionContextProvider) ID() inference.ProviderID { return "session-context" }
-func (provider *sessionContextProvider) Infer(_ context.Context, request inference.Request) (*inference.Response, error) {
+func (provider *sessionContextProvider) Infer(ctx context.Context, request inference.Request) (*inference.Response, error) {
 	provider.mu.Lock()
 	defer provider.mu.Unlock()
 	provider.requests = append(provider.requests, request)
+	turnID, _ := TurnIDFromContext(ctx)
+	provider.contextTurnIDs = append(provider.contextTurnIDs, turnID)
 	if provider.err != nil {
 		return nil, provider.err
 	}
@@ -97,6 +101,9 @@ func TestSessionInteractionBuildsFreshMultiTurnContext(t *testing.T) {
 	}
 	if stored[0].TurnID == "" || stored[0].TurnID != stored[1].TurnID || stored[2].TurnID == "" || stored[2].TurnID != stored[3].TurnID || stored[0].TurnID == stored[2].TurnID {
 		t.Fatalf("turn IDs do not identify independent atomic pairs: %+v", stored)
+	}
+	if provider.requests[0].TurnID != stored[0].TurnID || provider.requests[1].TurnID != stored[2].TurnID || provider.contextTurnIDs[0] != stored[0].TurnID || provider.contextTurnIDs[1] != stored[2].TurnID {
+		t.Fatalf("turn ID was not stable across context, inference, and history: requests=%+v contexts=%+v history=%+v", provider.requests, provider.contextTurnIDs, stored)
 	}
 }
 
@@ -220,10 +227,22 @@ func TestFailedSessionInferenceDoesNotPersistTurn(t *testing.T) {
 	sessions, history := interactionSessionStores(t, store)
 	created := createInteractionSession(t, sessions, "body-failure")
 	provider := &sessionContextProvider{err: errors.New("inference failed")}
-	service := New(store, provider, logger.New(logger.ErrorLevel, io.Discard))
+	var diagnostics bytes.Buffer
+	service := New(store, provider, logger.New(logger.ErrorLevel, &diagnostics))
 	event := newResponse("failed-session-doll", "do not fabricate")
-	if _, err := service.HandleInteraction(context.Background(), created, &event); err != nil {
+	response, err := service.HandleInteraction(context.Background(), created, &event)
+	if err != nil {
 		t.Fatal(err)
+	}
+	if response.CorrelationID != event.ID {
+		t.Fatalf("failure correlation = %q, want event %q", response.CorrelationID, event.ID)
+	}
+	turnID := provider.requests[0].TurnID
+	if turnID == "" || provider.contextTurnIDs[0] != turnID || string(turnID) == event.ID || string(turnID) == string(created.ID) {
+		t.Fatalf("failure identities are not independent or stable: turn=%q context=%q event=%q session=%q", turnID, provider.contextTurnIDs[0], event.ID, created.ID)
+	}
+	if !strings.Contains(diagnostics.String(), `"turn_id":"`+string(turnID)+`"`) || !strings.Contains(diagnostics.String(), `"event_correlation_id":"`+event.ID+`"`) {
+		t.Fatalf("failure diagnostics lack correlation identities: %s", diagnostics.String())
 	}
 	stored, err := history.ListSessionMessages(context.Background(), created.ID)
 	if err != nil || len(stored) != 0 {
@@ -310,11 +329,21 @@ func TestDifferentSessionInteractionsRemainConcurrent(t *testing.T) {
 			done <- err
 		}()
 	}
+	requests := make([]inference.Request, 0, 2)
 	for range 2 {
 		select {
-		case <-provider.entered:
+		case request := <-provider.entered:
+			requests = append(requests, request)
 		case <-time.After(time.Second):
 			t.Fatal("different sessions did not reach inference concurrently")
+		}
+	}
+	if requests[0].TurnID == "" || requests[1].TurnID == "" || requests[0].TurnID == requests[1].TurnID {
+		t.Fatalf("concurrent sessions shared turn identity: %+v", requests)
+	}
+	for _, request := range requests {
+		if string(request.TurnID) == string(firstSession.ID) || string(request.TurnID) == string(secondSession.ID) {
+			t.Fatalf("turn ID aliases session ID: %+v", request)
 		}
 	}
 	provider.release <- struct{}{}
