@@ -95,6 +95,9 @@ func TestSessionInteractionBuildsFreshMultiTurnContext(t *testing.T) {
 	if len(stored) != 4 || stored[0].Content != "question one" || stored[3].Content != "answer two" {
 		t.Fatalf("stored history = %+v", stored)
 	}
+	if stored[0].TurnID == "" || stored[0].TurnID != stored[1].TurnID || stored[2].TurnID == "" || stored[2].TurnID != stored[3].TurnID || stored[0].TurnID == stored[2].TurnID {
+		t.Fatalf("turn IDs do not identify independent atomic pairs: %+v", stored)
+	}
 }
 
 func TestSessionInteractionLongHistoryUsesBoundedSuffix(t *testing.T) {
@@ -104,8 +107,9 @@ func TestSessionInteractionLongHistoryUsesBoundedSuffix(t *testing.T) {
 	created := createInteractionSession(t, sessions, "body-long")
 	large := strings.Repeat("history ", 900)
 	for index := 0; index < 8; index++ {
+		turnID := session.NewTurnID()
 		_, err := history.AppendSessionMessages(context.Background(), created.ID, []contextbuilder.NewHistoryMessage{{
-			Role: contextbuilder.RoleUser, Content: large + string(rune('A'+index)),
+			TurnID: turnID, Role: contextbuilder.RoleUser, Content: large + string(rune('A'+index)),
 		}})
 		if err != nil {
 			t.Fatal(err)
@@ -155,8 +159,8 @@ func TestSessionInteractionIsolatesSessionHistories(t *testing.T) {
 	sessions, history := interactionSessionStores(t, store)
 	first := createInteractionSession(t, sessions, "body-isolated")
 	second := createInteractionSession(t, sessions, "body-isolated")
-	_, _ = history.AppendSessionMessages(context.Background(), first.ID, []contextbuilder.NewHistoryMessage{{Role: contextbuilder.RoleUser, Content: "first secret"}})
-	_, _ = history.AppendSessionMessages(context.Background(), second.ID, []contextbuilder.NewHistoryMessage{{Role: contextbuilder.RoleUser, Content: "second secret"}})
+	_, _ = history.AppendSessionMessages(context.Background(), first.ID, []contextbuilder.NewHistoryMessage{{TurnID: session.NewTurnID(), Role: contextbuilder.RoleUser, Content: "first secret"}})
+	_, _ = history.AppendSessionMessages(context.Background(), second.ID, []contextbuilder.NewHistoryMessage{{TurnID: session.NewTurnID(), Role: contextbuilder.RoleUser, Content: "second secret"}})
 	provider := &sessionContextProvider{}
 	service := New(store, provider, logger.New(logger.ErrorLevel, io.Discard))
 	event := newResponse("isolated-doll", "continue first")

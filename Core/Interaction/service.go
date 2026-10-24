@@ -84,6 +84,7 @@ func (s *Service) handleInteraction(ctx context.Context, sessionID session.ID, e
 		errResp := events.NewErrorResponse(event.ID, event.DollID, "valid message payload required")
 		return &errResp, nil
 	}
+	turnID := session.NewTurnID()
 
 	state, err := s.store.LoadDoll(ctx, event.DollID)
 	if err != nil {
@@ -126,8 +127,8 @@ func (s *Service) handleInteraction(ctx context.Context, sessionID session.ID, e
 	}
 
 	if _, err := s.history.AppendSessionMessages(ctx, sessionID, []contextbuilder.NewHistoryMessage{
-		{Role: contextbuilder.RoleUser, Content: currentInput},
-		{Role: contextbuilder.RoleAssistant, Content: result.Content},
+		{TurnID: turnID, Role: contextbuilder.RoleUser, Content: currentInput},
+		{TurnID: turnID, Role: contextbuilder.RoleAssistant, Content: result.Content},
 	}); err != nil {
 		s.log.Error("failed to persist interaction session history", map[string]any{"session_id": sessionID, "error": err.Error()})
 		errResp := events.NewErrorResponse(event.ID, event.DollID, "failed to persist interaction")

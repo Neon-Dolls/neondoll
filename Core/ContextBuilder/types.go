@@ -87,15 +87,17 @@ type Message struct {
 // HistoryMessage is one durable conversation record owned by an Interaction
 // Session. Sequence, rather than timestamps or row order, defines ordering.
 type HistoryMessage struct {
-	ID        string     `json:"message_id"`
-	SessionID session.ID `json:"session_id"`
-	Sequence  int        `json:"sequence"`
-	Role      Role       `json:"role"`
-	Content   string     `json:"content"`
-	CreatedAt time.Time  `json:"created_at"`
+	ID        string         `json:"message_id"`
+	SessionID session.ID     `json:"session_id"`
+	TurnID    session.TurnID `json:"turn_id,omitempty"`
+	Sequence  int            `json:"sequence"`
+	Role      Role           `json:"role"`
+	Content   string         `json:"content"`
+	CreatedAt time.Time      `json:"created_at"`
 }
 
 type NewHistoryMessage struct {
+	TurnID  session.TurnID
 	Role    Role
 	Content string
 }

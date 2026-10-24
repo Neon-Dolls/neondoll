@@ -27,6 +27,9 @@ var _ Service = (*Manager)(nil)
 
 func New(store Store) *Manager { return NewWithClock(store, realClock{}) }
 
+// NewTurnID creates the identity for one external interaction turn.
+func NewTurnID() TurnID { return TurnID(uuid.NewString()) }
+
 func NewWithClock(store Store, clock Clock) *Manager {
 	return &Manager{store: store, clock: clock}
 }

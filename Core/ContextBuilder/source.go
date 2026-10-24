@@ -101,15 +101,32 @@ type turnSelection struct {
 // interactionTurnGroups derives disposable window metadata from ordered
 // history. Persistence remains message-oriented: a user immediately followed
 // by an assistant is one atomic turn, an incomplete user remains selectable,
-// and an assistant without its initiating user is never model-visible.
+// and assistant/tool records without an initiating user are never model-visible.
 func interactionTurnGroups(history []HistoryMessage) []turnSelection {
 	result := make([]turnSelection, len(history))
+	seenUser := make(map[session.TurnID]bool)
+	for index, message := range history {
+		if message.TurnID == "" {
+			continue
+		}
+		result[index].group = "turn:" + string(message.TurnID)
+		if message.Role == RoleUser {
+			seenUser[message.TurnID] = true
+			continue
+		}
+		if (message.Role == RoleAssistant || message.Role == RoleTool) && !seenUser[message.TurnID] {
+			result[index].omitReason = OmittedIncompleteTurn
+		}
+	}
 	for index := 0; index < len(history); index++ {
 		message := history[index]
+		if message.TurnID != "" {
+			continue
+		}
 		switch message.Role {
 		case RoleUser:
 			group := "message:" + message.ID
-			if index+1 < len(history) && history[index+1].Role == RoleAssistant {
+			if index+1 < len(history) && history[index+1].TurnID == "" && history[index+1].Role == RoleAssistant {
 				group = "turn:" + message.ID
 				result[index+1].group = group
 			}

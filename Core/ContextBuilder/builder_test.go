@@ -60,6 +60,20 @@ func (fx *fixture) createSession(t *testing.T, owner string) *session.Interactio
 
 func (fx *fixture) append(t *testing.T, id session.ID, messages ...contextbuilder.NewHistoryMessage) []contextbuilder.HistoryMessage {
 	t.Helper()
+	var turnID session.TurnID
+	for index := range messages {
+		if messages[index].TurnID != "" {
+			turnID = messages[index].TurnID
+			continue
+		}
+		if messages[index].Role == contextbuilder.RoleUser || turnID == "" {
+			turnID = session.NewTurnID()
+		}
+		messages[index].TurnID = turnID
+		if messages[index].Role == contextbuilder.RoleAssistant {
+			turnID = ""
+		}
+	}
 	created, err := fx.history.AppendSessionMessages(context.Background(), id, messages)
 	if err != nil {
 		t.Fatal(err)
@@ -122,7 +136,7 @@ func TestBuildSelectsCompleteConversationTurns(t *testing.T) {
 func TestBuildWindowAdvancesAndRespondsToBudgetChanges(t *testing.T) {
 	fx := newFixture(t)
 	created := fx.createSession(t, "body-one")
-	fx.append(t, created.ID,
+	stored := fx.append(t, created.ID,
 		contextbuilder.NewHistoryMessage{Role: contextbuilder.RoleUser, Content: "one"},
 		contextbuilder.NewHistoryMessage{Role: contextbuilder.RoleAssistant, Content: "two"},
 		contextbuilder.NewHistoryMessage{Role: contextbuilder.RoleUser, Content: "six"},
@@ -141,7 +155,7 @@ func TestBuildWindowAdvancesAndRespondsToBudgetChanges(t *testing.T) {
 	if got := messageContents(initial.Messages); !reflect.DeepEqual(got, []string{"six"}) {
 		t.Fatalf("initial window = %v", got)
 	}
-	fx.append(t, created.ID, contextbuilder.NewHistoryMessage{Role: contextbuilder.RoleAssistant, Content: "ten"})
+	fx.append(t, created.ID, contextbuilder.NewHistoryMessage{TurnID: stored[2].TurnID, Role: contextbuilder.RoleAssistant, Content: "ten"})
 	advanced := build(6)
 	if got := []string{advanced.Messages[0].Content, advanced.Messages[1].Content}; !reflect.DeepEqual(got, []string{"six", "ten"}) {
 		t.Fatalf("advanced window = %v", got)
@@ -287,8 +301,8 @@ func TestBuildReconstructsPersistedHistoryAfterRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := history.AppendSessionMessages(ctx, created.ID, []contextbuilder.NewHistoryMessage{
-		{Role: contextbuilder.RoleUser, Content: "old"},
-		{Role: contextbuilder.RoleAssistant, Content: "new"},
+		{TurnID: session.TurnID("restart-turn"), Role: contextbuilder.RoleUser, Content: "old"},
+		{TurnID: session.TurnID("restart-turn"), Role: contextbuilder.RoleAssistant, Content: "new"},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -348,6 +362,52 @@ func TestBuildNeverPartiallyIncludesOversizedTurn(t *testing.T) {
 	exact, err := fx.builder.Build(context.Background(), contextbuilder.Request{SessionID: created.ID, TokenBudget: 8})
 	if err != nil || !reflect.DeepEqual(messageContents(exact.Messages), []string{"1234", "5678"}) {
 		t.Fatalf("exact-boundary turn = %+v, %v", exact, err)
+	}
+}
+
+func TestBuildOmitsOrphanToolRecord(t *testing.T) {
+	fx := newFixture(t)
+	created := fx.createSession(t, "body-one")
+	stored := fx.append(t, created.ID, contextbuilder.NewHistoryMessage{
+		TurnID: session.TurnID("orphan-tool-turn"), Role: contextbuilder.RoleTool, Content: "unbound result",
+	})
+	result, err := fx.builder.Build(context.Background(), contextbuilder.Request{SessionID: created.ID, TokenBudget: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Messages) != 0 || len(result.Metadata.OmittedMessages) != 1 || result.Metadata.OmittedMessages[0].ID != stored[0].ID || result.Metadata.OmittedMessages[0].Reason != contextbuilder.OmittedIncompleteTurn {
+		t.Fatalf("orphan tool result = %+v", result)
+	}
+}
+
+func TestBuildSelectsCompleteMultiRecordTurns(t *testing.T) {
+	fx := newFixture(t)
+	created := fx.createSession(t, "body-one")
+	fx.append(t, created.ID,
+		contextbuilder.NewHistoryMessage{TurnID: session.TurnID("old-turn"), Role: contextbuilder.RoleUser, Content: "aa"},
+		contextbuilder.NewHistoryMessage{TurnID: session.TurnID("old-turn"), Role: contextbuilder.RoleTool, Content: "bb"},
+		contextbuilder.NewHistoryMessage{TurnID: session.TurnID("old-turn"), Role: contextbuilder.RoleAssistant, Content: "cc"},
+		contextbuilder.NewHistoryMessage{TurnID: session.TurnID("new-turn"), Role: contextbuilder.RoleUser, Content: "dd"},
+		contextbuilder.NewHistoryMessage{TurnID: session.TurnID("new-turn"), Role: contextbuilder.RoleAssistant, Content: "ee"},
+	)
+
+	bounded, err := fx.builder.Build(context.Background(), contextbuilder.Request{SessionID: created.ID, TokenBudget: 7})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := messageContents(bounded.Messages); !reflect.DeepEqual(got, []string{"dd", "ee"}) {
+		t.Fatalf("bounded multi-record turns = %v", got)
+	}
+	if bounded.Metadata.IncludedHistoryMessages != 2 || bounded.Metadata.OmittedHistoryMessages != 3 {
+		t.Fatalf("bounded metadata = %+v", bounded.Metadata)
+	}
+
+	expanded, err := fx.builder.Build(context.Background(), contextbuilder.Request{SessionID: created.ID, TokenBudget: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := messageContents(expanded.Messages); !reflect.DeepEqual(got, []string{"aa", "bb", "cc", "dd", "ee"}) {
+		t.Fatalf("expanded multi-record turns = %v", got)
 	}
 }
 
