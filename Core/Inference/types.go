@@ -3,6 +3,8 @@ package inference
 import (
 	"context"
 	"errors"
+
+	"github.com/Neon-Dolls/neondoll/Core/Session"
 )
 
 // ProviderID identifies an inference provider.
@@ -109,6 +111,11 @@ type Request struct {
 	Temperature float64
 	MaxTokens   int
 	Purpose     Purpose
+
+	// TurnID identifies the Core-owned external interaction whose inference
+	// lifecycle contains this call. It is internal provider-neutral metadata;
+	// Cognitive Run and legacy callers leave it empty.
+	TurnID session.TurnID
 
 	// Tools is an optional list of Tool definitions. When nil or empty,
 	// the provider operates in no-tool mode (existing behavior preserved).

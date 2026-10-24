@@ -158,6 +158,16 @@ correlation, and provider response identity. `HistoryStore` rejects new records
 without a Turn ID. History remains separate from temporary model context and
 portable Doll Memory.
 
+M2.10 moves Turn creation to the admission boundary in `HandleInteraction`.
+The generated value is passed explicitly through interaction processing, on
+every provider-neutral `inference.Request`, in structured success/failure
+diagnostics, and finally into durable history. Future multi-step inference must
+reuse that explicit Turn ID rather than creating another identity. It is not
+stored in `context.Context`. Session ID, Doll Link event correlation ID,
+provider response/tool IDs, legacy Doll Memory interaction IDs, and ephemeral
+Cognitive Run IDs remain distinct namespaces. No durable turn registry or
+provider wire field is introduced.
+
 The sliding policy always preserves explicitly required records (including
 supplied instructions, persisted Interaction Session system messages, and
 required tail messages such as the current input), then includes the largest

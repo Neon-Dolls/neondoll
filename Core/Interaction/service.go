@@ -40,12 +40,13 @@ func (s *Service) HandleInteraction(ctx context.Context, resolved *session.Inter
 	if resolved == nil || resolved.ID == "" || s.builder == nil || s.history == nil {
 		return nil, fmt.Errorf("interaction session context unavailable")
 	}
+	turnID := session.NewTurnID()
 	release, err := s.sessions.acquire(ctx, string(resolved.ID))
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("interaction turn %s: acquire session execution: %w", turnID, err)
 	}
 	defer release()
-	return s.handleInteraction(ctx, resolved.ID, event)
+	return s.handleInteraction(ctx, resolved.ID, turnID, event)
 }
 
 // New creates an Interaction service with the given persistence store and
@@ -69,34 +70,35 @@ func New(store persistence.Store, provider inference.Provider, log *logger.Logge
 // model-profile-specific budget remains a later Core 5 concern.
 const InteractionContextTokenBudget = 8192
 
-func (s *Service) handleInteraction(ctx context.Context, sessionID session.ID, event *events.Event) (*events.Event, error) {
+func (s *Service) handleInteraction(ctx context.Context, sessionID session.ID, turnID session.TurnID, event *events.Event) (*events.Event, error) {
 	if event == nil {
-		return nil, fmt.Errorf("nil event")
+		return nil, fmt.Errorf("interaction turn %s: nil event", turnID)
 	}
+	diagnostics := map[string]any{"session_id": sessionID, "turn_id": turnID, "event_correlation_id": event.ID}
 
 	if event.DollID == "" {
+		s.log.Warn("interaction rejected", diagnostics)
 		errResp := events.NewErrorResponse(event.ID, "", "doll_id is required")
 		return &errResp, nil
 	}
 
 	currentInput, ok := interactionMessageText(event.Payload)
 	if !ok {
+		s.log.Warn("interaction payload rejected", diagnostics)
 		errResp := events.NewErrorResponse(event.ID, event.DollID, "valid message payload required")
 		return &errResp, nil
 	}
-	turnID := session.NewTurnID()
-
 	state, err := s.store.LoadDoll(ctx, event.DollID)
 	if err != nil {
 		if err == persistence.ErrDollNotFound {
-			s.log.Info("doll not found", map[string]any{"doll_id": event.DollID})
+			s.log.Info("doll not found", diagnostics, map[string]any{"doll_id": event.DollID})
 			errResp := events.NewErrorResponse(event.ID, event.DollID, "doll not found")
 			return &errResp, nil
 		}
-		return nil, fmt.Errorf("load doll: %w", err)
+		return nil, fmt.Errorf("interaction turn %s: load doll: %w", turnID, err)
 	}
 
-	inferenceReq := inference.Request{Model: event.DollID, Temperature: 0.7}
+	inferenceReq := inference.Request{Model: event.DollID, Temperature: 0.7, TurnID: turnID}
 	built, buildErr := s.builder.Build(ctx, contextbuilder.Request{
 		SessionID:          sessionID,
 		TokenBudget:        InteractionContextTokenBudget,
@@ -106,7 +108,7 @@ func (s *Service) handleInteraction(ctx context.Context, sessionID session.ID, e
 		}},
 	})
 	if buildErr != nil {
-		s.log.Error("interaction context construction failed", map[string]any{"session_id": sessionID, "error": buildErr.Error()})
+		s.log.Error("interaction context construction failed", diagnostics, map[string]any{"error": buildErr.Error()})
 		errResp := events.NewErrorResponse(event.ID, event.DollID, "interaction context unavailable")
 		return &errResp, nil
 	}
@@ -117,7 +119,7 @@ func (s *Service) handleInteraction(ctx context.Context, sessionID session.ID, e
 
 	result, err := s.provider.Infer(ctx, inferenceReq)
 	if err != nil {
-		s.log.Error("inference failed", map[string]any{
+		s.log.Error("inference failed", diagnostics, map[string]any{
 			"doll_id": event.DollID,
 			"event":   event.ID,
 			"error":   err.Error(),
@@ -130,7 +132,7 @@ func (s *Service) handleInteraction(ctx context.Context, sessionID session.ID, e
 		{TurnID: turnID, Role: contextbuilder.RoleUser, Content: currentInput},
 		{TurnID: turnID, Role: contextbuilder.RoleAssistant, Content: result.Content},
 	}); err != nil {
-		s.log.Error("failed to persist interaction session history", map[string]any{"session_id": sessionID, "error": err.Error()})
+		s.log.Error("failed to persist interaction session history", diagnostics, map[string]any{"error": err.Error()})
 		errResp := events.NewErrorResponse(event.ID, event.DollID, "failed to persist interaction")
 		return &errResp, nil
 	}
@@ -143,7 +145,7 @@ func (s *Service) handleInteraction(ctx context.Context, sessionID session.ID, e
 	defer releaseDoll()
 	state, err = s.store.LoadDoll(ctx, event.DollID)
 	if err != nil {
-		return nil, fmt.Errorf("reload doll for interaction memory: %w", err)
+		return nil, fmt.Errorf("interaction turn %s: reload doll for interaction memory: %w", turnID, err)
 	}
 	interactionID := uuid.New().String()
 	nextSeq := nextSequence(state.Memories.Items)
@@ -169,7 +171,7 @@ func (s *Service) handleInteraction(ctx context.Context, sessionID session.ID, e
 	state.Memories.Items = append(state.Memories.Items, humanMemory, dollMemory)
 
 	if err := s.store.SaveDoll(ctx, state); err != nil {
-		s.log.Error("failed to persist interaction memory", map[string]any{
+		s.log.Error("failed to persist interaction memory", diagnostics, map[string]any{
 			"doll_id": event.DollID,
 			"event":   event.ID,
 			"error":   err.Error(),
@@ -178,7 +180,7 @@ func (s *Service) handleInteraction(ctx context.Context, sessionID session.ID, e
 		return &errResp, nil
 	}
 
-	s.log.Info("interaction served and persisted", map[string]any{
+	s.log.Info("interaction served and persisted", diagnostics, map[string]any{
 		"doll_id":        event.DollID,
 		"provider":       result.ProviderID,
 		"tokens_used":    result.TokensUsed,
