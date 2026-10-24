@@ -166,7 +166,8 @@ Interaction Session, its resolver groups all records with the same explicit
 Turn ID as one disposable selection unit, so future multi-assistant or tool
 records can remain coherent without changing window policy. A standalone user
 turn remains selectable. An assistant encountered before its turn's initiating
-user is omitted as an `incomplete_turn`.
+user is omitted as an `incomplete_turn`; the same rule applies to tool records,
+so an unbound tool call or result cannot enter model context.
 
 Databases created before M2.9 are migrated with an empty Turn ID on existing
 rows. Only those legacy rows use the isolated M2.8 adjacency fallback: an

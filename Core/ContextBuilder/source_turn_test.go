@@ -15,6 +15,8 @@ func TestInteractionTurnGroupsPreferExplicitIDsAndIsolateLegacyFallback(t *testi
 		{ID: "explicit-tool", TurnID: session.TurnID("turn-one"), Role: RoleTool},
 		{ID: "explicit-assistant", TurnID: session.TurnID("turn-one"), Role: RoleAssistant},
 		{ID: "explicit-orphan", TurnID: session.TurnID("turn-two"), Role: RoleAssistant},
+		{ID: "explicit-orphan-tool", TurnID: session.TurnID("turn-three"), Role: RoleTool},
+		{ID: "legacy-tool", Role: RoleTool},
 		{ID: "legacy-incomplete", Role: RoleUser},
 	}
 	groups := interactionTurnGroups(history)
@@ -30,7 +32,13 @@ func TestInteractionTurnGroupsPreferExplicitIDsAndIsolateLegacyFallback(t *testi
 	if groups[6].omitReason != OmittedIncompleteTurn {
 		t.Fatalf("explicit orphan assistant was selectable: %+v", groups[6])
 	}
-	if groups[7].group == "" || groups[7].omitReason != "" {
-		t.Fatalf("incomplete legacy user handling changed: %+v", groups[7])
+	if groups[7].omitReason != OmittedIncompleteTurn {
+		t.Fatalf("explicit orphan tool was selectable: %+v", groups[7])
+	}
+	if groups[8].group != "" || groups[8].omitReason != "" {
+		t.Fatalf("legacy tool fallback behavior changed: %+v", groups[8])
+	}
+	if groups[9].group == "" || groups[9].omitReason != "" {
+		t.Fatalf("incomplete legacy user handling changed: %+v", groups[9])
 	}
 }
