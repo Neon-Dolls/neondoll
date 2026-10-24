@@ -166,7 +166,6 @@ func main() {
 		log.Error("inference provider setup error", map[string]any{"error": err.Error()})
 		os.Exit(1)
 	}
-	modelBudget := defaultModel.Budget
 	log.Info("inference provider created", map[string]any{
 		"provider": defaultModel.Provider,
 		"model":    defaultModel.Name,
@@ -188,8 +187,7 @@ func main() {
 
 	// Create the Interaction service (Doll Link ↔ Persistence bridge).
 	interactionSvc := interaction.New(store, inferenceProvider, log,
-		interaction.WithModelIdentifier(defaultModel.Model),
-		interaction.WithModelContextBudget(modelBudget),
+		interaction.WithModelConfiguration(defaultModel),
 	)
 	interactionRouter, err := coreServices.InteractionRouter(interactionSvc)
 	if err != nil {
@@ -328,8 +326,7 @@ func main() {
 
 		// Create the Scheduler with the real provider and persist-backed API.
 		scheduler := dollmind.New(inferenceProvider, log, mindAPI,
-			dollmind.WithModelIdentifier(defaultModel.Model),
-			dollmind.WithModelContextBudget(modelBudget),
+			dollmind.WithModelConfiguration(defaultModel),
 		)
 
 		// Wire the Scheduler as Pulse's MindEntrance.

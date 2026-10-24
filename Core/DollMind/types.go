@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/Neon-Dolls/neondoll/Core/Config"
 	contextbuilder "github.com/Neon-Dolls/neondoll/Core/ContextBuilder"
 	"github.com/Neon-Dolls/neondoll/Core/Inference"
 	"github.com/Neon-Dolls/neondoll/Core/Pulse"
@@ -104,23 +105,25 @@ func WithDispatcher(d Dispatcher) Option {
 
 // Scheduler manages cognition cycles.
 type Scheduler struct {
-	provider      inference.Provider
-	log           *logger.Logger
-	mindAPI       MindAPI
-	dispatcher    Dispatcher
-	timeProvider  func() time.Time
-	toolExecutor  *ToolExecutor
-	contextBudget inference.ModelContextBudget
-	model         string
+	provider           inference.Provider
+	log                *logger.Logger
+	mindAPI            MindAPI
+	dispatcher         Dispatcher
+	timeProvider       func() time.Time
+	toolExecutor       *ToolExecutor
+	modelConfiguration config.ModelConfiguration
 }
 
 func New(provider inference.Provider, log *logger.Logger, mindAPI MindAPI, opts ...Option) *Scheduler {
 	s := &Scheduler{
-		provider:      provider,
-		log:           log,
-		mindAPI:       mindAPI,
-		timeProvider:  time.Now,
-		contextBudget: inference.DefaultModelContextBudget(),
+		provider:     provider,
+		log:          log,
+		mindAPI:      mindAPI,
+		timeProvider: time.Now,
+		modelConfiguration: config.ModelConfiguration{
+			Name: "default", Provider: "openai", Model: "default", Endpoint: inference.DefaultBaseURL,
+			Budget: inference.DefaultModelContextBudget(),
+		},
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -148,19 +151,16 @@ func WithToolExecutor(executor *ToolExecutor) Option {
 	return func(s *Scheduler) { s.toolExecutor = executor }
 }
 
-// WithModelContextBudget overrides Core's configured context consumption for
-// all inference performed by this Scheduler.
-func WithModelContextBudget(budget inference.ModelContextBudget) Option {
-	return func(s *Scheduler) { s.contextBudget = budget }
-}
-
-// WithModelIdentifier sets the provider model selected by Core configuration.
-func WithModelIdentifier(model string) Option {
-	return func(s *Scheduler) { s.model = model }
+// WithModelConfiguration sets the complete model selected by Core.
+func WithModelConfiguration(model config.ModelConfiguration) Option {
+	return func(s *Scheduler) { s.modelConfiguration = model }
 }
 
 func (s *Scheduler) inputTokenBudget() (int, error) {
-	return s.contextBudget.InputTokens()
+	if err := config.ValidateModelConfiguration(s.modelConfiguration); err != nil {
+		return 0, err
+	}
+	return s.modelConfiguration.Budget.InputTokens()
 }
 
 // Enter is the cognition entry boundary.
@@ -333,10 +333,10 @@ func (s *Scheduler) Run(ctx context.Context, level Level, input string) (*Result
 		map[string]any{"level": level.String(), "input_len": len(input), "run_id": run.id})
 
 	resp, err := s.provider.Infer(ctx, inference.Request{
-		Model:     s.model,
+		Model:     s.modelConfiguration.Model,
 		Messages:  messages,
 		Purpose:   inference.PurposeRespond,
-		MaxTokens: s.contextBudget.OutputTokens,
+		MaxTokens: s.modelConfiguration.Budget.OutputTokens,
 	})
 	if err != nil {
 		return nil, err

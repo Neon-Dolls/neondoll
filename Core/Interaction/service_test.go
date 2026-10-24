@@ -5,6 +5,7 @@ import (
 	"io"
 	"testing"
 
+	"github.com/Neon-Dolls/neondoll/Core/Config"
 	"github.com/Neon-Dolls/neondoll/Core/Inference"
 	"github.com/Neon-Dolls/neondoll/Core/Persistence"
 	"github.com/Neon-Dolls/neondoll/DollLink/Events"
@@ -12,8 +13,9 @@ import (
 	"github.com/Neon-Dolls/neondoll/pkg/logger"
 )
 
-var testModelContextBudget = inference.ModelContextBudget{
-	ContextTokens: 9216, OutputTokens: 768, RequiredOverheadTokens: 256,
+var testModelConfiguration = config.ModelConfiguration{
+	Name: "test", Provider: "openai", Model: "test-model", Endpoint: inference.DefaultBaseURL,
+	Budget: inference.ModelContextBudget{ContextTokens: 9216, OutputTokens: 768, RequiredOverheadTokens: 256},
 }
 
 const testInputTokenBudget = 8192
@@ -49,7 +51,7 @@ func TestSessionInteractionCreatesDollMemory(t *testing.T) {
 	seedDoll(t, store, "test-doll", "TestDoll")
 	sessions, _ := interactionSessionStores(t, store)
 	created := createInteractionSession(t, sessions, "body-one")
-	service := New(store, inference.NewMockProvider("mock", "Hello from TestDoll!"), logger.New(logger.ErrorLevel, io.Discard), WithModelContextBudget(testModelContextBudget))
+	service := New(store, inference.NewMockProvider("mock", "Hello from TestDoll!"), logger.New(logger.ErrorLevel, io.Discard), WithModelConfiguration(testModelConfiguration))
 	event := newResponse("test-doll", "Hello, who are you?")
 
 	response, err := service.HandleInteraction(context.Background(), created, &event)
@@ -74,7 +76,7 @@ func TestSessionInteractionRejectsInvalidPayloadWithoutPersistence(t *testing.T)
 	sessions, history := interactionSessionStores(t, store)
 	created := createInteractionSession(t, sessions, "body-one")
 	provider := &sessionContextProvider{}
-	service := New(store, provider, logger.New(logger.ErrorLevel, io.Discard), WithModelContextBudget(testModelContextBudget))
+	service := New(store, provider, logger.New(logger.ErrorLevel, io.Discard), WithModelConfiguration(testModelConfiguration))
 
 	for name, payload := range map[string]any{"empty": events.MessagePayload{Text: "   "}, "unsupported": map[string]string{"text": "hello"}} {
 		t.Run(name, func(t *testing.T) {

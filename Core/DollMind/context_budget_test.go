@@ -25,7 +25,7 @@ func TestCognitionUsesConfiguredContextAndOutputBudgets(t *testing.T) {
 	}
 	budget := inference.ModelContextBudget{ContextTokens: 1024, OutputTokens: 128, RequiredOverheadTokens: 64}
 	scheduler := New(provider, logger.New(logger.ErrorLevel, io.Discard), &orientMockAPI{state: state},
-		WithModelIdentifier("configured-cognition-model"), WithModelContextBudget(budget))
+		WithModelConfiguration(testModelConfiguration("configured-cognition-model", budget)))
 
 	if _, err := scheduler.Enter(context.Background(), events.TypeMessage, "please think"); err != nil {
 		t.Fatal(err)
@@ -51,7 +51,7 @@ func TestDirectCognitionUsesConfiguredOutputReserve(t *testing.T) {
 	provider := &universalContextProvider{responses: []string{"response"}}
 	budget := inference.ModelContextBudget{ContextTokens: 2048, OutputTokens: 300, RequiredOverheadTokens: 100}
 	scheduler := New(provider, logger.New(logger.ErrorLevel, io.Discard), &orientMockAPI{state: &dollstate.DollState{}},
-		WithModelIdentifier("configured-direct-model"), WithModelContextBudget(budget))
+		WithModelConfiguration(testModelConfiguration("configured-direct-model", budget)))
 
 	if _, err := scheduler.Run(context.Background(), LevelPlan, "direct input"); err != nil {
 		t.Fatal(err)
@@ -64,9 +64,10 @@ func TestDirectCognitionUsesConfiguredOutputReserve(t *testing.T) {
 
 func TestCognitionRejectsInvalidConfiguredBudget(t *testing.T) {
 	provider := &universalContextProvider{responses: []string{"unused"}}
-	scheduler := New(provider, logger.New(logger.ErrorLevel, io.Discard), &orientMockAPI{state: &dollstate.DollState{}}, WithModelContextBudget(inference.ModelContextBudget{
-		ContextTokens: 512, OutputTokens: 512,
-	}))
+	scheduler := New(provider, logger.New(logger.ErrorLevel, io.Discard), &orientMockAPI{state: &dollstate.DollState{}},
+		WithModelConfiguration(testModelConfiguration("invalid-model", inference.ModelContextBudget{
+			ContextTokens: 512, OutputTokens: 512,
+		})))
 
 	_, err := scheduler.Run(context.Background(), LevelPlan, "input")
 	if !errors.Is(err, inference.ErrInvalidContextBudget) {
@@ -85,7 +86,7 @@ func TestToolLoopUsesConfiguredBudgetEveryIteration(t *testing.T) {
 	}}
 	budget := inference.ModelContextBudget{ContextTokens: 1536, OutputTokens: 256, RequiredOverheadTokens: 128}
 	scheduler := newPulseToolScheduler(provider, nil,
-		WithModelIdentifier("configured-tool-model"), WithModelContextBudget(budget))
+		WithModelConfiguration(testModelConfiguration("configured-tool-model", budget)))
 
 	if err := scheduler.EnterPulseWake(context.Background(), pulse.PulseWake{Pressure: 0.8, EffectivePressure: 0.7}); err != nil {
 		t.Fatal(err)

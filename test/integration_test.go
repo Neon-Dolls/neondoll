@@ -290,7 +290,10 @@ func TestIntegrationSparkThroughDollLink(t *testing.T) {
 
 	// Use a mock provider for deterministic integration testing.
 	mockProvider := inference.NewMockProvider("test", "Hello from Spark. I am here.")
-	svc := interaction.New(store2, mockProvider, log, interaction.WithModelContextBudget(inference.ModelContextBudget{ContextTokens: 9216, OutputTokens: 768, RequiredOverheadTokens: 256}))
+	svc := interaction.New(store2, mockProvider, log, interaction.WithModelConfiguration(config.ModelConfiguration{
+		Name: "test", Provider: "openai", Model: "test-model", Endpoint: inference.DefaultBaseURL,
+		Budget: inference.ModelContextBudget{ContextTokens: 9216, OutputTokens: 768, RequiredOverheadTokens: 256},
+	}))
 	ingress, wsConfig := newAuthenticatedInteractionIngress(t, store2, svc)
 	srv := ws.New(wsConfig, log, ingress)
 

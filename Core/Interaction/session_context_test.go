@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Neon-Dolls/neondoll/Core/Config"
 	contextbuilder "github.com/Neon-Dolls/neondoll/Core/ContextBuilder"
 	"github.com/Neon-Dolls/neondoll/Core/Inference"
 	"github.com/Neon-Dolls/neondoll/Core/Persistence"
@@ -69,7 +70,7 @@ func TestSessionInteractionBuildsFreshMultiTurnContext(t *testing.T) {
 	sessions, history := interactionSessionStores(t, store)
 	created := createInteractionSession(t, sessions, "body-one")
 	provider := &sessionContextProvider{responses: []string{"answer one", "answer two"}}
-	service := New(store, provider, logger.New(logger.ErrorLevel, io.Discard), WithModelContextBudget(testModelContextBudget))
+	service := New(store, provider, logger.New(logger.ErrorLevel, io.Discard), WithModelConfiguration(testModelConfiguration))
 
 	for _, text := range []string{"question one", "question two"} {
 		event := newResponse("session-doll", text)
@@ -120,7 +121,7 @@ func TestSessionInteractionLongHistoryUsesBoundedSuffix(t *testing.T) {
 		}
 	}
 	provider := &sessionContextProvider{}
-	service := New(store, provider, logger.New(logger.ErrorLevel, io.Discard), WithModelContextBudget(testModelContextBudget))
+	service := New(store, provider, logger.New(logger.ErrorLevel, io.Discard), WithModelConfiguration(testModelConfiguration))
 	event := newResponse("long-doll", "required latest input")
 	if _, err := service.HandleInteraction(context.Background(), created, &event); err != nil {
 		t.Fatal(err)
@@ -141,7 +142,7 @@ func TestSessionInteractionRejectsOversizedRequiredInput(t *testing.T) {
 	sessions, history := interactionSessionStores(t, store)
 	created := createInteractionSession(t, sessions, "body-oversized")
 	provider := &sessionContextProvider{}
-	service := New(store, provider, logger.New(logger.ErrorLevel, io.Discard), WithModelContextBudget(testModelContextBudget))
+	service := New(store, provider, logger.New(logger.ErrorLevel, io.Discard), WithModelConfiguration(testModelConfiguration))
 	event := newResponse("oversized-doll", strings.Repeat("x", testInputTokenBudget*5))
 
 	response, err := service.HandleInteraction(context.Background(), created, &event)
@@ -173,7 +174,10 @@ func TestSessionInteractionUsesConfiguredModelBudget(t *testing.T) {
 	provider := &sessionContextProvider{}
 	budget := inference.ModelContextBudget{ContextTokens: 80, OutputTokens: 20, RequiredOverheadTokens: 10}
 	service := New(store, provider, logger.New(logger.ErrorLevel, io.Discard),
-		WithModelIdentifier("configured-interaction-model"), WithModelContextBudget(budget))
+		WithModelConfiguration(config.ModelConfiguration{
+			Name: "configured", Provider: "openai", Model: "configured-interaction-model",
+			Endpoint: inference.DefaultBaseURL, Budget: budget,
+		}))
 	event := newResponse("budget-doll", "current input")
 	if _, err := service.HandleInteraction(context.Background(), created, &event); err != nil {
 		t.Fatal(err)
@@ -196,8 +200,9 @@ func TestSessionInteractionRejectsInvalidModelBudget(t *testing.T) {
 	sessions, history := interactionSessionStores(t, store)
 	created := createInteractionSession(t, sessions, "body-budget")
 	provider := &sessionContextProvider{}
-	service := New(store, provider, logger.New(logger.ErrorLevel, io.Discard), WithModelContextBudget(inference.ModelContextBudget{
-		ContextTokens: 512, OutputTokens: 512,
+	service := New(store, provider, logger.New(logger.ErrorLevel, io.Discard), WithModelConfiguration(config.ModelConfiguration{
+		Name: "invalid", Provider: "openai", Model: "invalid-model", Endpoint: inference.DefaultBaseURL,
+		Budget: inference.ModelContextBudget{ContextTokens: 512, OutputTokens: 512},
 	}))
 	event := newResponse("invalid-budget-doll", "current input")
 	response, err := service.HandleInteraction(context.Background(), created, &event)
@@ -222,7 +227,7 @@ func TestSessionInteractionIsolatesSessionHistories(t *testing.T) {
 	_, _ = history.AppendSessionMessages(context.Background(), first.ID, []contextbuilder.NewHistoryMessage{{TurnID: session.NewTurnID(), Role: contextbuilder.RoleUser, Content: "first secret"}})
 	_, _ = history.AppendSessionMessages(context.Background(), second.ID, []contextbuilder.NewHistoryMessage{{TurnID: session.NewTurnID(), Role: contextbuilder.RoleUser, Content: "second secret"}})
 	provider := &sessionContextProvider{}
-	service := New(store, provider, logger.New(logger.ErrorLevel, io.Discard), WithModelContextBudget(testModelContextBudget))
+	service := New(store, provider, logger.New(logger.ErrorLevel, io.Discard), WithModelConfiguration(testModelConfiguration))
 	event := newResponse("isolated-doll", "continue first")
 	if _, err := service.HandleInteraction(context.Background(), first, &event); err != nil {
 		t.Fatal(err)
@@ -243,7 +248,7 @@ func TestSessionHistoryReconstructsAfterRestart(t *testing.T) {
 	sessions, _ := interactionSessionStores(t, store)
 	created := createInteractionSession(t, sessions, "body-restart")
 	firstProvider := &sessionContextProvider{responses: []string{"before restart"}}
-	firstService := New(store, firstProvider, logger.New(logger.ErrorLevel, io.Discard), WithModelContextBudget(testModelContextBudget))
+	firstService := New(store, firstProvider, logger.New(logger.ErrorLevel, io.Discard), WithModelConfiguration(testModelConfiguration))
 	firstEvent := newResponse("restart-doll", "remember this")
 	if _, err := firstService.HandleInteraction(context.Background(), created, &firstEvent); err != nil {
 		t.Fatal(err)
@@ -263,7 +268,7 @@ func TestSessionHistoryReconstructsAfterRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	secondProvider := &sessionContextProvider{}
-	secondService := New(reopened, secondProvider, logger.New(logger.ErrorLevel, io.Discard), WithModelContextBudget(testModelContextBudget))
+	secondService := New(reopened, secondProvider, logger.New(logger.ErrorLevel, io.Discard), WithModelConfiguration(testModelConfiguration))
 	secondEvent := newResponse("restart-doll", "after restart")
 	if _, err := secondService.HandleInteraction(context.Background(), restored, &secondEvent); err != nil {
 		t.Fatal(err)
@@ -281,7 +286,7 @@ func TestFailedSessionInferenceDoesNotPersistTurn(t *testing.T) {
 	created := createInteractionSession(t, sessions, "body-failure")
 	provider := &sessionContextProvider{err: errors.New("inference failed")}
 	var diagnostics bytes.Buffer
-	service := New(store, provider, logger.New(logger.ErrorLevel, &diagnostics), WithModelContextBudget(testModelContextBudget))
+	service := New(store, provider, logger.New(logger.ErrorLevel, &diagnostics), WithModelConfiguration(testModelConfiguration))
 	event := newResponse("failed-session-doll", "do not fabricate")
 	response, err := service.HandleInteraction(context.Background(), created, &event)
 	if err != nil {
@@ -309,7 +314,7 @@ func TestSameSessionInteractionsAreSerializedAcrossHistoryAppend(t *testing.T) {
 	sessions, _ := interactionSessionStores(t, store)
 	created := createInteractionSession(t, sessions, "body-ordered")
 	provider := &blockingSessionProvider{entered: make(chan inference.Request, 2), release: make(chan struct{}, 2)}
-	service := New(store, provider, logger.New(logger.ErrorLevel, io.Discard), WithModelContextBudget(testModelContextBudget))
+	service := New(store, provider, logger.New(logger.ErrorLevel, io.Discard), WithModelConfiguration(testModelConfiguration))
 
 	done := make(chan error, 2)
 	first := newResponse("ordered-doll", "first")
@@ -368,7 +373,7 @@ func TestDifferentSessionInteractionsRemainConcurrent(t *testing.T) {
 	firstSession := createInteractionSession(t, sessions, "body-concurrent")
 	secondSession := createInteractionSession(t, sessions, "body-concurrent")
 	provider := &blockingSessionProvider{entered: make(chan inference.Request, 2), release: make(chan struct{}, 2)}
-	service := New(store, provider, logger.New(logger.ErrorLevel, io.Discard), WithModelContextBudget(testModelContextBudget))
+	service := New(store, provider, logger.New(logger.ErrorLevel, io.Discard), WithModelConfiguration(testModelConfiguration))
 	done := make(chan error, 2)
 
 	for _, item := range []struct {
@@ -414,7 +419,7 @@ func TestCanceledSessionWaiterReleasesLockBookkeeping(t *testing.T) {
 	sessions, _ := interactionSessionStores(t, store)
 	created := createInteractionSession(t, sessions, "body-cancel")
 	provider := &blockingSessionProvider{entered: make(chan inference.Request, 1), release: make(chan struct{}, 1)}
-	service := New(store, provider, logger.New(logger.ErrorLevel, io.Discard), WithModelContextBudget(testModelContextBudget))
+	service := New(store, provider, logger.New(logger.ErrorLevel, io.Discard), WithModelConfiguration(testModelConfiguration))
 	firstDone := make(chan error, 1)
 	first := newResponse("cancel-doll", "first")
 	go func() { _, err := service.HandleInteraction(context.Background(), created, &first); firstDone <- err }()
