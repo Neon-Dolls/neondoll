@@ -30,6 +30,7 @@ type Service struct {
 	sessions keyedLocks
 	dolls    keyedLocks
 	budget   inference.ModelContextBudget
+	model    string
 }
 
 var _ SessionHandler = (*Service)(nil)
@@ -56,6 +57,11 @@ type Option func(*Service)
 
 func WithModelContextBudget(budget inference.ModelContextBudget) Option {
 	return func(service *Service) { service.budget = budget }
+}
+
+// WithModelIdentifier sets the provider model selected by Core configuration.
+func WithModelIdentifier(model string) Option {
+	return func(service *Service) { service.model = model }
 }
 
 func New(store persistence.Store, provider inference.Provider, log *logger.Logger, opts ...Option) *Service {
@@ -110,7 +116,7 @@ func (s *Service) handleInteraction(ctx context.Context, sessionID session.ID, t
 		errResp := events.NewErrorResponse(event.ID, event.DollID, "interaction context unavailable")
 		return &errResp, nil
 	}
-	inferenceReq := inference.Request{Model: event.DollID, Temperature: 0.7, MaxTokens: s.budget.OutputTokens, TurnID: turnID}
+	inferenceReq := inference.Request{Model: s.model, Temperature: 0.7, MaxTokens: s.budget.OutputTokens, TurnID: turnID}
 	built, buildErr := s.builder.Build(ctx, contextbuilder.Request{
 		SessionID:          sessionID,
 		TokenBudget:        inputBudget,

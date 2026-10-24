@@ -33,6 +33,11 @@ must be configured, and the resulting input capacity must be positive. The
 resolver never consults provider capabilities or expands the configured
 context window. Unknown names and invalid default references fail explicitly.
 
-This foundation performs static configuration and name resolution only. It
-does not select models by task, dynamically discover models, or change the
-current Interaction and DollMind inference routing.
+At daemon startup Core resolves the explicit default, constructs its supported
+provider against the configured endpoint, and injects the resolved model
+identifier and budget into Interaction and DollMind. Orient, Plan, Pulse,
+direct cognition, and tool continuations therefore carry the same configured
+model identifier. Unsupported providers fail startup explicitly.
+
+Core does not yet select models by task or dynamically discover models. The
+configured default remains the only runtime selection.

@@ -172,7 +172,8 @@ func TestSessionInteractionUsesConfiguredModelBudget(t *testing.T) {
 	}
 	provider := &sessionContextProvider{}
 	budget := inference.ModelContextBudget{ContextTokens: 80, OutputTokens: 20, RequiredOverheadTokens: 10}
-	service := New(store, provider, logger.New(logger.ErrorLevel, io.Discard), WithModelContextBudget(budget))
+	service := New(store, provider, logger.New(logger.ErrorLevel, io.Discard),
+		WithModelIdentifier("configured-interaction-model"), WithModelContextBudget(budget))
 	event := newResponse("budget-doll", "current input")
 	if _, err := service.HandleInteraction(context.Background(), created, &event); err != nil {
 		t.Fatal(err)
@@ -180,6 +181,9 @@ func TestSessionInteractionUsesConfiguredModelBudget(t *testing.T) {
 	request := provider.requests[0]
 	if request.MaxTokens != 20 {
 		t.Fatalf("MaxTokens = %d, want 20", request.MaxTokens)
+	}
+	if request.Model != "configured-interaction-model" {
+		t.Fatalf("Model = %q, want configured-interaction-model", request.Model)
 	}
 	if tokens := approximateRequestTokens(request.Messages); tokens > 50 {
 		t.Fatalf("input tokens = %d, want at most 50", tokens)

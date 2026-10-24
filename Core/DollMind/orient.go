@@ -173,6 +173,7 @@ func (s *Scheduler) Orient(ctx context.Context, eventType events.Type, input str
 	}
 
 	resp, err := s.provider.Infer(ctx, inference.Request{
+		Model:       s.model,
 		Messages:    messages,
 		Temperature: 0.3,
 		MaxTokens:   s.contextBudget.OutputTokens,

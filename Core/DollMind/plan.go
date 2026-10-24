@@ -325,6 +325,7 @@ func (s *Scheduler) Plan(ctx context.Context, eventType events.Type, input strin
 
 	// ── Original no-tool path ──────────────────────────────────────────
 	resp, err := s.provider.Infer(ctx, inference.Request{
+		Model:       s.model,
 		Messages:    messages,
 		Temperature: 0.3,
 		MaxTokens:   s.contextBudget.OutputTokens,
@@ -525,6 +526,7 @@ func (s *Scheduler) toolCognize(ctx context.Context, contextInstruction string) 
 			return nil, fmt.Errorf("plan tool protocol context: %w", err)
 		}
 		req = inference.Request{
+			Model:       s.model,
 			Messages:    freshMessages,
 			Temperature: 0.3,
 			MaxTokens:   s.contextBudget.OutputTokens,
