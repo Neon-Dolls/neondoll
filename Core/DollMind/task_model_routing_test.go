@@ -52,6 +52,7 @@ func assertTaskRequest(t *testing.T, requests []inference.Request, model string,
 }
 
 func TestToolLoopRetainsPlanTaskConfiguration(t *testing.T) {
+	fallbackProvider := &universalContextProvider{responses: []string{makePlanJSON("wrong provider")}}
 	planProvider := &toolContextProvider{responses: []*inference.Response{
 		{ToolCalls: []inference.ToolCall{{ID: "call_task", Name: "runtime.info__read"}}},
 		{Content: makePlanJSON("complete")},
@@ -59,7 +60,7 @@ func TestToolLoopRetainsPlanTaskConfiguration(t *testing.T) {
 	planModel := testModelConfiguration("task-plan-model", inference.ModelContextBudget{
 		ContextTokens: 1536, OutputTokens: 240, RequiredOverheadTokens: 96,
 	})
-	scheduler := newPulseToolScheduler(planProvider, nil,
+	scheduler := newPulseToolScheduler(fallbackProvider, nil,
 		WithTaskModelConfiguration(config.InferenceTaskPlan, planProvider, planModel))
 
 	_, _, err := scheduler.Plan(context.Background(), events.TypeMessage, "use a tool", &Orientation{Summary: "tool", Matters: true})
@@ -68,6 +69,9 @@ func TestToolLoopRetainsPlanTaskConfiguration(t *testing.T) {
 	}
 	if len(planProvider.requests) != 2 {
 		t.Fatalf("Plan requests = %d, want 2", len(planProvider.requests))
+	}
+	if requests := fallbackProvider.capturedRequests(); len(requests) != 0 {
+		t.Fatalf("fallback provider received %d requests, want 0", len(requests))
 	}
 	for index, request := range planProvider.requests {
 		if request.Model != "task-plan-model" || request.MaxTokens != 240 {

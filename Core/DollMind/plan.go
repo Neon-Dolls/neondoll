@@ -502,6 +502,10 @@ func (s *Scheduler) toolCognize(ctx context.Context, contextInstruction string) 
 	baseWorking := run.snapshotWorking()
 	var toolHistory []contextbuilder.CognitionWorkingRecord
 	var toolExchanges []cognitionToolExchange
+	selected, inputBudget, err := s.modelForTask(config.InferenceTaskPlan)
+	if err != nil {
+		return nil, fmt.Errorf("plan tool model context budget: %w", err)
+	}
 
 	for {
 		// Phase 6 — context cancellation and deadline propagation
@@ -514,10 +518,6 @@ func (s *Scheduler) toolCognize(ctx context.Context, contextInstruction string) 
 		working := append(append([]contextbuilder.CognitionWorkingRecord(nil), baseWorking...), toolHistory...)
 		if err := run.replaceWorking(working); err != nil {
 			return nil, fmt.Errorf("plan tool context working state: %w", err)
-		}
-		selected, inputBudget, err := s.modelForTask(config.InferenceTaskPlan)
-		if err != nil {
-			return nil, fmt.Errorf("plan tool model context budget: %w", err)
 		}
 		freshMessages, err := run.messages(ctx, inputBudget, contextInstruction, inference.FormatToolsForPrompt(tools))
 		if err != nil {
