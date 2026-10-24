@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -68,13 +69,10 @@ type PathConfig struct {
 	DataDir    string `json:"data_dir"`
 }
 
-// InferenceConfig for the inference provider.
+// InferenceConfig selects from statically configured inference models.
 type InferenceConfig struct {
-	Provider               string `json:"provider"`
-	BaseURL                string `json:"base_url"`
-	ContextTokens          int    `json:"context_tokens"`
-	MaxOutputTokens        int    `json:"max_output_tokens"`
-	RequiredOverheadTokens int    `json:"required_overhead_tokens"`
+	DefaultModel string                        `json:"default_model"`
+	Models       map[string]ModelConfiguration `json:"models"`
 }
 
 // LinkConfig for transport connectivity.
@@ -108,11 +106,15 @@ func Defaults() Config {
 			Prompt:  "> ",
 		},
 		Inference: InferenceConfig{
-			Provider:               "openai",
-			BaseURL:                "http://localhost:8080",
-			ContextTokens:          budget.ContextTokens,
-			MaxOutputTokens:        budget.OutputTokens,
-			RequiredOverheadTokens: budget.RequiredOverheadTokens,
+			DefaultModel: "default",
+			Models: map[string]ModelConfiguration{
+				"default": {
+					Provider: "openai",
+					Model:    "default",
+					Endpoint: "http://localhost:8080",
+					Budget:   budget,
+				},
+			},
 		},
 		Paths: PathConfig{
 			StateDir:   "data/state",
@@ -143,8 +145,13 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("config load: %w", err)
 	}
 	cfg := Defaults()
-	if err := json.Unmarshal(data, &cfg); err != nil {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&cfg); err != nil {
 		return nil, fmt.Errorf("config parse: %w", err)
+	}
+	if _, err := NewModelResolver(cfg.Inference); err != nil {
+		return nil, fmt.Errorf("config inference: %w", err)
 	}
 	return &cfg, nil
 }

@@ -17,9 +17,9 @@ const (
 // OutputTokens and RequiredOverheadTokens are reserved before model-visible
 // input is assembled by Context Builder.
 type ModelContextBudget struct {
-	ContextTokens          int
-	OutputTokens           int
-	RequiredOverheadTokens int
+	ContextTokens          int `json:"context_tokens"`
+	OutputTokens           int `json:"output_tokens"`
+	RequiredOverheadTokens int `json:"required_overhead_tokens"`
 }
 
 // DefaultModelContextBudget is Core's configured-consumption default. It is a

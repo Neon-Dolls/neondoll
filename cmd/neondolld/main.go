@@ -67,9 +67,14 @@ func main() {
 		cfg = &defaults
 	}
 
-	// Validate the inference provider.
-	if cfg.Inference.Provider != "openai" {
-		log.Error("unsupported inference provider", map[string]any{"provider": cfg.Inference.Provider})
+	modelResolver, err := config.NewModelResolver(cfg.Inference)
+	if err != nil {
+		log.Error("invalid model configuration", map[string]any{"error": err.Error()})
+		os.Exit(1)
+	}
+	defaultModel := modelResolver.Default()
+	if defaultModel.Provider != "openai" {
+		log.Error("unsupported inference provider", map[string]any{"provider": defaultModel.Provider})
 		os.Exit(1)
 	}
 
@@ -161,19 +166,13 @@ func main() {
 
 	// Create the inference provider.
 	inferenceProvider := inference.NewOpenAIProvider(
-		inference.WithBaseURL(cfg.Inference.BaseURL),
+		inference.WithBaseURL(defaultModel.Endpoint),
 	)
-	modelBudget := inference.ModelContextBudget{
-		ContextTokens: cfg.Inference.ContextTokens, OutputTokens: cfg.Inference.MaxOutputTokens,
-		RequiredOverheadTokens: cfg.Inference.RequiredOverheadTokens,
-	}
-	if _, err := modelBudget.InputTokens(); err != nil {
-		log.Error("invalid inference context budget", map[string]any{"error": err.Error()})
-		os.Exit(1)
-	}
+	modelBudget := defaultModel.Budget
 	log.Info("inference provider created", map[string]any{
-		"provider": cfg.Inference.Provider,
-		"base_url": cfg.Inference.BaseURL,
+		"provider": defaultModel.Provider,
+		"model":    defaultModel.Name,
+		"endpoint": defaultModel.Endpoint,
 	})
 
 	// Create the Body Registry with the mandatory Local Body.
