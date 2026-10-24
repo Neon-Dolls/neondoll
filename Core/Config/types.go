@@ -72,6 +72,7 @@ type PathConfig struct {
 type InferenceConfig struct {
 	DefaultModel string                        `json:"default_model"`
 	Models       map[string]ModelConfiguration `json:"models"`
+	Tasks        map[InferenceTask]string      `json:"tasks,omitempty"`
 }
 
 // LinkConfig for transport connectivity.

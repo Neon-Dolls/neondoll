@@ -18,6 +18,10 @@ named model configurations:
           "required_overhead_tokens": 256
         }
       }
+    },
+    "tasks": {
+      "interaction": "local",
+      "orient": "local"
     }
   }
 }
@@ -41,3 +45,15 @@ model identifier. Unsupported providers fail startup explicitly.
 
 Core does not yet select models by task or dynamically discover models. The
 configured default remains the only runtime selection.
+
+## Task assignments
+
+Core defines four inference tasks: `interaction`, `orient`, `plan`, and
+`direct_cognition`. Each optional `tasks` entry names one configured model.
+Assignments are validated together with model configuration, so an unknown
+model or task prevents startup. `ResolveTask` returns the complete resolved
+`ModelConfiguration`; an unassigned known task returns the explicit default.
+
+Task resolution is configuration-only in M2.15. Runtime Interaction and
+DollMind execution continue using the already-wired default model until the
+next integration milestone.

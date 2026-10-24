@@ -151,3 +151,106 @@ func TestModelResolverRejectsInvalidConfigurationsAndBudgets(t *testing.T) {
 		})
 	}
 }
+
+func TestModelResolverResolvesExplicitTaskMappings(t *testing.T) {
+	resolver, err := NewModelResolver(InferenceConfig{
+		DefaultModel: "balanced",
+		Models: map[string]ModelConfiguration{
+			"balanced": validModel("openai", "shared-model", "http://models.internal/v1", 16384),
+			"fast":     validModel("openai", "fast-model", "http://models.internal/v1", 4096),
+		},
+		Tasks: map[InferenceTask]string{
+			InferenceTaskInteraction: "fast",
+			InferenceTaskOrient:      "fast",
+			InferenceTaskPlan:        "balanced",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for task, want := range map[InferenceTask]string{
+		InferenceTaskInteraction: "fast",
+		InferenceTaskOrient:      "fast",
+		InferenceTaskPlan:        "balanced",
+	} {
+		resolved, err := resolver.ResolveTask(task)
+		if err != nil || resolved.Name != want {
+			t.Errorf("ResolveTask(%q) = %+v, %v; want %q", task, resolved, err, want)
+		}
+	}
+}
+
+func TestModelResolverUsesDefaultForUnmappedTask(t *testing.T) {
+	resolver, err := NewModelResolver(InferenceConfig{
+		DefaultModel: "default",
+		Models: map[string]ModelConfiguration{
+			"default": validModel("openai", "default-model", "http://localhost", 8192),
+			"plan":    validModel("openai", "plan-model", "http://localhost", 16384),
+		},
+		Tasks: map[InferenceTask]string{InferenceTaskPlan: "plan"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := resolver.ResolveTask(InferenceTaskDirectCognition)
+	if err != nil || resolved.Name != "default" {
+		t.Fatalf("ResolveTask(direct cognition) = %+v, %v", resolved, err)
+	}
+}
+
+func TestModelResolverRejectsUnknownTaskModelReferences(t *testing.T) {
+	_, err := NewModelResolver(InferenceConfig{
+		DefaultModel: "default",
+		Models: map[string]ModelConfiguration{
+			"default": validModel("openai", "default-model", "http://localhost", 8192),
+		},
+		Tasks: map[InferenceTask]string{InferenceTaskPlan: "missing"},
+	})
+	if !errors.Is(err, ErrUnknownModelReference) {
+		t.Fatalf("NewModelResolver error = %v, want ErrUnknownModelReference", err)
+	}
+}
+
+func TestModelResolverRejectsUnknownTasks(t *testing.T) {
+	config := InferenceConfig{
+		DefaultModel: "default",
+		Models: map[string]ModelConfiguration{
+			"default": validModel("openai", "default-model", "http://localhost", 8192),
+		},
+	}
+	config.Tasks = map[InferenceTask]string{"unknown": "default"}
+	if _, err := NewModelResolver(config); !errors.Is(err, ErrUnknownInferenceTask) {
+		t.Fatalf("NewModelResolver error = %v, want ErrUnknownInferenceTask", err)
+	}
+
+	config.Tasks = nil
+	resolver, err := NewModelResolver(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := resolver.ResolveTask("unknown"); !errors.Is(err, ErrUnknownInferenceTask) {
+		t.Fatalf("ResolveTask error = %v, want ErrUnknownInferenceTask", err)
+	}
+}
+
+func TestModelResolverPreservesIndependentTaskBudgets(t *testing.T) {
+	resolver, err := NewModelResolver(InferenceConfig{
+		DefaultModel: "interaction-window",
+		Models: map[string]ModelConfiguration{
+			"interaction-window": validModel("openai", "shared-model", "http://localhost", 32768),
+			"orient-window":      validModel("openai", "shared-model", "http://localhost", 4096),
+		},
+		Tasks: map[InferenceTask]string{
+			InferenceTaskInteraction: "interaction-window",
+			InferenceTaskOrient:      "orient-window",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	interaction, _ := resolver.ResolveTask(InferenceTaskInteraction)
+	orient, _ := resolver.ResolveTask(InferenceTaskOrient)
+	if interaction.Model != orient.Model || interaction.Budget.ContextTokens != 32768 || orient.Budget.ContextTokens != 4096 {
+		t.Fatalf("task configurations lost independent budgets: interaction=%+v orient=%+v", interaction, orient)
+	}
+}
