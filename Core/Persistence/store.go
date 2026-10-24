@@ -301,6 +301,7 @@ func createSchema(db *sql.DB) error {
 			session_id TEXT NOT NULL,
 			sequence INTEGER NOT NULL,
 			message_id TEXT NOT NULL UNIQUE,
+			turn_id TEXT NOT NULL DEFAULT '',
 			role TEXT NOT NULL,
 			content TEXT NOT NULL,
 			created_at TEXT NOT NULL,
@@ -312,6 +313,15 @@ func createSchema(db *sql.DB) error {
 	`)
 	if err != nil {
 		return fmt.Errorf("interaction_session_messages table: %v", err)
+	}
+	turnIDExists, err := columnExists(db, "interaction_session_messages", "turn_id")
+	if err != nil {
+		return fmt.Errorf("interaction_session_messages turn_id inspection: %v", err)
+	}
+	if !turnIDExists {
+		if _, err := db.Exec(`ALTER TABLE interaction_session_messages ADD COLUMN turn_id TEXT NOT NULL DEFAULT ''`); err != nil {
+			return fmt.Errorf("interaction_session_messages turn_id migration: %v", err)
+		}
 	}
 
 	return nil

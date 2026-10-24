@@ -58,12 +58,15 @@ func (s *store) AppendSessionMessages(ctx context.Context, sessionID session.ID,
 	}
 	created := make([]contextbuilder.HistoryMessage, len(messages))
 	for index, message := range messages {
+		if message.TurnID == "" {
+			return nil, contextbuilder.ErrInvalidRequest
+		}
 		if message.Role != contextbuilder.RoleSystem && message.Role != contextbuilder.RoleUser && message.Role != contextbuilder.RoleAssistant && message.Role != contextbuilder.RoleTool {
 			return nil, contextbuilder.ErrInvalidRequest
 		}
-		created[index] = contextbuilder.HistoryMessage{ID: uuid.NewString(), SessionID: sessionID, Sequence: next + index, Role: message.Role, Content: message.Content, CreatedAt: time.Now().UTC()}
-		if _, err := conn.ExecContext(ctx, `INSERT INTO interaction_session_messages (session_id, sequence, message_id, role, content, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
-			sessionID, created[index].Sequence, created[index].ID, created[index].Role, created[index].Content, formatTime(created[index].CreatedAt)); err != nil {
+		created[index] = contextbuilder.HistoryMessage{ID: uuid.NewString(), SessionID: sessionID, TurnID: message.TurnID, Sequence: next + index, Role: message.Role, Content: message.Content, CreatedAt: time.Now().UTC()}
+		if _, err := conn.ExecContext(ctx, `INSERT INTO interaction_session_messages (session_id, sequence, message_id, turn_id, role, content, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			sessionID, created[index].Sequence, created[index].ID, created[index].TurnID, created[index].Role, created[index].Content, formatTime(created[index].CreatedAt)); err != nil {
 			return nil, fmt.Errorf("append session messages: insert: %w", err)
 		}
 	}
@@ -81,7 +84,7 @@ func (s *store) ListSessionMessages(ctx context.Context, sessionID session.ID) (
 	if _, err := s.LoadSession(ctx, sessionID); err != nil {
 		return nil, err
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT message_id, sequence, role, content, created_at FROM interaction_session_messages WHERE session_id = ? ORDER BY sequence`, sessionID)
+	rows, err := s.db.QueryContext(ctx, `SELECT message_id, turn_id, sequence, role, content, created_at FROM interaction_session_messages WHERE session_id = ? ORDER BY sequence`, sessionID)
 	if err != nil {
 		return nil, fmt.Errorf("list session messages: %w", err)
 	}
@@ -90,7 +93,7 @@ func (s *store) ListSessionMessages(ctx context.Context, sessionID session.ID) (
 	for rows.Next() {
 		message := contextbuilder.HistoryMessage{SessionID: sessionID}
 		var createdAt string
-		if err := rows.Scan(&message.ID, &message.Sequence, &message.Role, &message.Content, &createdAt); err != nil {
+		if err := rows.Scan(&message.ID, &message.TurnID, &message.Sequence, &message.Role, &message.Content, &createdAt); err != nil {
 			return nil, fmt.Errorf("list session messages: scan: %w", err)
 		}
 		message.CreatedAt, err = time.Parse(time.RFC3339Nano, createdAt)

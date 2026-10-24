@@ -10,6 +10,10 @@ import (
 )
 
 type ID string
+
+// TurnID identifies one Core-owned external interaction within a Session. It
+// is independent of the Session, Cognitive Run, event, and provider IDs.
+type TurnID string
 type OwnerKind string
 type Status string
 

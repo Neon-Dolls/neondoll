@@ -150,24 +150,31 @@ non-system conversation suffix; required system messages may precede it.
 
 Conversation records are stored in the existing Core SQLite database in
 `interaction_session_messages`, keyed and ordered by Core Session ID and an
-explicit per-session sequence. They remain separate from temporary model
-context and from portable Doll Memory. The store implements
-`contextbuilder.HistoryStore`; future interaction wiring can append completed
-turns through that interface without coupling the builder to SQLite.
+explicit per-session sequence. M2.9 also persists a Core-generated `TurnID` on
+every newly written record. `Interaction.Service` creates one Turn ID per
+admitted external interaction and atomically writes its user/assistant pair
+with that ID. The ID is independent of Session IDs, Cognitive Run IDs, event
+correlation, and provider response identity. `HistoryStore` rejects new records
+without a Turn ID. History remains separate from temporary model context and
+portable Doll Memory.
 
 The sliding policy always preserves explicitly required records (including
 supplied instructions, persisted Interaction Session system messages, and
 required tail messages such as the current input), then includes the largest
 whole-record chronological suffix that fits the remaining budget. For an
-Interaction Session, its resolver groups each adjacent `user`/`assistant` pair
-as one disposable selection unit, so a window contains both records or neither.
-The durable history schema has no turn identifier; adjacency is the only
-available pairing signal, and the production interaction path appends completed
-pairs atomically. A standalone user record remains independently selectable.
-An assistant record without an immediately preceding user is omitted as an
-`incomplete_turn` rather than exposed without its initiating request. Cognitive
-Run records carry no conversation group and retain generic record-by-record
-selection. Required
+Interaction Session, its resolver groups all records with the same explicit
+Turn ID as one disposable selection unit, so future multi-assistant or tool
+records can remain coherent without changing window policy. A standalone user
+turn remains selectable. An assistant encountered before its turn's initiating
+user is omitted as an `incomplete_turn`.
+
+Databases created before M2.9 are migrated with an empty Turn ID on existing
+rows. Only those legacy rows use the isolated M2.8 adjacency fallback: an
+adjacent legacy `user`/`assistant` pair is grouped, a standalone legacy user is
+selectable, and an orphan legacy assistant is omitted. Legacy grouping never
+crosses a record carrying an explicit Turn ID, and no new empty-ID writes are
+accepted. Cognitive Run records carry no conversation group and retain generic
+record-by-record selection. Required
 instructions precede history and required tail messages follow it. Once a
 record or conversation group does not fit, it and all older optional groups are
 omitted. Individual records are never truncated. If required context does not

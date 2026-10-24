@@ -60,6 +60,20 @@ func (fx *fixture) createSession(t *testing.T, owner string) *session.Interactio
 
 func (fx *fixture) append(t *testing.T, id session.ID, messages ...contextbuilder.NewHistoryMessage) []contextbuilder.HistoryMessage {
 	t.Helper()
+	var turnID session.TurnID
+	for index := range messages {
+		if messages[index].TurnID != "" {
+			turnID = messages[index].TurnID
+			continue
+		}
+		if messages[index].Role == contextbuilder.RoleUser || turnID == "" {
+			turnID = session.NewTurnID()
+		}
+		messages[index].TurnID = turnID
+		if messages[index].Role == contextbuilder.RoleAssistant {
+			turnID = ""
+		}
+	}
 	created, err := fx.history.AppendSessionMessages(context.Background(), id, messages)
 	if err != nil {
 		t.Fatal(err)
@@ -122,7 +136,7 @@ func TestBuildSelectsCompleteConversationTurns(t *testing.T) {
 func TestBuildWindowAdvancesAndRespondsToBudgetChanges(t *testing.T) {
 	fx := newFixture(t)
 	created := fx.createSession(t, "body-one")
-	fx.append(t, created.ID,
+	stored := fx.append(t, created.ID,
 		contextbuilder.NewHistoryMessage{Role: contextbuilder.RoleUser, Content: "one"},
 		contextbuilder.NewHistoryMessage{Role: contextbuilder.RoleAssistant, Content: "two"},
 		contextbuilder.NewHistoryMessage{Role: contextbuilder.RoleUser, Content: "six"},
@@ -141,7 +155,7 @@ func TestBuildWindowAdvancesAndRespondsToBudgetChanges(t *testing.T) {
 	if got := messageContents(initial.Messages); !reflect.DeepEqual(got, []string{"six"}) {
 		t.Fatalf("initial window = %v", got)
 	}
-	fx.append(t, created.ID, contextbuilder.NewHistoryMessage{Role: contextbuilder.RoleAssistant, Content: "ten"})
+	fx.append(t, created.ID, contextbuilder.NewHistoryMessage{TurnID: stored[2].TurnID, Role: contextbuilder.RoleAssistant, Content: "ten"})
 	advanced := build(6)
 	if got := []string{advanced.Messages[0].Content, advanced.Messages[1].Content}; !reflect.DeepEqual(got, []string{"six", "ten"}) {
 		t.Fatalf("advanced window = %v", got)
@@ -287,8 +301,8 @@ func TestBuildReconstructsPersistedHistoryAfterRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := history.AppendSessionMessages(ctx, created.ID, []contextbuilder.NewHistoryMessage{
-		{Role: contextbuilder.RoleUser, Content: "old"},
-		{Role: contextbuilder.RoleAssistant, Content: "new"},
+		{TurnID: session.TurnID("restart-turn"), Role: contextbuilder.RoleUser, Content: "old"},
+		{TurnID: session.TurnID("restart-turn"), Role: contextbuilder.RoleAssistant, Content: "new"},
 	}); err != nil {
 		t.Fatal(err)
 	}
