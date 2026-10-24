@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Neon-Dolls/neondoll/Core/Config"
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 
@@ -240,7 +241,10 @@ func TestE2E_SparkSpeaksRealInference(t *testing.T) {
 	provider := inference.NewOpenAIProvider(
 		inference.WithBaseURL(baseURL),
 	)
-	svc := interaction.New(store2, provider, log, interaction.WithModelContextBudget(inference.ModelContextBudget{ContextTokens: 9216, OutputTokens: 768, RequiredOverheadTokens: 256}))
+	svc := interaction.New(store2, provider, log, interaction.WithModelConfiguration(config.ModelConfiguration{
+		Name: "test", Provider: "openai", Model: "test-model", Endpoint: inference.DefaultBaseURL,
+		Budget: inference.ModelContextBudget{ContextTokens: 9216, OutputTokens: 768, RequiredOverheadTokens: 256},
+	}))
 	ingress, wsConfig := newAuthenticatedInteractionIngress(t, store2, svc)
 	wsServer := ws.New(wsConfig, log, ingress)
 
@@ -379,7 +383,10 @@ func TestE2E_InferenceFails(t *testing.T) {
 	badProvider := inference.NewOpenAIProvider(
 		inference.WithBaseURL("http://127.0.0.1:15999"),
 	)
-	svc := interaction.New(store2, badProvider, log, interaction.WithModelContextBudget(inference.ModelContextBudget{ContextTokens: 9216, OutputTokens: 768, RequiredOverheadTokens: 256}))
+	svc := interaction.New(store2, badProvider, log, interaction.WithModelConfiguration(config.ModelConfiguration{
+		Name: "test", Provider: "openai", Model: "test-model", Endpoint: inference.DefaultBaseURL,
+		Budget: inference.ModelContextBudget{ContextTokens: 9216, OutputTokens: 768, RequiredOverheadTokens: 256},
+	}))
 	ingress, wsConfig := newAuthenticatedInteractionIngress(t, store2, svc)
 	wsServer := ws.New(wsConfig, log, ingress)
 

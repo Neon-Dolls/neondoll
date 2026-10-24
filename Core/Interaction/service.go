@@ -8,6 +8,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/Neon-Dolls/neondoll/Core/Config"
 	contextbuilder "github.com/Neon-Dolls/neondoll/Core/ContextBuilder"
 	"github.com/Neon-Dolls/neondoll/Core/Inference"
 	"github.com/Neon-Dolls/neondoll/Core/Persistence"
@@ -22,14 +23,14 @@ import (
 //
 //	Doll Link ↔ Interaction ↔ Persistence + Inference
 type Service struct {
-	store    persistence.Store
-	provider inference.Provider
-	log      *logger.Logger
-	builder  contextbuilder.Builder
-	history  contextbuilder.HistoryStore
-	sessions keyedLocks
-	dolls    keyedLocks
-	budget   inference.ModelContextBudget
+	store              persistence.Store
+	provider           inference.Provider
+	log                *logger.Logger
+	builder            contextbuilder.Builder
+	history            contextbuilder.HistoryStore
+	sessions           keyedLocks
+	dolls              keyedLocks
+	modelConfiguration config.ModelConfiguration
 }
 
 var _ SessionHandler = (*Service)(nil)
@@ -54,8 +55,9 @@ func (s *Service) HandleInteraction(ctx context.Context, resolved *session.Inter
 // inference provider.
 type Option func(*Service)
 
-func WithModelContextBudget(budget inference.ModelContextBudget) Option {
-	return func(service *Service) { service.budget = budget }
+// WithModelConfiguration sets the complete model selected by Core.
+func WithModelConfiguration(model config.ModelConfiguration) Option {
+	return func(service *Service) { service.modelConfiguration = model }
 }
 
 func New(store persistence.Store, provider inference.Provider, log *logger.Logger, opts ...Option) *Service {
@@ -104,13 +106,13 @@ func (s *Service) handleInteraction(ctx context.Context, sessionID session.ID, t
 		return nil, fmt.Errorf("interaction turn %s: load doll: %w", turnID, err)
 	}
 
-	inputBudget, budgetErr := s.budget.InputTokens()
-	if budgetErr != nil {
+	if err := config.ValidateModelConfiguration(s.modelConfiguration); err != nil {
 		s.log.Error("interaction model context budget unavailable", diagnostics)
 		errResp := events.NewErrorResponse(event.ID, event.DollID, "interaction context unavailable")
 		return &errResp, nil
 	}
-	inferenceReq := inference.Request{Model: event.DollID, Temperature: 0.7, MaxTokens: s.budget.OutputTokens, TurnID: turnID}
+	inputBudget, _ := s.modelConfiguration.Budget.InputTokens()
+	inferenceReq := inference.Request{Model: s.modelConfiguration.Model, Temperature: 0.7, MaxTokens: s.modelConfiguration.Budget.OutputTokens, TurnID: turnID}
 	built, buildErr := s.builder.Build(ctx, contextbuilder.Request{
 		SessionID:          sessionID,
 		TokenBudget:        inputBudget,

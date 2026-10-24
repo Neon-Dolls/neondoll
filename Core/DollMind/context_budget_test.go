@@ -24,7 +24,8 @@ func TestCognitionUsesConfiguredContextAndOutputBudgets(t *testing.T) {
 		state.Memories.Items = append(state.Memories.Items, dollstate.MemoryItem{Content: strings.Repeat("optional memory ", 20)})
 	}
 	budget := inference.ModelContextBudget{ContextTokens: 1024, OutputTokens: 128, RequiredOverheadTokens: 64}
-	scheduler := New(provider, logger.New(logger.ErrorLevel, io.Discard), &orientMockAPI{state: state}, WithModelContextBudget(budget))
+	scheduler := New(provider, logger.New(logger.ErrorLevel, io.Discard), &orientMockAPI{state: state},
+		WithModelConfiguration(testModelConfiguration("configured-cognition-model", budget)))
 
 	if _, err := scheduler.Enter(context.Background(), events.TypeMessage, "please think"); err != nil {
 		t.Fatal(err)
@@ -34,6 +35,9 @@ func TestCognitionUsesConfiguredContextAndOutputBudgets(t *testing.T) {
 		t.Fatalf("requests = %d, want Orient and Plan", len(requests))
 	}
 	for index, request := range requests {
+		if request.Model != "configured-cognition-model" {
+			t.Errorf("request %d Model = %q", index, request.Model)
+		}
 		if request.MaxTokens != 128 {
 			t.Errorf("request %d MaxTokens = %d, want 128", index, request.MaxTokens)
 		}
@@ -46,22 +50,24 @@ func TestCognitionUsesConfiguredContextAndOutputBudgets(t *testing.T) {
 func TestDirectCognitionUsesConfiguredOutputReserve(t *testing.T) {
 	provider := &universalContextProvider{responses: []string{"response"}}
 	budget := inference.ModelContextBudget{ContextTokens: 2048, OutputTokens: 300, RequiredOverheadTokens: 100}
-	scheduler := New(provider, logger.New(logger.ErrorLevel, io.Discard), &orientMockAPI{state: &dollstate.DollState{}}, WithModelContextBudget(budget))
+	scheduler := New(provider, logger.New(logger.ErrorLevel, io.Discard), &orientMockAPI{state: &dollstate.DollState{}},
+		WithModelConfiguration(testModelConfiguration("configured-direct-model", budget)))
 
 	if _, err := scheduler.Run(context.Background(), LevelPlan, "direct input"); err != nil {
 		t.Fatal(err)
 	}
 	requests := provider.capturedRequests()
-	if len(requests) != 1 || requests[0].MaxTokens != 300 {
-		t.Fatalf("requests = %+v, want one request with MaxTokens 300", requests)
+	if len(requests) != 1 || requests[0].MaxTokens != 300 || requests[0].Model != "configured-direct-model" {
+		t.Fatalf("requests = %+v, want configured model and MaxTokens 300", requests)
 	}
 }
 
 func TestCognitionRejectsInvalidConfiguredBudget(t *testing.T) {
 	provider := &universalContextProvider{responses: []string{"unused"}}
-	scheduler := New(provider, logger.New(logger.ErrorLevel, io.Discard), &orientMockAPI{state: &dollstate.DollState{}}, WithModelContextBudget(inference.ModelContextBudget{
-		ContextTokens: 512, OutputTokens: 512,
-	}))
+	scheduler := New(provider, logger.New(logger.ErrorLevel, io.Discard), &orientMockAPI{state: &dollstate.DollState{}},
+		WithModelConfiguration(testModelConfiguration("invalid-model", inference.ModelContextBudget{
+			ContextTokens: 512, OutputTokens: 512,
+		})))
 
 	_, err := scheduler.Run(context.Background(), LevelPlan, "input")
 	if !errors.Is(err, inference.ErrInvalidContextBudget) {
@@ -79,7 +85,8 @@ func TestToolLoopUsesConfiguredBudgetEveryIteration(t *testing.T) {
 		{Content: makePlanJSON("complete")},
 	}}
 	budget := inference.ModelContextBudget{ContextTokens: 1536, OutputTokens: 256, RequiredOverheadTokens: 128}
-	scheduler := newPulseToolScheduler(provider, nil, WithModelContextBudget(budget))
+	scheduler := newPulseToolScheduler(provider, nil,
+		WithModelConfiguration(testModelConfiguration("configured-tool-model", budget)))
 
 	if err := scheduler.EnterPulseWake(context.Background(), pulse.PulseWake{Pressure: 0.8, EffectivePressure: 0.7}); err != nil {
 		t.Fatal(err)
@@ -88,6 +95,9 @@ func TestToolLoopUsesConfiguredBudgetEveryIteration(t *testing.T) {
 		t.Fatalf("requests = %d, want Orient plus two Plan iterations", len(provider.requests))
 	}
 	for index, request := range provider.requests {
+		if request.Model != "configured-tool-model" {
+			t.Errorf("request %d Model = %q", index, request.Model)
+		}
 		if request.MaxTokens != 256 {
 			t.Errorf("request %d MaxTokens = %d, want 256", index, request.MaxTokens)
 		}

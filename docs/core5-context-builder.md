@@ -208,12 +208,12 @@ back to 8,192 tokens.
 
 Internal DollMind cognition uses the same `ModelContextBudget` calculation.
 `DollMind.New` starts with Core's configured-consumption default of 32,768
-total tokens and accepts an explicit `WithModelContextBudget` override from its
+total tokens and accepts one complete `WithModelConfiguration` value from its
 runtime composition boundary. Direct runs, Orient, Plan, Pulse/intention wakes,
-and every tool-loop iteration subtract the configured output and overhead
-reserves before context construction, and pass the output reserve as
-`Request.MaxTokens`. Provider-advertised capacity never expands this configured
-limit.
+and every tool-loop iteration use that value's paired model identifier and
+budget, subtract the configured output and overhead reserves before context
+construction, and pass the output reserve as `Request.MaxTokens`.
+Provider-advertised capacity never expands this configured limit.
 
 This milestone does not perform semantic Memory retrieval, summarize, compact,
 or persist Cognitive Run turns. Those remain later integration and policy
