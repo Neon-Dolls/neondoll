@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/Neon-Dolls/neondoll/Core/Inference"
 )
 
 // secAsDuration converts an int64 seconds value (as stored in PulseConfig)
@@ -95,6 +97,7 @@ type HTTPConfig struct {
 
 // Defaults returns a Config with sensible defaults.
 func Defaults() Config {
+	budget := inference.DefaultModelContextBudget()
 	return Config{
 		Core: CoreConfig{
 			Profile:     "default",
@@ -107,9 +110,9 @@ func Defaults() Config {
 		Inference: InferenceConfig{
 			Provider:               "openai",
 			BaseURL:                "http://localhost:8080",
-			ContextTokens:          32768,
-			MaxOutputTokens:        1024,
-			RequiredOverheadTokens: 256,
+			ContextTokens:          budget.ContextTokens,
+			MaxOutputTokens:        budget.OutputTokens,
+			RequiredOverheadTokens: budget.RequiredOverheadTokens,
 		},
 		Paths: PathConfig{
 			StateDir:   "data/state",

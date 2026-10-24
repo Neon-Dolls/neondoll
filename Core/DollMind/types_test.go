@@ -9,6 +9,8 @@ import (
 	"github.com/Neon-Dolls/neondoll/pkg/logger"
 )
 
+var defaultCognitiveInputBudget, _ = inference.DefaultModelContextBudget().InputTokens()
+
 type mockMindAPI struct {
 	s *dollstate.DollState
 }

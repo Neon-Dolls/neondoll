@@ -30,3 +30,14 @@ func TestModelContextBudgetInputTokens(t *testing.T) {
 		})
 	}
 }
+
+func TestDefaultModelContextBudget(t *testing.T) {
+	budget := DefaultModelContextBudget()
+	if budget.ContextTokens != 32768 {
+		t.Fatalf("default context tokens = %d, want 32768", budget.ContextTokens)
+	}
+	input, err := budget.InputTokens()
+	if err != nil || input != 31488 {
+		t.Fatalf("default input tokens = %d, %v; want 31488", input, err)
+	}
+}

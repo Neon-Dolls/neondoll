@@ -7,6 +7,12 @@ import (
 
 var ErrInvalidContextBudget = errors.New("inference: invalid model context budget")
 
+const (
+	DefaultContextTokens          = 32768
+	DefaultOutputTokens           = 1024
+	DefaultRequiredOverheadTokens = 256
+)
+
 // ModelContextBudget describes the selected model's total context capacity.
 // OutputTokens and RequiredOverheadTokens are reserved before model-visible
 // input is assembled by Context Builder.
@@ -14,6 +20,17 @@ type ModelContextBudget struct {
 	ContextTokens          int
 	OutputTokens           int
 	RequiredOverheadTokens int
+}
+
+// DefaultModelContextBudget is Core's configured-consumption default. It is a
+// limit chosen by Core and must not be expanded from provider-advertised model
+// capabilities.
+func DefaultModelContextBudget() ModelContextBudget {
+	return ModelContextBudget{
+		ContextTokens:          DefaultContextTokens,
+		OutputTokens:           DefaultOutputTokens,
+		RequiredOverheadTokens: DefaultRequiredOverheadTokens,
+	}
 }
 
 // InputTokens returns the capacity available to Context Builder.

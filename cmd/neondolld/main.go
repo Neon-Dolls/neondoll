@@ -327,7 +327,7 @@ func main() {
 		mindAPI := &productionMindAPI{state: dollState, store: store, provider: inferenceProvider}
 
 		// Create the Scheduler with the real provider and persist-backed API.
-		scheduler := dollmind.New(inferenceProvider, log, mindAPI)
+		scheduler := dollmind.New(inferenceProvider, log, mindAPI, dollmind.WithModelContextBudget(modelBudget))
 
 		// Wire the Scheduler as Pulse's MindEntrance.
 		pulseRunner = pulse.NewRunner(cfg.Core.Pulse, pulse.NewRealClock(), pulse.NewProductionRNG(), log, scheduler)

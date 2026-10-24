@@ -983,10 +983,11 @@ func TestPhase4_RestartReconstructsFutureWake(t *testing.T) {
 	log := logger.New(logger.DebugLevel, nil)
 	mindAPI1 := &persistBackedAPI{state: initState, store: store1}
 	sched1 := &Scheduler{
-		provider:     spy1,
-		log:          log,
-		mindAPI:      mindAPI1,
-		timeProvider: func() time.Time { return currentTime },
+		provider:      spy1,
+		log:           log,
+		mindAPI:       mindAPI1,
+		timeProvider:  func() time.Time { return currentTime },
+		contextBudget: inference.DefaultModelContextBudget(),
 	}
 
 	due, err := sched1.DueIntentions()
@@ -1044,10 +1045,11 @@ func TestPhase4_RestartReconstructsFutureWake(t *testing.T) {
 	mindAPI2 := &persistBackedAPI{state: reloaded, store: store2}
 
 	sched2 := &Scheduler{
-		provider:     spy2,
-		log:          log,
-		mindAPI:      mindAPI2,
-		timeProvider: func() time.Time { return currentTime },
+		provider:      spy2,
+		log:           log,
+		mindAPI:       mindAPI2,
+		timeProvider:  func() time.Time { return currentTime },
+		contextBudget: inference.DefaultModelContextBudget(),
 	}
 
 	// Step A: reference time still at refTime (12:00) — intention is NOT due
@@ -1148,10 +1150,11 @@ func TestPhase4_RestartReconstructsFutureWake(t *testing.T) {
 
 	mindAPI3 := &persistBackedAPI{state: reloaded2, store: store3}
 	sched3 := &Scheduler{
-		provider:     spy2,
-		log:          log,
-		mindAPI:      mindAPI3,
-		timeProvider: func() time.Time { return currentTime },
+		provider:      spy2,
+		log:           log,
+		mindAPI:       mindAPI3,
+		timeProvider:  func() time.Time { return currentTime },
+		contextBudget: inference.DefaultModelContextBudget(),
 	}
 
 	// The fulfilled Intention must be Completed and not returned by DueIntentions

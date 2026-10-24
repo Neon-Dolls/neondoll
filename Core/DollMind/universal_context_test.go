@@ -51,8 +51,8 @@ func TestDirectRunUsesBoundedIsolatedCognitionRuns(t *testing.T) {
 		if !strings.Contains(joinedInferenceContent(request.Messages), input) {
 			t.Errorf("direct request %d missing input %q", index, input)
 		}
-		if tokens := estimatedInferenceTokens(request.Messages); tokens > CognitiveContextTokenBudget {
-			t.Errorf("direct request %d tokens = %d, budget = %d", index, tokens, CognitiveContextTokenBudget)
+		if tokens := estimatedInferenceTokens(request.Messages); tokens > defaultCognitiveInputBudget {
+			t.Errorf("direct request %d tokens = %d, budget = %d", index, tokens, defaultCognitiveInputBudget)
 		}
 	}
 }
@@ -84,8 +84,8 @@ func TestInternalIntentionWakeReusesOneBoundedRun(t *testing.T) {
 		if !strings.Contains(content, "Review the garden") || !strings.Contains(content, "due internal intention") {
 			t.Errorf("wake request %d missing objective/evidence", index)
 		}
-		if tokens := estimatedInferenceTokens(request.Messages); tokens > CognitiveContextTokenBudget {
-			t.Errorf("wake request %d tokens = %d, budget = %d", index, tokens, CognitiveContextTokenBudget)
+		if tokens := estimatedInferenceTokens(request.Messages); tokens > defaultCognitiveInputBudget {
+			t.Errorf("wake request %d tokens = %d, budget = %d", index, tokens, defaultCognitiveInputBudget)
 		}
 	}
 }
@@ -111,8 +111,8 @@ func TestDirectPlanToolLoopReusesRunAndRebuildsContext(t *testing.T) {
 		if provider.runIDs[index] == "" || provider.runIDs[index] != provider.runIDs[0] {
 			t.Errorf("tool iteration %d run ID = %q, want %q", index, provider.runIDs[index], provider.runIDs[0])
 		}
-		if tokens := estimatedInferenceTokens(request.Messages); tokens > CognitiveContextTokenBudget {
-			t.Errorf("tool iteration %d tokens = %d, budget = %d", index, tokens, CognitiveContextTokenBudget)
+		if tokens := estimatedInferenceTokens(request.Messages); tokens > defaultCognitiveInputBudget {
+			t.Errorf("tool iteration %d tokens = %d, budget = %d", index, tokens, defaultCognitiveInputBudget)
 		}
 		if len(request.Tools) != 0 || len(request.ToolResults) != 0 {
 			t.Errorf("tool iteration %d bypassed budget with legacy fields", index)

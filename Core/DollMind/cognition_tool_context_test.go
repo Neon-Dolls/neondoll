@@ -58,8 +58,8 @@ func TestPulseToolLoopRebuildsBoundedContextEachIteration(t *testing.T) {
 		}
 	}
 	for index, request := range provider.requests[1:] {
-		if tokens := estimatedInferenceTokens(request.Messages); tokens > CognitiveContextTokenBudget {
-			t.Errorf("Plan iteration %d estimate = %d, budget = %d", index, tokens, CognitiveContextTokenBudget)
+		if tokens := estimatedInferenceTokens(request.Messages); tokens > defaultCognitiveInputBudget {
+			t.Errorf("Plan iteration %d estimate = %d, budget = %d", index, tokens, defaultCognitiveInputBudget)
 		}
 		if len(request.Tools) != 0 || len(request.ToolResults) != 0 {
 			t.Errorf("Plan iteration %d carried legacy unbudgeted tool fields", index)
@@ -80,7 +80,7 @@ func TestPulseToolLoopRebuildsBoundedContextEachIteration(t *testing.T) {
 }
 
 func TestDirectPlanToolLoopRejectsOversizedRequiredResult(t *testing.T) {
-	largeBody := &largeOutputBody{output: strings.Repeat("oversized-result-", CognitiveContextTokenBudget*3)}
+	largeBody := &largeOutputBody{output: strings.Repeat("oversized-result-", defaultCognitiveInputBudget*3)}
 	provider := &toolContextProvider{responses: []*inference.Response{
 		{ToolCalls: []inference.ToolCall{{ID: "large_call", Name: "large.output__read"}}},
 		{Content: makePlanJSON("must not be reached")},
@@ -98,7 +98,7 @@ func TestDirectPlanToolLoopRejectsOversizedRequiredResult(t *testing.T) {
 	}
 }
 
-func newPulseToolScheduler(provider inference.Provider, executionBody body.Body) *Scheduler {
+func newPulseToolScheduler(provider inference.Provider, executionBody body.Body, opts ...Option) *Scheduler {
 	registry := body.NewRegistry()
 	if executionBody == nil {
 		executionBody, _ = registry.Local()
@@ -108,7 +108,7 @@ func newPulseToolScheduler(provider inference.Provider, executionBody body.Body)
 	guard := body.NewGuard(registry, allowAllEvaluator{})
 	executor := NewToolExecutor(guard, executionBody)
 	state := &dollstate.DollState{Identity: dollstate.Identity{DollID: "tool-doll", CanonicalName: "Spark"}}
-	return New(provider, logger.New(logger.ErrorLevel, nil), &orientMockAPI{state: state}, WithToolExecutor(executor))
+	return New(provider, logger.New(logger.ErrorLevel, nil), &orientMockAPI{state: state}, append([]Option{WithToolExecutor(executor)}, opts...)...)
 }
 
 func estimatedInferenceTokens(messages []inference.Message) int {
