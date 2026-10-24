@@ -19,6 +19,9 @@ func TestDefaults(t *testing.T) {
 	if cfg.HTTP.Listen != "127.0.0.1:8080" {
 		t.Errorf("expected 127.0.0.1:8080, got %s", cfg.HTTP.Listen)
 	}
+	if cfg.Inference.ContextTokens != 32768 || cfg.Inference.MaxOutputTokens != 1024 || cfg.Inference.RequiredOverheadTokens != 256 {
+		t.Fatalf("unexpected inference budget defaults: %+v", cfg.Inference)
+	}
 }
 
 func TestSaveLoad(t *testing.T) {

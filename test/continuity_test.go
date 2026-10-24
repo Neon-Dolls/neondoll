@@ -71,7 +71,7 @@ func TestContinuity_MemorySurvivesStoreReopen(t *testing.T) {
 		t.Fatalf("NewStore (phase 2): %v", err)
 	}
 
-	svc := interaction.New(store2, mockProvider, log)
+	svc := interaction.New(store2, mockProvider, log, interaction.WithModelContextBudget(inference.ModelContextBudget{ContextTokens: 9216, OutputTokens: 768, RequiredOverheadTokens: 256}))
 	ingress, wsConfig := newAuthenticatedInteractionIngress(t, store2, svc)
 	wsSrv := ws.New(wsConfig, log, ingress)
 

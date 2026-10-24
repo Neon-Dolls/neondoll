@@ -198,6 +198,19 @@ per four Unicode code points, rounded up. `TokenEstimator` is replaceable so a
 future inference profile can supply model-specific accounting without changing
 history or builder consumers.
 
-This milestone does not choose an inference profile, perform semantic Memory
-retrieval, summarize, compact, or persist Cognitive Run turns. Those remain
-later integration and policy milestones.
+External Interaction inference resolves its input capacity from the daemon's
+selected inference configuration. `context_tokens` is the model's total
+window; Core subtracts `max_output_tokens` and
+`required_overhead_tokens` before calling Context Builder. The output reserve
+is also passed to the provider as `Request.MaxTokens`. Missing, negative, or
+insufficient configuration fails closed; Interaction never silently falls
+back to 8,192 tokens.
+
+Internal DollMind cognition does not yet have a production model-selection
+configuration boundary. Its existing bound is unchanged and is not represented
+as model-derived. Connecting cognition to selected-model configuration remains
+a separate runtime-wiring milestone.
+
+This milestone does not perform semantic Memory retrieval, summarize, compact,
+or persist Cognitive Run turns. Those remain later integration and policy
+milestones.
