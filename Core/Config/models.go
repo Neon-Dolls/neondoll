@@ -13,6 +13,17 @@ import (
 var (
 	ErrInvalidModelConfiguration = errors.New("config: invalid model configuration")
 	ErrUnknownModelReference     = errors.New("config: unknown model reference")
+	ErrUnknownInferenceTask      = errors.New("config: unknown inference task")
+)
+
+// InferenceTask identifies a Core-owned reason for invoking inference.
+type InferenceTask string
+
+const (
+	InferenceTaskInteraction     InferenceTask = "interaction"
+	InferenceTaskOrient          InferenceTask = "orient"
+	InferenceTaskPlan            InferenceTask = "plan"
+	InferenceTaskDirectCognition InferenceTask = "direct_cognition"
 )
 
 // ModelConfiguration is one named, static inference target. Budget controls
@@ -29,6 +40,7 @@ type ModelConfiguration struct {
 type ModelResolver struct {
 	defaultModel string
 	models       map[string]ModelConfiguration
+	tasks        map[InferenceTask]string
 }
 
 // ValidateModelConfiguration verifies that a resolved model is complete and
@@ -83,7 +95,27 @@ func NewModelResolver(config InferenceConfig) (*ModelResolver, error) {
 	if _, ok := models[defaultModel]; !ok {
 		return nil, fmt.Errorf("%w: default model %q", ErrUnknownModelReference, defaultModel)
 	}
-	return &ModelResolver{defaultModel: defaultModel, models: models}, nil
+	tasks := make(map[InferenceTask]string, len(config.Tasks))
+	for task, modelName := range config.Tasks {
+		if !validInferenceTask(task) {
+			return nil, fmt.Errorf("%w: %q", ErrUnknownInferenceTask, task)
+		}
+		modelName = strings.TrimSpace(modelName)
+		if _, ok := models[modelName]; !ok {
+			return nil, fmt.Errorf("%w: task %q references %q", ErrUnknownModelReference, task, modelName)
+		}
+		tasks[task] = modelName
+	}
+	return &ModelResolver{defaultModel: defaultModel, models: models, tasks: tasks}, nil
+}
+
+func validInferenceTask(task InferenceTask) bool {
+	switch task {
+	case InferenceTaskInteraction, InferenceTaskOrient, InferenceTaskPlan, InferenceTaskDirectCognition:
+		return true
+	default:
+		return false
+	}
 }
 
 func (resolver *ModelResolver) Resolve(name string) (ModelConfiguration, error) {
@@ -96,4 +128,17 @@ func (resolver *ModelResolver) Resolve(name string) (ModelConfiguration, error) 
 
 func (resolver *ModelResolver) Default() ModelConfiguration {
 	return resolver.models[resolver.defaultModel]
+}
+
+// ResolveTask returns a task's explicitly assigned model, or the configured
+// default when the known task has no assignment.
+func (resolver *ModelResolver) ResolveTask(task InferenceTask) (ModelConfiguration, error) {
+	if !validInferenceTask(task) {
+		return ModelConfiguration{}, fmt.Errorf("%w: %q", ErrUnknownInferenceTask, task)
+	}
+	name, ok := resolver.tasks[task]
+	if !ok {
+		name = resolver.defaultModel
+	}
+	return resolver.Resolve(name)
 }
