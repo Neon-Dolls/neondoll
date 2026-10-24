@@ -31,6 +31,38 @@ func TestLoadRejectsObsoleteFlatInferenceConfiguration(t *testing.T) {
 	}
 }
 
+func TestLoadRejectsUnknownInferenceFields(t *testing.T) {
+	for name, data := range map[string]string{
+		"direct":       `{"inference":{"unknown_setting":true}}`,
+		"nested model": `{"inference":{"models":{"default":{"unknown_setting":true}}}}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.json")
+			if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := Load(path); err == nil {
+				t.Fatal("Load accepted unknown inference field")
+			}
+		})
+	}
+}
+
+func TestLoadToleratesUnknownUnrelatedFields(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	data := []byte(`{"future_section":{"enabled":true},"core":{"future_setting":"value"}}`)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load rejected unrelated unknown fields: %v", err)
+	}
+	if cfg.Core.Profile != "default" || cfg.Inference.DefaultModel != "default" {
+		t.Fatalf("known defaults were not preserved: %+v", cfg)
+	}
+}
+
 func TestModelResolverDefaultsUnspecifiedContextCapacity(t *testing.T) {
 	resolver, err := NewModelResolver(InferenceConfig{
 		DefaultModel: "primary",

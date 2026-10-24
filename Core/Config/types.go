@@ -1,7 +1,6 @@
 package config
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -145,9 +144,7 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("config load: %w", err)
 	}
 	cfg := Defaults()
-	decoder := json.NewDecoder(bytes.NewReader(data))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&cfg); err != nil {
+	if err := json.Unmarshal(data, &cfg); err != nil {
 		return nil, fmt.Errorf("config parse: %w", err)
 	}
 	if _, err := NewModelResolver(cfg.Inference); err != nil {

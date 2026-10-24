@@ -1,6 +1,8 @@
 package config
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -27,6 +29,20 @@ type ModelConfiguration struct {
 type ModelResolver struct {
 	defaultModel string
 	models       map[string]ModelConfiguration
+}
+
+// UnmarshalJSON keeps inference configuration strict without changing the
+// historically permissive decoding of unrelated Core configuration sections.
+func (config *InferenceConfig) UnmarshalJSON(data []byte) error {
+	type inferenceConfig InferenceConfig
+	decoded := inferenceConfig(*config)
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&decoded); err != nil {
+		return err
+	}
+	*config = InferenceConfig(decoded)
+	return nil
 }
 
 func NewModelResolver(config InferenceConfig) (*ModelResolver, error) {
