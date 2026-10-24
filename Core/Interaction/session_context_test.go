@@ -21,11 +21,10 @@ import (
 )
 
 type sessionContextProvider struct {
-	mu             sync.Mutex
-	responses      []string
-	requests       []inference.Request
-	contextTurnIDs []session.TurnID
-	err            error
+	mu        sync.Mutex
+	responses []string
+	requests  []inference.Request
+	err       error
 }
 
 type blockingSessionProvider struct {
@@ -49,12 +48,10 @@ func (provider *blockingSessionProvider) Infer(ctx context.Context, request infe
 }
 
 func (provider *sessionContextProvider) ID() inference.ProviderID { return "session-context" }
-func (provider *sessionContextProvider) Infer(ctx context.Context, request inference.Request) (*inference.Response, error) {
+func (provider *sessionContextProvider) Infer(_ context.Context, request inference.Request) (*inference.Response, error) {
 	provider.mu.Lock()
 	defer provider.mu.Unlock()
 	provider.requests = append(provider.requests, request)
-	turnID, _ := TurnIDFromContext(ctx)
-	provider.contextTurnIDs = append(provider.contextTurnIDs, turnID)
 	if provider.err != nil {
 		return nil, provider.err
 	}
@@ -102,8 +99,8 @@ func TestSessionInteractionBuildsFreshMultiTurnContext(t *testing.T) {
 	if stored[0].TurnID == "" || stored[0].TurnID != stored[1].TurnID || stored[2].TurnID == "" || stored[2].TurnID != stored[3].TurnID || stored[0].TurnID == stored[2].TurnID {
 		t.Fatalf("turn IDs do not identify independent atomic pairs: %+v", stored)
 	}
-	if provider.requests[0].TurnID != stored[0].TurnID || provider.requests[1].TurnID != stored[2].TurnID || provider.contextTurnIDs[0] != stored[0].TurnID || provider.contextTurnIDs[1] != stored[2].TurnID {
-		t.Fatalf("turn ID was not stable across context, inference, and history: requests=%+v contexts=%+v history=%+v", provider.requests, provider.contextTurnIDs, stored)
+	if provider.requests[0].TurnID != stored[0].TurnID || provider.requests[1].TurnID != stored[2].TurnID {
+		t.Fatalf("turn ID was not stable across inference and history: requests=%+v history=%+v", provider.requests, stored)
 	}
 }
 
@@ -238,8 +235,8 @@ func TestFailedSessionInferenceDoesNotPersistTurn(t *testing.T) {
 		t.Fatalf("failure correlation = %q, want event %q", response.CorrelationID, event.ID)
 	}
 	turnID := provider.requests[0].TurnID
-	if turnID == "" || provider.contextTurnIDs[0] != turnID || string(turnID) == event.ID || string(turnID) == string(created.ID) {
-		t.Fatalf("failure identities are not independent or stable: turn=%q context=%q event=%q session=%q", turnID, provider.contextTurnIDs[0], event.ID, created.ID)
+	if turnID == "" || string(turnID) == event.ID || string(turnID) == string(created.ID) {
+		t.Fatalf("failure identities are not independent: turn=%q event=%q session=%q", turnID, event.ID, created.ID)
 	}
 	if !strings.Contains(diagnostics.String(), `"turn_id":"`+string(turnID)+`"`) || !strings.Contains(diagnostics.String(), `"event_correlation_id":"`+event.ID+`"`) {
 		t.Fatalf("failure diagnostics lack correlation identities: %s", diagnostics.String())

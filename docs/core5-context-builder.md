@@ -159,13 +159,14 @@ without a Turn ID. History remains separate from temporary model context and
 portable Doll Memory.
 
 M2.10 moves Turn creation to the admission boundary in `HandleInteraction`.
-The same Turn ID is carried in the interaction `context.Context`, on every
-provider-neutral `inference.Request`, in structured success/failure diagnostics,
-and finally into durable history. A future multi-step inference loop can read
-the context identity and reuse it rather than creating another ID. Session ID,
-Doll Link event correlation ID, provider response/tool IDs, legacy Doll Memory
-interaction IDs, and ephemeral Cognitive Run IDs remain distinct namespaces.
-No durable turn registry or provider wire field is introduced.
+The generated value is passed explicitly through interaction processing, on
+every provider-neutral `inference.Request`, in structured success/failure
+diagnostics, and finally into durable history. Future multi-step inference must
+reuse that explicit Turn ID rather than creating another identity. It is not
+stored in `context.Context`. Session ID, Doll Link event correlation ID,
+provider response/tool IDs, legacy Doll Memory interaction IDs, and ephemeral
+Cognitive Run IDs remain distinct namespaces. No durable turn registry or
+provider wire field is introduced.
 
 The sliding policy always preserves explicitly required records (including
 supplied instructions, persisted Interaction Session system messages, and

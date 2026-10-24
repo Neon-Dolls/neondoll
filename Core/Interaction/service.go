@@ -41,7 +41,6 @@ func (s *Service) HandleInteraction(ctx context.Context, resolved *session.Inter
 		return nil, fmt.Errorf("interaction session context unavailable")
 	}
 	turnID := session.NewTurnID()
-	ctx = withTurnID(ctx, turnID)
 	release, err := s.sessions.acquire(ctx, string(resolved.ID))
 	if err != nil {
 		return nil, fmt.Errorf("interaction turn %s: acquire session execution: %w", turnID, err)
