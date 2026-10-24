@@ -12,12 +12,6 @@ import (
 	"github.com/Neon-Dolls/neondoll/Core/Inference"
 )
 
-// CognitiveContextTokenBudget bounds the provider input assembled for an
-// internal cognition invocation. Cognition does not yet have production model
-// selection/configuration wiring; M2.11 therefore does not pretend this value
-// was resolved from a selected model.
-const CognitiveContextTokenBudget = 8192
-
 type cognitionRunContextKey struct{}
 
 type cognitionRunExecution struct {
@@ -107,10 +101,10 @@ func (run *cognitionRunExecution) replaceWorking(records []contextbuilder.Cognit
 	return nil
 }
 
-func (run *cognitionRunExecution) messages(ctx context.Context, instructions ...string) ([]inference.Message, error) {
+func (run *cognitionRunExecution) messages(ctx context.Context, tokenBudget int, instructions ...string) ([]inference.Message, error) {
 	result, err := run.builder.BuildSource(ctx, contextbuilder.SourceRequest{
 		Source:             run.resolver.Source(),
-		TokenBudget:        CognitiveContextTokenBudget,
+		TokenBudget:        tokenBudget,
 		SystemInstructions: instructions,
 	})
 	if err != nil {

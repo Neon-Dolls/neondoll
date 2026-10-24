@@ -82,8 +82,8 @@ func TestPulseExecutionUsesOneBoundedCognitionRunAcrossOrientAndPlan(t *testing.
 	if strings.Contains(orientContext, strings.Repeat("large optional context ", 20)) {
 		t.Error("oversized optional Goals should not displace bounded required context")
 	}
-	if got := len([]rune(orientContext)); got > CognitiveContextTokenBudget*4 {
-		t.Fatalf("bounded context has %d runes, budget approximation permits at most %d", got, CognitiveContextTokenBudget*4)
+	if got := len([]rune(orientContext)); got > defaultCognitiveInputBudget*4 {
+		t.Fatalf("bounded context has %d runes, budget approximation permits at most %d", got, defaultCognitiveInputBudget*4)
 	}
 	if planContext := joinedInferenceContent(calls[1].messages); !strings.Contains(planContext, "L1 Orientation") || !strings.Contains(planContext, "pulse orientation") {
 		t.Fatalf("Plan context does not include run-local L1 working state: %s", planContext)

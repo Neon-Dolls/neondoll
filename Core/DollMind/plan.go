@@ -290,7 +290,11 @@ func (s *Scheduler) Plan(ctx context.Context, eventType events.Type, input strin
 		return nil, false, fmt.Errorf("plan append orientation: %w", err)
 	}
 	contextInstruction := planInstruction(eventType, input, orientation)
-	messages, err := run.messages(ctx, contextInstruction)
+	inputBudget, err := s.inputTokenBudget()
+	if err != nil {
+		return nil, false, fmt.Errorf("plan model context budget: %w", err)
+	}
+	messages, err := run.messages(ctx, inputBudget, contextInstruction)
 	if err != nil {
 		return nil, false, fmt.Errorf("plan context: %w", err)
 	}
@@ -323,7 +327,7 @@ func (s *Scheduler) Plan(ctx context.Context, eventType events.Type, input strin
 	resp, err := s.provider.Infer(ctx, inference.Request{
 		Messages:    messages,
 		Temperature: 0.3,
-		MaxTokens:   1024,
+		MaxTokens:   s.contextBudget.OutputTokens,
 		Purpose:     inference.PurposePlan,
 	})
 	if err != nil {
@@ -509,7 +513,11 @@ func (s *Scheduler) toolCognize(ctx context.Context, contextInstruction string) 
 		if err := run.replaceWorking(working); err != nil {
 			return nil, fmt.Errorf("plan tool context working state: %w", err)
 		}
-		freshMessages, err := run.messages(ctx, contextInstruction, inference.FormatToolsForPrompt(tools))
+		inputBudget, err := s.inputTokenBudget()
+		if err != nil {
+			return nil, fmt.Errorf("plan tool model context budget: %w", err)
+		}
+		freshMessages, err := run.messages(ctx, inputBudget, contextInstruction, inference.FormatToolsForPrompt(tools))
 		if err != nil {
 			return nil, fmt.Errorf("plan tool context: %w", err)
 		}
@@ -519,7 +527,7 @@ func (s *Scheduler) toolCognize(ctx context.Context, contextInstruction string) 
 		req = inference.Request{
 			Messages:    freshMessages,
 			Temperature: 0.3,
-			MaxTokens:   1024,
+			MaxTokens:   s.contextBudget.OutputTokens,
 			Purpose:     inference.PurposePlan,
 		}
 

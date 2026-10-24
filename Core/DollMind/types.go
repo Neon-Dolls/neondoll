@@ -104,20 +104,22 @@ func WithDispatcher(d Dispatcher) Option {
 
 // Scheduler manages cognition cycles.
 type Scheduler struct {
-	provider     inference.Provider
-	log          *logger.Logger
-	mindAPI      MindAPI
-	dispatcher   Dispatcher
-	timeProvider func() time.Time
-	toolExecutor *ToolExecutor
+	provider      inference.Provider
+	log           *logger.Logger
+	mindAPI       MindAPI
+	dispatcher    Dispatcher
+	timeProvider  func() time.Time
+	toolExecutor  *ToolExecutor
+	contextBudget inference.ModelContextBudget
 }
 
 func New(provider inference.Provider, log *logger.Logger, mindAPI MindAPI, opts ...Option) *Scheduler {
 	s := &Scheduler{
-		provider:     provider,
-		log:          log,
-		mindAPI:      mindAPI,
-		timeProvider: time.Now,
+		provider:      provider,
+		log:           log,
+		mindAPI:       mindAPI,
+		timeProvider:  time.Now,
+		contextBudget: inference.DefaultModelContextBudget(),
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -143,6 +145,16 @@ func WithTimeProvider(tp func() time.Time) Option {
 // are fed back to the provider until final content is produced.
 func WithToolExecutor(executor *ToolExecutor) Option {
 	return func(s *Scheduler) { s.toolExecutor = executor }
+}
+
+// WithModelContextBudget overrides Core's configured context consumption for
+// all inference performed by this Scheduler.
+func WithModelContextBudget(budget inference.ModelContextBudget) Option {
+	return func(s *Scheduler) { s.contextBudget = budget }
+}
+
+func (s *Scheduler) inputTokenBudget() (int, error) {
+	return s.contextBudget.InputTokens()
 }
 
 // Enter is the cognition entry boundary.
@@ -303,7 +315,11 @@ func (s *Scheduler) Run(ctx context.Context, level Level, input string) (*Result
 	}); err != nil {
 		return nil, fmt.Errorf("run cognition input: %w", err)
 	}
-	messages, err := run.messages(ctx, "Respond to the direct cognition input at level "+level.String()+".")
+	inputBudget, err := s.inputTokenBudget()
+	if err != nil {
+		return nil, fmt.Errorf("run model context budget: %w", err)
+	}
+	messages, err := run.messages(ctx, inputBudget, "Respond to the direct cognition input at level "+level.String()+".")
 	if err != nil {
 		return nil, fmt.Errorf("run cognition context: %w", err)
 	}
@@ -311,8 +327,9 @@ func (s *Scheduler) Run(ctx context.Context, level Level, input string) (*Result
 		map[string]any{"level": level.String(), "input_len": len(input), "run_id": run.id})
 
 	resp, err := s.provider.Infer(ctx, inference.Request{
-		Messages: messages,
-		Purpose:  inference.PurposeRespond,
+		Messages:  messages,
+		Purpose:   inference.PurposeRespond,
+		MaxTokens: s.contextBudget.OutputTokens,
 	})
 	if err != nil {
 		return nil, err
