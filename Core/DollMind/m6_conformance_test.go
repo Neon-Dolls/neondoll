@@ -130,7 +130,7 @@ func setupConformanceScheduler(acts []scriptedAct, guardEval body.AuthorityEvalu
 	reg := body.NewRegistry()
 	guard := body.NewGuard(reg, guardEval)
 	loc, _ := reg.Local()
-	exec := NewToolExecutor(guard, loc)
+	exec := NewToolExecutor(guard, loc, "neondoll")
 
 	log := logger.New(logger.ErrorLevel, nil)
 	state := newConformanceState()

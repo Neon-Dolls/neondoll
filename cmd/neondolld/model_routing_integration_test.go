@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
@@ -78,6 +79,7 @@ func TestProductionTaskModelRoutingIntegration(t *testing.T) {
 	orientEndpoint := newRoutingEndpoint(t, `{"summary":"pulse matters","matters":true,"reason":"routing proof"}`)
 	planEndpoint := newRoutingEndpoint(t,
 		"TOOL_CALL: runtime.info__read\nARGUMENTS:\n{}",
+		"TOOL_CALL: runtime.info__list\nARGUMENTS:\n{}",
 		`{"summary":"plan complete","proposed_action":"done","observations":["ok"],"should_reorient":false,"request_future_cognition":false}`,
 	)
 	directEndpoint := newRoutingEndpoint(t, "direct response")
@@ -163,13 +165,15 @@ func TestProductionTaskModelRoutingIntegration(t *testing.T) {
 	}
 
 	registry := body.NewRegistry()
-	local, _ := registry.Local()
-	guard := body.NewGuard(registry, allowRoutingTools{})
+	toolExecutor, err := newProductionToolExecutor(registry, state.Identity.DollID)
+	if err != nil {
+		t.Fatal(err)
+	}
 	scheduler := dollmind.New(directProvider, log, &productionMindAPI{state: state, store: store, provider: directProvider},
 		dollmind.WithModelConfiguration(directModel),
 		dollmind.WithTaskModelConfiguration(config.InferenceTaskOrient, orientProvider, orientModel),
 		dollmind.WithTaskModelConfiguration(config.InferenceTaskPlan, inference.NewToolEnabledProvider(planProvider), planModel),
-		dollmind.WithToolExecutor(dollmind.NewToolExecutor(guard, local)),
+		dollmind.WithToolExecutor(toolExecutor),
 	)
 	if err := scheduler.EnterPulseWake(context.Background(), pulse.PulseWake{Pressure: 0.8, EffectivePressure: 0.7}); err != nil {
 		t.Fatal(err)
@@ -180,7 +184,10 @@ func TestProductionTaskModelRoutingIntegration(t *testing.T) {
 
 	assertEndpointRequests(t, "interaction", interactionEndpoint.snapshot(), "shared-model", 128, 832, 1)
 	assertEndpointRequests(t, "orient", orientEndpoint.snapshot(), "orient-model", 160, 960, 1)
-	assertEndpointRequests(t, "plan", planEndpoint.snapshot(), "plan-model", 200, 1300, 2)
+	planRequests := planEndpoint.snapshot()
+	assertEndpointRequests(t, "plan", planRequests, "plan-model", 200, 1300, 3)
+	assertToolContinuation(t, planRequests[1], "tp_call_1", "runtime.info__read")
+	assertToolContinuation(t, planRequests[2], "tp_call_1", "runtime.info__list")
 	assertEndpointRequests(t, "direct/default", directEndpoint.snapshot(), "shared-model", 300, 1648, 1)
 }
 
@@ -226,6 +233,36 @@ func TestProductionTaskModelRoutingFailsBeforeInference(t *testing.T) {
 	}
 }
 
+func TestProductionToolExecutorUsesPersistedDollIdentity(t *testing.T) {
+	registry := body.NewRegistry()
+	if err := registry.RegisterCapability(body.LocalBodyID, body.Capability{
+		ID: "unrelated.info", Operations: []string{"read"}, Available: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	executor, err := newProductionToolExecutor(registry, "persisted-doll-42")
+	if err != nil {
+		t.Fatal(err)
+	}
+	definitions := make(map[string]*inference.Tool)
+	tools := executor.Tools()
+	for index := range tools {
+		definitions[tools[index].Name] = &tools[index]
+	}
+	for _, name := range []string{"runtime.info__read", "runtime.info__list"} {
+		result := executor.ExecuteCall(context.Background(), inference.ToolCall{ID: "call_" + name, Name: name}, definitions[name])
+		if result.Status != inference.ToolResultSuccess {
+			t.Errorf("%s result = %+v, want success", name, result)
+		}
+	}
+	denied := executor.ExecuteCall(context.Background(), inference.ToolCall{
+		ID: "call_unrelated", Name: "unrelated.info__read",
+	}, definitions["unrelated.info__read"])
+	if denied.Status != inference.ToolResultFailure || denied.Error == nil || denied.Error.Code != "denied" {
+		t.Fatalf("unrelated operation result = %+v, want authority denial", denied)
+	}
+}
+
 func modelConfiguration(model, endpoint string, contextTokens, outputTokens, overheadTokens int) config.ModelConfiguration {
 	return config.ModelConfiguration{
 		Provider: "openai", Model: model, Endpoint: endpoint,
@@ -255,8 +292,12 @@ func assertEndpointRequests(t *testing.T, task string, requests []capturedChatRe
 	}
 }
 
-type allowRoutingTools struct{}
-
-func (allowRoutingTools) Evaluate(body.AuthorityRequest) body.AuthorityResult {
-	return body.AuthorityResult{Decision: body.AuthorityAllow}
+func assertToolContinuation(t *testing.T, request capturedChatRequest, callID, toolName string) {
+	t.Helper()
+	for _, message := range request.Messages {
+		if strings.Contains(message.Content, "Tool result for call "+callID+": SUCCESS") && strings.Contains(message.Content, toolName) {
+			return
+		}
+	}
+	t.Fatalf("continuation request did not contain correlated result for %s/%s", callID, toolName)
 }

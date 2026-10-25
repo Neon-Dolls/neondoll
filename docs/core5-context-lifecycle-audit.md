@@ -85,11 +85,10 @@ blockers for this workstream:
 - External Interaction inference does not yet have multi-step tool
   orchestration. Turn IDs and history records are shaped to support it, but it
   must reuse the same fresh-build rule when introduced.
-- The daemon does not currently install a `ToolExecutor` for Pulse cognition;
-  therefore its production Pulse configuration uses the bounded non-tool Plan
-  path. The tool-enabled Scheduler path is bounded and tested when a trusted
-  executor is supplied. Enabling that capability is runtime/action wiring, not
-  a Context Builder defect.
+- Interaction, Orient, and direct cognition have not yet migrated onto the
+  shared multi-step execution component introduced after this audit. Their
+  existing single-invocation paths remain freshly bounded; later migrations
+  will add tool capability without changing their context sources.
 
 Any new inference entry point or provider adapter must be treated as a new
 context-lifecycle boundary: it must select a complete model configuration,

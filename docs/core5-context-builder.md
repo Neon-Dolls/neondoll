@@ -226,6 +226,17 @@ provider integration tests prove endpoint routing, budget enforcement, default
 fallback, and failure before inference for invalid references or unsupported
 providers.
 
+M2.19 introduces `Core/CognitiveExecution` as the single multi-step inference
+loop. Plan is the first migrated caller: its no-tool and tool-enabled forms use
+the same executor, while the active Cognitive Run remains responsible for
+reconstructing bounded messages before every invocation. The executor pins the
+task-selected provider and complete model configuration for its lifetime,
+derives the input budget supplied to each rebuild, executes tool calls
+sequentially through the existing authorized `ToolExecutor`, and carries only
+correlated, budget-selectable exchanges into subsequent builds. Production
+Pulse wiring installs the executor with explicit Local Body authority for the
+benign `runtime.info/read` and `runtime.info/list` operations.
+
 This milestone does not perform semantic Memory retrieval, summarize, compact,
 or persist Cognitive Run turns. Those remain later integration and policy
 milestones.
