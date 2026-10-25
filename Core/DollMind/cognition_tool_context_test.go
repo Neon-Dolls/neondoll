@@ -169,7 +169,7 @@ func newPulseToolScheduler(provider inference.Provider, executionBody body.Body,
 		panic(err)
 	}
 	guard := body.NewGuard(registry, allowAllEvaluator{})
-	executor := NewToolExecutor(guard, executionBody, "neondoll")
+	executor := NewToolExecutor(registry, guard, allowAllEvaluator{}, "neondoll")
 	state := &dollstate.DollState{Identity: dollstate.Identity{DollID: "tool-doll", CanonicalName: "Spark"}}
 	return New(provider, logger.New(logger.ErrorLevel, nil), &orientMockAPI{state: state}, append([]Option{WithToolExecutor(executor)}, opts...)...)
 }

@@ -50,9 +50,10 @@ type PulseConfig struct {
 
 // CoreConfig for runtime settings.
 type CoreConfig struct {
-	Profile     string      `json:"profile"`
-	Environment string      `json:"environment"`
-	Pulse       PulseConfig `json:"pulse"`
+	Profile         string         `json:"profile"`
+	Environment     string         `json:"environment"`
+	Pulse           PulseConfig    `json:"pulse"`
+	BodyPreferences map[string]int `json:"body_preferences,omitempty"`
 }
 
 // ConsoleConfig for REPL and terminal interaction.

@@ -90,6 +90,24 @@ type ToolResult struct {
 
 	// Error is the structured error information on failure.
 	Error *ToolError `json:"error,omitempty"`
+
+	// Attempts preserves every independently guarded Body execution attempted
+	// for this tool call. CandidateRejections records resolver filtering that
+	// occurred before execution. Both remain correlated to ToolCallID.
+	Attempts            []ToolExecutionAttempt   `json:"attempts,omitempty"`
+	CandidateRejections []ToolCandidateRejection `json:"candidate_rejections,omitempty"`
+}
+
+type ToolExecutionAttempt struct {
+	BodyID      string `json:"body_id"`
+	ExecutionID string `json:"execution_id"`
+	Status      string `json:"status"`
+	ErrorCode   string `json:"error_code,omitempty"`
+}
+
+type ToolCandidateRejection struct {
+	BodyID  string   `json:"body_id"`
+	Reasons []string `json:"reasons"`
 }
 
 // ToolError carries structured error information for a failed tool execution.

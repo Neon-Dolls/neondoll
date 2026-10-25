@@ -18,7 +18,9 @@ type AuthorityRequest struct {
 	// Doll identifies the Doll requesting the operation.
 	Doll string
 
-	// Body is the Body that would perform the operation.
+	// Body is the Body that would perform the operation. The trusted
+	// action-wide policy boundary uses an empty Body before resolution; every
+	// concrete Guard evaluation always supplies the selected Body identity.
 	Body BodyID
 
 	// Capability is the capability ID requested (e.g. "runtime.info").

@@ -154,7 +154,7 @@ func TestProductionTaskModelRoutingIntegration(t *testing.T) {
 	}
 	log := logger.New(logger.ErrorLevel, io.Discard)
 	registry := body.NewRegistry()
-	toolExecutor, err := newProductionToolExecutor(registry, state.Identity.DollID)
+	toolExecutor, err := newProductionToolExecutor(registry, state.Identity.DollID, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -263,7 +263,7 @@ func TestProductionToolExecutorUsesPersistedDollIdentity(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	executor, err := newProductionToolExecutor(registry, "persisted-doll-42")
+	executor, err := newProductionToolExecutor(registry, "persisted-doll-42", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -281,8 +281,8 @@ func TestProductionToolExecutorUsesPersistedDollIdentity(t *testing.T) {
 	denied := executor.ExecuteCall(context.Background(), inference.ToolCall{
 		ID: "call_unrelated", Name: "unrelated.info__read",
 	}, definitions["unrelated.info__read"])
-	if denied.Status != inference.ToolResultFailure || denied.Error == nil || denied.Error.Code != "denied" {
-		t.Fatalf("unrelated operation result = %+v, want authority denial", denied)
+	if denied.Status != inference.ToolResultFailure || denied.Error == nil || denied.Error.Code != "action_denied" {
+		t.Fatalf("unrelated operation result = %+v, want action-wide authority denial", denied)
 	}
 }
 

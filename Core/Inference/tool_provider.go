@@ -241,5 +241,15 @@ func FormatToolResultForPrompt(tr ToolResult) string {
 	if tr.Error != nil {
 		result += fmt.Sprintf("Error [%s]: %s\n", tr.Error.Code, tr.Error.Message)
 	}
+	for _, rejected := range tr.CandidateRejections {
+		result += fmt.Sprintf("Candidate %s rejected: %s\n", rejected.BodyID, strings.Join(rejected.Reasons, ", "))
+	}
+	for _, attempt := range tr.Attempts {
+		result += fmt.Sprintf("Attempt %s on Body %s: %s", attempt.ExecutionID, attempt.BodyID, attempt.Status)
+		if attempt.ErrorCode != "" {
+			result += " [" + attempt.ErrorCode + "]"
+		}
+		result += "\n"
+	}
 	return result
 }
