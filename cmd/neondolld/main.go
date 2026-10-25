@@ -62,19 +62,54 @@ func resolveTaskProvider(resolver *config.ModelResolver, task config.InferenceTa
 	return model, provider, nil
 }
 
-func newProductionToolExecutor(registry *body.Registry, dollID string) (*dollmind.ToolExecutor, error) {
+func newProductionToolExecutor(registry *body.Registry, dollID string, configuredRules []config.BodyAuthorizationRule, configuredPreferences map[string]int) (*dollmind.ToolExecutor, error) {
 	if dollID == "" {
 		return nil, fmt.Errorf("production tool executor: Doll identity unavailable")
 	}
-	local, ok := registry.Local()
-	if !ok {
+	if _, ok := registry.Local(); !ok {
 		return nil, fmt.Errorf("production tool executor: local Body unavailable")
 	}
-	authority := body.NewRuleEvaluator(
-		body.AuthorityRule{Doll: dollID, Body: body.LocalBodyID, Capability: "runtime.info", Operation: "read", Decision: body.AuthorityAllow},
-		body.AuthorityRule{Doll: dollID, Body: body.LocalBodyID, Capability: "runtime.info", Operation: "list", Decision: body.AuthorityAllow},
+	actionAuthority := body.NewRuleEvaluator(
+		body.AuthorityRule{Doll: dollID, Capability: "runtime.info", Operation: "read", Decision: body.AuthorityAllow},
+		body.AuthorityRule{Doll: dollID, Capability: "runtime.info", Operation: "list", Decision: body.AuthorityAllow},
 	)
-	return dollmind.NewToolExecutor(body.NewGuard(registry, authority), local, dollID), nil
+	bodyRules, err := productionBodyAuthorityRules(dollID, configuredRules)
+	if err != nil {
+		return nil, err
+	}
+	bodyAuthority := body.NewRuleEvaluator(bodyRules...)
+	preferences := make(map[body.BodyID]int, len(configuredPreferences))
+	for bodyID, preference := range configuredPreferences {
+		preferences[body.BodyID(bodyID)] = preference
+	}
+	return dollmind.NewToolExecutor(registry, body.NewGuard(registry, bodyAuthority), actionAuthority, dollID,
+		dollmind.WithBodyPreferences(preferences)), nil
+}
+
+func productionBodyAuthorityRules(dollID string, configured []config.BodyAuthorizationRule) ([]body.AuthorityRule, error) {
+	if len(configured) == 0 {
+		return []body.AuthorityRule{
+			{Doll: dollID, Body: body.LocalBodyID, Capability: "runtime.info", Operation: "read", Decision: body.AuthorityAllow},
+			{Doll: dollID, Body: body.LocalBodyID, Capability: "runtime.info", Operation: "list", Decision: body.AuthorityAllow},
+		}, nil
+	}
+	rules := make([]body.AuthorityRule, len(configured))
+	for index, rule := range configured {
+		if rule.Body == "" || rule.Capability == "" || rule.Operation == "" ||
+			(rule.Decision != body.AuthorityAllow && rule.Decision != body.AuthorityDeny) ||
+			(rule.Scope != "" && rule.Scope != body.AuthorityScopeBody && rule.Scope != body.AuthorityScopeGlobal) {
+			return nil, fmt.Errorf("production tool executor: invalid Body authorization rule %d", index)
+		}
+		ruleDoll := rule.Doll
+		if ruleDoll == "" {
+			ruleDoll = dollID
+		}
+		rules[index] = body.AuthorityRule{
+			Doll: ruleDoll, Body: body.BodyID(rule.Body), Capability: rule.Capability, Operation: rule.Operation,
+			Decision: rule.Decision, Reason: rule.Reason, Message: rule.Message, Scope: rule.Scope,
+		}
+	}
+	return rules, nil
 }
 
 func loadProductionDoll(ctx context.Context, store persistence.Store, dollID string) (*dollstate.DollState, error) {
@@ -244,7 +279,7 @@ func main() {
 		log.Error("production Doll state setup error", map[string]any{"doll_id": dollID, "error": err.Error()})
 		os.Exit(1)
 	}
-	cognitionToolExecutor, err := newProductionToolExecutor(bodyRegistry, dollState.Identity.DollID)
+	cognitionToolExecutor, err := newProductionToolExecutor(bodyRegistry, dollState.Identity.DollID, cfg.Core.BodyAuthorization, cfg.Core.BodyPreferences)
 	if err != nil {
 		log.Error("cognition tool executor setup error", map[string]any{"error": err.Error()})
 		os.Exit(1)

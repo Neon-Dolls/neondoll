@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/Neon-Dolls/neondoll/Core/Body"
 	"github.com/Neon-Dolls/neondoll/Core/Inference"
 )
 
@@ -50,9 +51,24 @@ type PulseConfig struct {
 
 // CoreConfig for runtime settings.
 type CoreConfig struct {
-	Profile     string      `json:"profile"`
-	Environment string      `json:"environment"`
-	Pulse       PulseConfig `json:"pulse"`
+	Profile           string                  `json:"profile"`
+	Environment       string                  `json:"environment"`
+	Pulse             PulseConfig             `json:"pulse"`
+	BodyPreferences   map[string]int          `json:"body_preferences,omitempty"`
+	BodyAuthorization []BodyAuthorizationRule `json:"body_authorization,omitempty"`
+}
+
+// BodyAuthorizationRule configures the existing per-Body Guard evaluator.
+// An empty Doll binds the rule to the production Core's persisted Doll ID.
+type BodyAuthorizationRule struct {
+	Doll       string                 `json:"doll,omitempty"`
+	Body       string                 `json:"body"`
+	Capability string                 `json:"capability"`
+	Operation  string                 `json:"operation"`
+	Decision   body.AuthorityDecision `json:"decision"`
+	Reason     string                 `json:"reason,omitempty"`
+	Message    string                 `json:"message,omitempty"`
+	Scope      body.AuthorityScope    `json:"scope,omitempty"`
 }
 
 // ConsoleConfig for REPL and terminal interaction.

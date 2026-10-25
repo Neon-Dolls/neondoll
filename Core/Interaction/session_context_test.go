@@ -315,7 +315,6 @@ func TestInteractionUsesUnifiedMultiStepExecutionAndPersistsOneTurn(t *testing.T
 	sessions, history := interactionSessionStores(t, store)
 	created := createInteractionSession(t, sessions, "body-tools")
 	registry := body.NewRegistry()
-	local, _ := registry.Local()
 	guard := body.NewGuard(registry, body.NewRuleEvaluator(
 		body.AuthorityRule{Doll: "tool-session-doll", Body: body.LocalBodyID, Capability: "runtime.info", Operation: "read", Decision: body.AuthorityAllow},
 		body.AuthorityRule{Doll: "tool-session-doll", Body: body.LocalBodyID, Capability: "runtime.info", Operation: "list", Decision: body.AuthorityAllow},
@@ -327,7 +326,10 @@ func TestInteractionUsesUnifiedMultiStepExecutionAndPersistsOneTurn(t *testing.T
 	}}
 	service := New(store, provider, logger.New(logger.ErrorLevel, io.Discard),
 		WithModelConfiguration(testModelConfiguration),
-		WithToolExecutor(dollmind.NewToolExecutor(guard, local, "tool-session-doll")),
+		WithToolExecutor(dollmind.NewToolExecutor(registry, guard, body.NewRuleEvaluator(
+			body.AuthorityRule{Doll: "tool-session-doll", Capability: "runtime.info", Operation: "read", Decision: body.AuthorityAllow},
+			body.AuthorityRule{Doll: "tool-session-doll", Capability: "runtime.info", Operation: "list", Decision: body.AuthorityAllow},
+		), "tool-session-doll")),
 	)
 	event := newResponse("tool-session-doll", "inspect runtime")
 	response, err := service.HandleInteraction(context.Background(), created, &event)
@@ -435,7 +437,6 @@ func TestInteractionUnifiedExecutionKeepsUnauthorizedToolsDenied(t *testing.T) {
 	if err := registry.RegisterCapability(body.LocalBodyID, body.Capability{ID: "private.info", Operations: []string{"read"}, Available: true}); err != nil {
 		t.Fatal(err)
 	}
-	local, _ := registry.Local()
 	guard := body.NewGuard(registry, body.NewRuleEvaluator())
 	provider := &interactionToolProvider{responses: []*inference.Response{
 		{ToolCalls: []inference.ToolCall{{ID: "denied_A", Name: "private.info__read"}}},
@@ -443,7 +444,9 @@ func TestInteractionUnifiedExecutionKeepsUnauthorizedToolsDenied(t *testing.T) {
 	}}
 	service := New(store, provider, logger.New(logger.ErrorLevel, io.Discard),
 		WithModelConfiguration(testModelConfiguration),
-		WithToolExecutor(dollmind.NewToolExecutor(guard, local, "denied-tool-doll")),
+		WithToolExecutor(dollmind.NewToolExecutor(registry, guard, body.NewRuleEvaluator(
+			body.AuthorityRule{Doll: "denied-tool-doll", Capability: "private.info", Operation: "read", Decision: body.AuthorityAllow},
+		), "denied-tool-doll")),
 	)
 	event := newResponse("denied-tool-doll", "read private info")
 	if _, err := service.HandleInteraction(context.Background(), created, &event); err != nil {
