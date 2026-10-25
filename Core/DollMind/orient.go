@@ -164,24 +164,13 @@ func (s *Scheduler) Orient(ctx context.Context, eventType events.Type, input str
 	if err != nil {
 		return nil, fmt.Errorf("orient cognition run: %w", err)
 	}
-	selected, inputBudget, err := s.modelForTask(config.InferenceTaskOrient)
+	selected, _, err := s.modelForTask(config.InferenceTaskOrient)
 	if err != nil {
 		return nil, fmt.Errorf("orient model context budget: %w", err)
 	}
-	messages, err := run.messages(ctx, inputBudget, orientInstruction(eventType, input))
+	resp, err := s.executeCognition(ctx, run, selected, inference.PurposeOrient, 0.3, orientInstruction(eventType, input))
 	if err != nil {
-		return nil, fmt.Errorf("orient context: %w", err)
-	}
-
-	resp, err := selected.provider.Infer(ctx, inference.Request{
-		Model:       selected.configuration.Model,
-		Messages:    messages,
-		Temperature: 0.3,
-		MaxTokens:   selected.configuration.Budget.OutputTokens,
-		Purpose:     inference.PurposeOrient,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("orient inference: %w", err)
+		return nil, fmt.Errorf("orient cognitive execution: %w", err)
 	}
 
 	orient, err := parseOrientation(resp.Content)

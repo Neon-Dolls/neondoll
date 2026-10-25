@@ -237,6 +237,15 @@ correlated, budget-selectable exchanges into subsequent builds. Production
 Pulse wiring installs the executor with explicit Local Body authority for the
 benign `runtime.info/read` and `runtime.info/list` operations.
 
+M2.20 migrates Orient and direct cognition onto that same execution boundary.
+Their task-specific instructions, model configurations, parsing, and ephemeral
+Cognitive Run identities remain unchanged, while zero or more correlated tool
+exchanges may now precede the terminal response. Consumed exchanges remain
+optional run-local evidence with structured correlation intact when a
+Pulse-triggered execution advances from Orient to Plan. Production wraps the
+Orient, Plan, and direct providers with the existing tool-aware adapter and
+uses one trusted ToolExecutor for all three paths.
+
 This milestone does not perform semantic Memory retrieval, summarize, compact,
 or persist Cognitive Run turns. Those remain later integration and policy
 milestones.

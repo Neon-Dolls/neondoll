@@ -363,7 +363,9 @@ func main() {
 
 		// Create the MindAPI and Scheduler with the real provider
 		// and persist-backed API.
-		mindAPI := &productionMindAPI{state: dollState, store: store, provider: directProvider}
+		directCognitionProvider := inference.NewToolEnabledProvider(directProvider)
+		orientCognitionProvider := inference.NewToolEnabledProvider(orientProvider)
+		mindAPI := &productionMindAPI{state: dollState, store: store, provider: directCognitionProvider}
 		cognitionToolExecutor, err := newProductionToolExecutor(bodyRegistry, dollState.Identity.DollID)
 		if err != nil {
 			log.Error("cognition tool executor setup error", map[string]any{"error": err.Error()})
@@ -371,9 +373,9 @@ func main() {
 		}
 
 		// Create the Scheduler with the real provider and persist-backed API.
-		scheduler := dollmind.New(directProvider, log, mindAPI,
+		scheduler := dollmind.New(directCognitionProvider, log, mindAPI,
 			dollmind.WithModelConfiguration(directModel),
-			dollmind.WithTaskModelConfiguration(config.InferenceTaskOrient, orientProvider, orientModel),
+			dollmind.WithTaskModelConfiguration(config.InferenceTaskOrient, orientCognitionProvider, orientModel),
 			dollmind.WithTaskModelConfiguration(config.InferenceTaskPlan, inference.NewToolEnabledProvider(planProvider), planModel),
 			dollmind.WithToolExecutor(cognitionToolExecutor),
 		)

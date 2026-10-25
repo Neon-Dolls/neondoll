@@ -348,23 +348,15 @@ func (s *Scheduler) Run(ctx context.Context, level Level, input string) (*Result
 	}); err != nil {
 		return nil, fmt.Errorf("run cognition input: %w", err)
 	}
-	selected, inputBudget, err := s.modelForTask(config.InferenceTaskDirectCognition)
+	selected, _, err := s.modelForTask(config.InferenceTaskDirectCognition)
 	if err != nil {
 		return nil, fmt.Errorf("run model context budget: %w", err)
-	}
-	messages, err := run.messages(ctx, inputBudget, "Respond to the direct cognition input at level "+level.String()+".")
-	if err != nil {
-		return nil, fmt.Errorf("run cognition context: %w", err)
 	}
 	s.log.Info("cognition run starting",
 		map[string]any{"level": level.String(), "input_len": len(input), "run_id": run.id})
 
-	resp, err := selected.provider.Infer(ctx, inference.Request{
-		Model:     selected.configuration.Model,
-		Messages:  messages,
-		Purpose:   inference.PurposeRespond,
-		MaxTokens: selected.configuration.Budget.OutputTokens,
-	})
+	resp, err := s.executeCognition(ctx, run, selected, inference.PurposeRespond, 0,
+		"Respond to the direct cognition input at level "+level.String()+".")
 	if err != nil {
 		return nil, err
 	}

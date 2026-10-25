@@ -85,10 +85,10 @@ blockers for this workstream:
 - External Interaction inference does not yet have multi-step tool
   orchestration. Turn IDs and history records are shaped to support it, but it
   must reuse the same fresh-build rule when introduced.
-- Interaction, Orient, and direct cognition have not yet migrated onto the
-  shared multi-step execution component introduced after this audit. Their
-  existing single-invocation paths remain freshly bounded; later migrations
-  will add tool capability without changing their context sources.
+- Interaction has not yet migrated onto the shared multi-step execution
+  component introduced after this audit. Its existing single-invocation path
+  remains freshly bounded; a later migration can add tool capability without
+  changing its persisted context source.
 
 Any new inference entry point or provider adapter must be treated as a new
 context-lifecycle boundary: it must select a complete model configuration,
