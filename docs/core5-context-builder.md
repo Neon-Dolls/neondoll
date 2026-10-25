@@ -215,6 +215,17 @@ budget, subtract the configured output and overhead reserves before context
 construction, and pass the output reserve as `Request.MaxTokens`.
 Provider-advertised capacity never expands this configured limit.
 
+M2.15–M2.17 add Core-owned task routing over complete model configurations.
+Interaction, Orient, Plan, and direct cognition each resolve a named model at
+the runtime composition boundary, with unassigned known tasks using the
+explicit configured default. The selected provider, endpoint, model identifier,
+input budget, and output reserve stay paired through execution. Pulse and
+intention cognition use the Orient and Plan assignments, and a Plan tool loop
+pins one selected configuration across all of its iterations. Local HTTP
+provider integration tests prove endpoint routing, budget enforcement, default
+fallback, and failure before inference for invalid references or unsupported
+providers.
+
 This milestone does not perform semantic Memory retrieval, summarize, compact,
 or persist Cognitive Run turns. Those remain later integration and policy
 milestones.
