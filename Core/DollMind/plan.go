@@ -15,6 +15,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/Neon-Dolls/neondoll/Core/Config"
 	contextbuilder "github.com/Neon-Dolls/neondoll/Core/ContextBuilder"
 	"github.com/Neon-Dolls/neondoll/Core/Inference"
 	"github.com/Neon-Dolls/neondoll/DollLink/Events"
@@ -290,7 +291,7 @@ func (s *Scheduler) Plan(ctx context.Context, eventType events.Type, input strin
 		return nil, false, fmt.Errorf("plan append orientation: %w", err)
 	}
 	contextInstruction := planInstruction(eventType, input, orientation)
-	inputBudget, err := s.inputTokenBudget()
+	selected, inputBudget, err := s.modelForTask(config.InferenceTaskPlan)
 	if err != nil {
 		return nil, false, fmt.Errorf("plan model context budget: %w", err)
 	}
@@ -324,11 +325,11 @@ func (s *Scheduler) Plan(ctx context.Context, eventType events.Type, input strin
 	}
 
 	// ── Original no-tool path ──────────────────────────────────────────
-	resp, err := s.provider.Infer(ctx, inference.Request{
-		Model:       s.modelConfiguration.Model,
+	resp, err := selected.provider.Infer(ctx, inference.Request{
+		Model:       selected.configuration.Model,
 		Messages:    messages,
 		Temperature: 0.3,
-		MaxTokens:   s.modelConfiguration.Budget.OutputTokens,
+		MaxTokens:   selected.configuration.Budget.OutputTokens,
 		Purpose:     inference.PurposePlan,
 	})
 	if err != nil {
@@ -501,6 +502,10 @@ func (s *Scheduler) toolCognize(ctx context.Context, contextInstruction string) 
 	baseWorking := run.snapshotWorking()
 	var toolHistory []contextbuilder.CognitionWorkingRecord
 	var toolExchanges []cognitionToolExchange
+	selected, inputBudget, err := s.modelForTask(config.InferenceTaskPlan)
+	if err != nil {
+		return nil, fmt.Errorf("plan tool model context budget: %w", err)
+	}
 
 	for {
 		// Phase 6 — context cancellation and deadline propagation
@@ -514,10 +519,6 @@ func (s *Scheduler) toolCognize(ctx context.Context, contextInstruction string) 
 		if err := run.replaceWorking(working); err != nil {
 			return nil, fmt.Errorf("plan tool context working state: %w", err)
 		}
-		inputBudget, err := s.inputTokenBudget()
-		if err != nil {
-			return nil, fmt.Errorf("plan tool model context budget: %w", err)
-		}
 		freshMessages, err := run.messages(ctx, inputBudget, contextInstruction, inference.FormatToolsForPrompt(tools))
 		if err != nil {
 			return nil, fmt.Errorf("plan tool context: %w", err)
@@ -526,14 +527,14 @@ func (s *Scheduler) toolCognize(ctx context.Context, contextInstruction string) 
 			return nil, fmt.Errorf("plan tool protocol context: %w", err)
 		}
 		req = inference.Request{
-			Model:       s.modelConfiguration.Model,
+			Model:       selected.configuration.Model,
 			Messages:    freshMessages,
 			Temperature: 0.3,
-			MaxTokens:   s.modelConfiguration.Budget.OutputTokens,
+			MaxTokens:   selected.configuration.Budget.OutputTokens,
 			Purpose:     inference.PurposePlan,
 		}
 
-		resp, err := s.provider.Infer(ctx, req)
+		resp, err := selected.provider.Infer(ctx, req)
 		if err != nil {
 			return nil, fmt.Errorf("plan tool inference: %w", err)
 		}

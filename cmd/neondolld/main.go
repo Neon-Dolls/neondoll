@@ -50,6 +50,18 @@ func (m *productionMindAPI) Save() error                   { return m.store.Save
 // reconnect to the reconstructed Core without a new endpoint advertisement.
 const wireguardListenPort = 51820
 
+func resolveTaskProvider(resolver *config.ModelResolver, task config.InferenceTask) (config.ModelConfiguration, inference.Provider, error) {
+	model, err := resolver.ResolveTask(task)
+	if err != nil {
+		return config.ModelConfiguration{}, nil, err
+	}
+	provider, err := inference.NewProvider(model.Provider, model.Endpoint)
+	if err != nil {
+		return config.ModelConfiguration{}, nil, fmt.Errorf("task %q model %q: %w", task, model.Name, err)
+	}
+	return model, provider, nil
+}
+
 func main() {
 	log := logger.New(logger.InfoLevel, os.Stdout)
 	log.Info(fmt.Sprintf("neondoll v%s starting — Core 1", version.String()))
@@ -72,7 +84,26 @@ func main() {
 		log.Error("invalid model configuration", map[string]any{"error": err.Error()})
 		os.Exit(1)
 	}
-	defaultModel := modelResolver.Default()
+	interactionModel, interactionProvider, err := resolveTaskProvider(modelResolver, config.InferenceTaskInteraction)
+	if err != nil {
+		log.Error("Interaction model setup error", map[string]any{"error": err.Error()})
+		os.Exit(1)
+	}
+	orientModel, orientProvider, err := resolveTaskProvider(modelResolver, config.InferenceTaskOrient)
+	if err != nil {
+		log.Error("Orient model setup error", map[string]any{"error": err.Error()})
+		os.Exit(1)
+	}
+	planModel, planProvider, err := resolveTaskProvider(modelResolver, config.InferenceTaskPlan)
+	if err != nil {
+		log.Error("Plan model setup error", map[string]any{"error": err.Error()})
+		os.Exit(1)
+	}
+	directModel, directProvider, err := resolveTaskProvider(modelResolver, config.InferenceTaskDirectCognition)
+	if err != nil {
+		log.Error("direct cognition model setup error", map[string]any{"error": err.Error()})
+		os.Exit(1)
+	}
 
 	// Ensure database directory exists.
 	if err := os.MkdirAll(cfg.Paths.DataDir, 0o755); err != nil {
@@ -160,16 +191,11 @@ func main() {
 	})
 	defer rt.Stop()
 
-	// Create the inference provider.
-	inferenceProvider, err := inference.NewProvider(defaultModel.Provider, defaultModel.Endpoint)
-	if err != nil {
-		log.Error("inference provider setup error", map[string]any{"error": err.Error()})
-		os.Exit(1)
-	}
-	log.Info("inference provider created", map[string]any{
-		"provider": defaultModel.Provider,
-		"model":    defaultModel.Name,
-		"endpoint": defaultModel.Endpoint,
+	log.Info("task inference models resolved", map[string]any{
+		"interaction": interactionModel.Name,
+		"orient":      orientModel.Name,
+		"plan":        planModel.Name,
+		"direct":      directModel.Name,
 	})
 
 	// Create the Body Registry with the mandatory Local Body.
@@ -186,8 +212,8 @@ func main() {
 	defer acceptanceControl()
 
 	// Create the Interaction service (Doll Link ↔ Persistence bridge).
-	interactionSvc := interaction.New(store, inferenceProvider, log,
-		interaction.WithModelConfiguration(defaultModel),
+	interactionSvc := interaction.New(store, interactionProvider, log,
+		interaction.WithModelConfiguration(interactionModel),
 	)
 	interactionRouter, err := coreServices.InteractionRouter(interactionSvc)
 	if err != nil {
@@ -322,11 +348,13 @@ func main() {
 
 		// Create the MindAPI and Scheduler with the real provider
 		// and persist-backed API.
-		mindAPI := &productionMindAPI{state: dollState, store: store, provider: inferenceProvider}
+		mindAPI := &productionMindAPI{state: dollState, store: store, provider: directProvider}
 
 		// Create the Scheduler with the real provider and persist-backed API.
-		scheduler := dollmind.New(inferenceProvider, log, mindAPI,
-			dollmind.WithModelConfiguration(defaultModel),
+		scheduler := dollmind.New(directProvider, log, mindAPI,
+			dollmind.WithModelConfiguration(directModel),
+			dollmind.WithTaskModelConfiguration(config.InferenceTaskOrient, orientProvider, orientModel),
+			dollmind.WithTaskModelConfiguration(config.InferenceTaskPlan, planProvider, planModel),
 		)
 
 		// Wire the Scheduler as Pulse's MindEntrance.

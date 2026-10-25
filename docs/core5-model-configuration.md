@@ -37,14 +37,13 @@ must be configured, and the resulting input capacity must be positive. The
 resolver never consults provider capabilities or expands the configured
 context window. Unknown names and invalid default references fail explicitly.
 
-At daemon startup Core resolves the explicit default, constructs its supported
-provider against the configured endpoint, and injects the resolved model
-identifier and budget into Interaction and DollMind. Orient, Plan, Pulse,
-direct cognition, and tool continuations therefore carry the same configured
-model identifier. Unsupported providers fail startup explicitly.
+At daemon startup Core resolves each task through the explicit assignments and
+default, constructs its supported provider against the selected endpoint, and
+injects each complete model configuration into the corresponding runtime path.
+Unsupported providers fail startup explicitly.
 
-Core does not yet select models by task or dynamically discover models. The
-configured default remains the only runtime selection.
+Core does not dynamically discover models. Runtime selection is limited to the
+four statically configured Core tasks and their explicit default fallback.
 
 ## Task assignments
 
@@ -54,6 +53,10 @@ Assignments are validated together with model configuration, so an unknown
 model or task prevents startup. `ResolveTask` returns the complete resolved
 `ModelConfiguration`; an unassigned known task returns the explicit default.
 
-Task resolution is configuration-only in M2.15. Runtime Interaction and
-DollMind execution continue using the already-wired default model until the
-next integration milestone.
+At runtime Core resolves all four task configurations before starting its
+services and constructs each selected provider at its configured endpoint.
+Interaction uses `interaction`; DollMind direct runs use `direct_cognition`;
+Orient and Plan use their corresponding tasks. Pulse and intention wakes flow
+through those Orient/Plan selections, and every tool continuation retains the
+Plan model and budget. Any unmapped task receives the explicit default through
+the same resolver path.

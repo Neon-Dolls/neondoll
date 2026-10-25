@@ -112,6 +112,12 @@ type Scheduler struct {
 	timeProvider       func() time.Time
 	toolExecutor       *ToolExecutor
 	modelConfiguration config.ModelConfiguration
+	taskModels         map[config.InferenceTask]taskModel
+}
+
+type taskModel struct {
+	provider      inference.Provider
+	configuration config.ModelConfiguration
 }
 
 func New(provider inference.Provider, log *logger.Logger, mindAPI MindAPI, opts ...Option) *Scheduler {
@@ -124,6 +130,7 @@ func New(provider inference.Provider, log *logger.Logger, mindAPI MindAPI, opts 
 			Name: "default", Provider: "openai", Model: "default", Endpoint: inference.DefaultBaseURL,
 			Budget: inference.DefaultModelContextBudget(),
 		},
+		taskModels: make(map[config.InferenceTask]taskModel),
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -156,11 +163,30 @@ func WithModelConfiguration(model config.ModelConfiguration) Option {
 	return func(s *Scheduler) { s.modelConfiguration = model }
 }
 
-func (s *Scheduler) inputTokenBudget() (int, error) {
-	if err := config.ValidateModelConfiguration(s.modelConfiguration); err != nil {
-		return 0, err
+// WithTaskModelConfiguration binds a Core inference task to its resolved model
+// and provider at the runtime composition boundary.
+func WithTaskModelConfiguration(task config.InferenceTask, provider inference.Provider, model config.ModelConfiguration) Option {
+	return func(s *Scheduler) {
+		s.taskModels[task] = taskModel{provider: provider, configuration: model}
 	}
-	return s.modelConfiguration.Budget.InputTokens()
+}
+
+func (s *Scheduler) modelForTask(task config.InferenceTask) (taskModel, int, error) {
+	selected, ok := s.taskModels[task]
+	if !ok {
+		selected = taskModel{provider: s.provider, configuration: s.modelConfiguration}
+	}
+	if selected.provider == nil {
+		return taskModel{}, 0, fmt.Errorf("cognition model for task %q has no provider", task)
+	}
+	if err := config.ValidateModelConfiguration(selected.configuration); err != nil {
+		return taskModel{}, 0, err
+	}
+	inputBudget, err := selected.configuration.Budget.InputTokens()
+	if err != nil {
+		return taskModel{}, 0, err
+	}
+	return selected, inputBudget, nil
 }
 
 // Enter is the cognition entry boundary.
@@ -321,7 +347,7 @@ func (s *Scheduler) Run(ctx context.Context, level Level, input string) (*Result
 	}); err != nil {
 		return nil, fmt.Errorf("run cognition input: %w", err)
 	}
-	inputBudget, err := s.inputTokenBudget()
+	selected, inputBudget, err := s.modelForTask(config.InferenceTaskDirectCognition)
 	if err != nil {
 		return nil, fmt.Errorf("run model context budget: %w", err)
 	}
@@ -332,11 +358,11 @@ func (s *Scheduler) Run(ctx context.Context, level Level, input string) (*Result
 	s.log.Info("cognition run starting",
 		map[string]any{"level": level.String(), "input_len": len(input), "run_id": run.id})
 
-	resp, err := s.provider.Infer(ctx, inference.Request{
-		Model:     s.modelConfiguration.Model,
+	resp, err := selected.provider.Infer(ctx, inference.Request{
+		Model:     selected.configuration.Model,
 		Messages:  messages,
 		Purpose:   inference.PurposeRespond,
-		MaxTokens: s.modelConfiguration.Budget.OutputTokens,
+		MaxTokens: selected.configuration.Budget.OutputTokens,
 	})
 	if err != nil {
 		return nil, err
