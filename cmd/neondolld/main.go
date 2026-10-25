@@ -62,16 +62,19 @@ func resolveTaskProvider(resolver *config.ModelResolver, task config.InferenceTa
 	return model, provider, nil
 }
 
-func newProductionToolExecutor(registry *body.Registry) (*dollmind.ToolExecutor, error) {
+func newProductionToolExecutor(registry *body.Registry, dollID string) (*dollmind.ToolExecutor, error) {
+	if dollID == "" {
+		return nil, fmt.Errorf("production tool executor: Doll identity unavailable")
+	}
 	local, ok := registry.Local()
 	if !ok {
 		return nil, fmt.Errorf("production tool executor: local Body unavailable")
 	}
 	authority := body.NewRuleEvaluator(
-		body.AuthorityRule{Doll: "neondoll", Body: body.LocalBodyID, Capability: "runtime.info", Operation: "read", Decision: body.AuthorityAllow},
-		body.AuthorityRule{Doll: "neondoll", Body: body.LocalBodyID, Capability: "runtime.info", Operation: "list", Decision: body.AuthorityAllow},
+		body.AuthorityRule{Doll: dollID, Body: body.LocalBodyID, Capability: "runtime.info", Operation: "read", Decision: body.AuthorityAllow},
+		body.AuthorityRule{Doll: dollID, Body: body.LocalBodyID, Capability: "runtime.info", Operation: "list", Decision: body.AuthorityAllow},
 	)
-	return dollmind.NewToolExecutor(body.NewGuard(registry, authority), local), nil
+	return dollmind.NewToolExecutor(body.NewGuard(registry, authority), local, dollID), nil
 }
 
 func main() {
@@ -216,11 +219,6 @@ func main() {
 		"local_id": string(body.LocalBodyID),
 		"count":    bodyRegistry.Count(),
 	})
-	cognitionToolExecutor, err := newProductionToolExecutor(bodyRegistry)
-	if err != nil {
-		log.Error("cognition tool executor setup error", map[string]any{"error": err.Error()})
-		os.Exit(1)
-	}
 	acceptanceControl, err := startAcceptanceControl(bodyRegistry)
 	if err != nil {
 		log.Error("acceptance control setup error", map[string]any{"error": err.Error()})
@@ -366,6 +364,11 @@ func main() {
 		// Create the MindAPI and Scheduler with the real provider
 		// and persist-backed API.
 		mindAPI := &productionMindAPI{state: dollState, store: store, provider: directProvider}
+		cognitionToolExecutor, err := newProductionToolExecutor(bodyRegistry, dollState.Identity.DollID)
+		if err != nil {
+			log.Error("cognition tool executor setup error", map[string]any{"error": err.Error()})
+			os.Exit(1)
+		}
 
 		// Create the Scheduler with the real provider and persist-backed API.
 		scheduler := dollmind.New(directProvider, log, mindAPI,

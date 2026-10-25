@@ -101,7 +101,7 @@ func setupWakeScheduler(acts []scriptedAct, guardEval body.AuthorityEvaluator, i
 	reg := body.NewRegistry()
 	guard := body.NewGuard(reg, guardEval)
 	loc, _ := reg.Local()
-	exec := NewToolExecutor(guard, loc)
+	exec := NewToolExecutor(guard, loc, "neondoll")
 
 	log := logger.New(logger.ErrorLevel, nil)
 	state := wakeState(intentionID, subject, wakeTime)

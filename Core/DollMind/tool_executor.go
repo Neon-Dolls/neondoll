@@ -18,12 +18,14 @@ import (
 type ToolExecutor struct {
 	guard     *body.Guard
 	localBody body.Body
+	dollID    string
 }
 
 // NewToolExecutor creates a new ToolExecutor bound to the given Guard and
-// the Local Body used for tool projection.
-func NewToolExecutor(guard *body.Guard, localBody body.Body) *ToolExecutor {
-	return &ToolExecutor{guard: guard, localBody: localBody}
+// the Local Body used for tool projection. dollID is the Core-owned identity
+// presented to the existing authority boundary for every execution.
+func NewToolExecutor(guard *body.Guard, localBody body.Body, dollID string) *ToolExecutor {
+	return &ToolExecutor{guard: guard, localBody: localBody, dollID: dollID}
 }
 
 // Tools projects the local body's capabilities into Inference Tool definitions
@@ -45,7 +47,7 @@ func (e *ToolExecutor) ExecuteCall(ctx context.Context, call inference.ToolCall,
 
 	execReq := body.ExecutionRequest{
 		ExecutionID: fmt.Sprintf("tool_%s", call.ID),
-		Doll:        "neondoll",
+		Doll:        e.dollID,
 		Body:        body.BodyID(toolDef.TargetBodyID),
 		Capability:  toolDef.CapabilityID,
 		Operation:   toolDef.OperationID,

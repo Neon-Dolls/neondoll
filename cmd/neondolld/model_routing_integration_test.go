@@ -165,7 +165,7 @@ func TestProductionTaskModelRoutingIntegration(t *testing.T) {
 	}
 
 	registry := body.NewRegistry()
-	toolExecutor, err := newProductionToolExecutor(registry)
+	toolExecutor, err := newProductionToolExecutor(registry, state.Identity.DollID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -230,6 +230,36 @@ func TestProductionTaskModelRoutingFailsBeforeInference(t *testing.T) {
 	}
 	if got := len(endpoint.snapshot()); got != 0 {
 		t.Fatalf("inference requests = %d, want 0", got)
+	}
+}
+
+func TestProductionToolExecutorUsesPersistedDollIdentity(t *testing.T) {
+	registry := body.NewRegistry()
+	if err := registry.RegisterCapability(body.LocalBodyID, body.Capability{
+		ID: "unrelated.info", Operations: []string{"read"}, Available: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	executor, err := newProductionToolExecutor(registry, "persisted-doll-42")
+	if err != nil {
+		t.Fatal(err)
+	}
+	definitions := make(map[string]*inference.Tool)
+	tools := executor.Tools()
+	for index := range tools {
+		definitions[tools[index].Name] = &tools[index]
+	}
+	for _, name := range []string{"runtime.info__read", "runtime.info__list"} {
+		result := executor.ExecuteCall(context.Background(), inference.ToolCall{ID: "call_" + name, Name: name}, definitions[name])
+		if result.Status != inference.ToolResultSuccess {
+			t.Errorf("%s result = %+v, want success", name, result)
+		}
+	}
+	denied := executor.ExecuteCall(context.Background(), inference.ToolCall{
+		ID: "call_unrelated", Name: "unrelated.info__read",
+	}, definitions["unrelated.info__read"])
+	if denied.Status != inference.ToolResultFailure || denied.Error == nil || denied.Error.Code != "denied" {
+		t.Fatalf("unrelated operation result = %+v, want authority denial", denied)
 	}
 }
 
