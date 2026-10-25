@@ -7,10 +7,12 @@ package cognitiveexecution
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 
 	"github.com/Neon-Dolls/neondoll/Core/Config"
 	"github.com/Neon-Dolls/neondoll/Core/Inference"
+	"github.com/Neon-Dolls/neondoll/Core/Session"
 )
 
 const DefaultToolCallLimit = 10
@@ -47,6 +49,7 @@ type Request struct {
 	ModelConfiguration config.ModelConfiguration
 	Purpose            inference.Purpose
 	Temperature        float64
+	TurnID             session.TurnID
 	BuildContext       ContextBuilder
 	ToolExecutor       ToolExecutor
 	MaxToolCalls       int
@@ -111,6 +114,7 @@ func Execute(ctx context.Context, request Request) (*Result, error) {
 			Temperature: request.Temperature,
 			MaxTokens:   request.ModelConfiguration.Budget.OutputTokens,
 			Purpose:     request.Purpose,
+			TurnID:      request.TurnID,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("cognitive execution inference: %w", err)
@@ -140,4 +144,53 @@ func Execute(ctx context.Context, request Request) (*Result, error) {
 			exchanges = append(exchanges, ToolExchange{Call: call, Result: result, Required: true})
 		}
 	}
+}
+
+// FormatToolExchange is the canonical model-visible representation of one
+// correlated call/result pair.
+func FormatToolExchange(exchange ToolExchange) (string, error) {
+	encodedCall, err := json.Marshal(exchange.Call)
+	if err != nil {
+		return "", err
+	}
+	return "Tool call:\n" + string(encodedCall) + "\n" + inference.FormatToolResultForPrompt(exchange.Result), nil
+}
+
+// BindToolContext attaches tools and correlated exchanges to their existing
+// budgeted messages. It never adds another model-visible copy.
+func BindToolContext(messages []inference.Message, tools []inference.Tool, exchanges []ToolExchange, provenance string) error {
+	for index := range messages {
+		if messages[index].Role == "system" {
+			messages[index].Tools = append([]inference.Tool(nil), tools...)
+			break
+		}
+	}
+	used := make([]bool, len(exchanges))
+	for index := range messages {
+		if messages[index].Provenance != provenance {
+			continue
+		}
+		matched := false
+		for exchangeIndex := range exchanges {
+			if used[exchangeIndex] {
+				continue
+			}
+			content, err := FormatToolExchange(exchanges[exchangeIndex])
+			if err != nil {
+				return err
+			}
+			if content != messages[index].Content {
+				continue
+			}
+			messages[index].ToolCall = &exchanges[exchangeIndex].Call
+			messages[index].ToolResult = &exchanges[exchangeIndex].Result
+			used[exchangeIndex] = true
+			matched = true
+			break
+		}
+		if !matched {
+			return fmt.Errorf("cognitive execution: tool exchange metadata missing")
+		}
+	}
+	return nil
 }

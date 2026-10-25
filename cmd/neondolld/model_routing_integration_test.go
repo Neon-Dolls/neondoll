@@ -75,7 +75,11 @@ func (endpoint *routingEndpoint) snapshot() []capturedChatRequest {
 }
 
 func TestProductionTaskModelRoutingIntegration(t *testing.T) {
-	interactionEndpoint := newRoutingEndpoint(t, "interaction response")
+	interactionEndpoint := newRoutingEndpoint(t,
+		"TOOL_CALL: runtime.info__read\nARGUMENTS:\n{}",
+		"TOOL_CALL: runtime.info__list\nARGUMENTS:\n{}",
+		"interaction response",
+	)
 	orientEndpoint := newRoutingEndpoint(t,
 		"TOOL_CALL: runtime.info__read\nARGUMENTS:\n{}",
 		"TOOL_CALL: runtime.info__list\nARGUMENTS:\n{}",
@@ -149,6 +153,11 @@ func TestProductionTaskModelRoutingIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	log := logger.New(logger.ErrorLevel, io.Discard)
+	registry := body.NewRegistry()
+	toolExecutor, err := newProductionToolExecutor(registry, state.Identity.DollID)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	sessionStore, ok := store.(session.Store)
 	if !ok {
@@ -160,7 +169,8 @@ func TestProductionTaskModelRoutingIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	interactionService := interaction.New(store, interactionProvider, log, interaction.WithModelConfiguration(interactionModel))
+	interactionService := interaction.New(store, inference.NewToolEnabledProvider(interactionProvider), log,
+		interaction.WithModelConfiguration(interactionModel), interaction.WithToolExecutor(toolExecutor))
 	router, err := interaction.NewRouter(sessions, interactionService)
 	if err != nil {
 		t.Fatal(err)
@@ -172,11 +182,6 @@ func TestProductionTaskModelRoutingIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	registry := body.NewRegistry()
-	toolExecutor, err := newProductionToolExecutor(registry, state.Identity.DollID)
-	if err != nil {
-		t.Fatal(err)
-	}
 	directCognitionProvider := inference.NewToolEnabledProvider(directProvider)
 	scheduler := dollmind.New(directCognitionProvider, log, &productionMindAPI{state: state, store: store, provider: directCognitionProvider},
 		dollmind.WithModelConfiguration(directModel),
@@ -191,7 +196,10 @@ func TestProductionTaskModelRoutingIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	assertEndpointRequests(t, "interaction", interactionEndpoint.snapshot(), "shared-model", 128, 832, 1)
+	interactionRequests := interactionEndpoint.snapshot()
+	assertEndpointRequests(t, "interaction", interactionRequests, "shared-model", 128, 832, 3)
+	assertToolContinuation(t, interactionRequests[1], "tp_call_1", "runtime.info__read")
+	assertToolContinuation(t, interactionRequests[2], "tp_call_1", "runtime.info__list")
 	orientRequests := orientEndpoint.snapshot()
 	assertEndpointRequests(t, "orient", orientRequests, "orient-model", 160, 960, 3)
 	assertToolContinuation(t, orientRequests[1], "tp_call_1", "runtime.info__read")

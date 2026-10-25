@@ -246,6 +246,16 @@ Pulse-triggered execution advances from Orient to Plan. Production wraps the
 Orient, Plan, and direct providers with the existing tool-aware adapter and
 uses one trusted ToolExecutor for all three paths.
 
+M2.21 migrates Interaction Session inference onto `Core/CognitiveExecution`,
+closing the final independent provider call path. The per-session execution
+lock covers the complete multi-step turn. Every iteration rebuilds from the
+same durable Session history and appends the original required user input plus
+the execution's correlated ephemeral tool exchanges. Those exchanges are never
+written as separate turns; only the terminal user/assistant pair is atomically
+persisted with the one Core-owned Turn ID carried by every provider request.
+Production Interaction uses the task-selected tool-aware provider and the same
+trusted ToolExecutor as internal cognition.
+
 This milestone does not perform semantic Memory retrieval, summarize, compact,
 or persist Cognitive Run turns. Those remain later integration and policy
 milestones.

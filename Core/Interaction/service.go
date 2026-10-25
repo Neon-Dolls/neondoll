@@ -8,6 +8,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/Neon-Dolls/neondoll/Core/CognitiveExecution"
 	"github.com/Neon-Dolls/neondoll/Core/Config"
 	contextbuilder "github.com/Neon-Dolls/neondoll/Core/ContextBuilder"
 	"github.com/Neon-Dolls/neondoll/Core/Inference"
@@ -31,6 +32,7 @@ type Service struct {
 	sessions           keyedLocks
 	dolls              keyedLocks
 	modelConfiguration config.ModelConfiguration
+	toolExecutor       cognitiveexecution.ToolExecutor
 }
 
 var _ SessionHandler = (*Service)(nil)
@@ -58,6 +60,12 @@ type Option func(*Service)
 // WithModelConfiguration sets the complete model selected by Core.
 func WithModelConfiguration(model config.ModelConfiguration) Option {
 	return func(service *Service) { service.modelConfiguration = model }
+}
+
+// WithToolExecutor enables authorized multi-step Body tools for one
+// Interaction turn through Core's shared cognitive execution engine.
+func WithToolExecutor(executor cognitiveexecution.ToolExecutor) Option {
+	return func(service *Service) { service.toolExecutor = executor }
 }
 
 func New(store persistence.Store, provider inference.Provider, log *logger.Logger, opts ...Option) *Service {
@@ -111,27 +119,48 @@ func (s *Service) handleInteraction(ctx context.Context, sessionID session.ID, t
 		errResp := events.NewErrorResponse(event.ID, event.DollID, "interaction context unavailable")
 		return &errResp, nil
 	}
-	inputBudget, _ := s.modelConfiguration.Budget.InputTokens()
-	inferenceReq := inference.Request{Model: s.modelConfiguration.Model, Temperature: 0.7, MaxTokens: s.modelConfiguration.Budget.OutputTokens, TurnID: turnID}
-	built, buildErr := s.builder.Build(ctx, contextbuilder.Request{
-		SessionID:          sessionID,
-		TokenBudget:        inputBudget,
-		SystemInstructions: interactionInstructions(state),
-		RequiredMessages: []contextbuilder.Message{{
-			Role: contextbuilder.RoleUser, Content: currentInput,
-		}},
+	executionResult, err := cognitiveexecution.Execute(ctx, cognitiveexecution.Request{
+		Provider:           s.provider,
+		ModelConfiguration: s.modelConfiguration,
+		Purpose:            inference.PurposeRespond,
+		Temperature:        0.7,
+		TurnID:             turnID,
+		ToolExecutor:       s.toolExecutor,
+		MaxToolCalls:       cognitiveexecution.DefaultToolCallLimit,
+		BuildContext: func(ctx context.Context, execution cognitiveexecution.ContextState) ([]inference.Message, error) {
+			instructions := interactionInstructions(state)
+			if len(execution.Tools) > 0 {
+				instructions = append(instructions, inference.FormatToolsForPrompt(execution.Tools))
+			}
+			required := []contextbuilder.Message{{Role: contextbuilder.RoleUser, Content: currentInput}}
+			for _, exchange := range execution.Exchanges {
+				content, formatErr := cognitiveexecution.FormatToolExchange(exchange)
+				if formatErr != nil {
+					return nil, formatErr
+				}
+				required = append(required, contextbuilder.Message{
+					Role: contextbuilder.RoleTool, Content: content, Provenance: "interaction.tool_exchange",
+				})
+			}
+			built, buildErr := s.builder.Build(ctx, contextbuilder.Request{
+				SessionID:          sessionID,
+				TokenBudget:        execution.InputTokenBudget,
+				SystemInstructions: instructions,
+				RequiredMessages:   required,
+			})
+			if buildErr != nil {
+				return nil, buildErr
+			}
+			messages := make([]inference.Message, len(built.Messages))
+			for index, message := range built.Messages {
+				messages[index] = inference.Message{Role: string(message.Role), Content: message.Content, Provenance: message.Provenance}
+			}
+			if bindErr := cognitiveexecution.BindToolContext(messages, execution.Tools, execution.Exchanges, "interaction.tool_exchange"); bindErr != nil {
+				return nil, bindErr
+			}
+			return messages, nil
+		},
 	})
-	if buildErr != nil {
-		s.log.Error("interaction context construction failed", diagnostics, map[string]any{"error": buildErr.Error()})
-		errResp := events.NewErrorResponse(event.ID, event.DollID, "interaction context unavailable")
-		return &errResp, nil
-	}
-	inferenceReq.Messages = make([]inference.Message, len(built.Messages))
-	for index, message := range built.Messages {
-		inferenceReq.Messages[index] = inference.Message{Role: string(message.Role), Content: message.Content, Provenance: message.Provenance}
-	}
-
-	result, err := s.provider.Infer(ctx, inferenceReq)
 	if err != nil {
 		s.log.Error("inference failed", diagnostics, map[string]any{
 			"doll_id": event.DollID,
@@ -141,6 +170,7 @@ func (s *Service) handleInteraction(ctx context.Context, sessionID session.ID, t
 		errResp := events.NewErrorResponse(event.ID, event.DollID, "inference failed")
 		return &errResp, nil
 	}
+	result := executionResult.Response
 
 	if _, err := s.history.AppendSessionMessages(ctx, sessionID, []contextbuilder.NewHistoryMessage{
 		{TurnID: turnID, Role: contextbuilder.RoleUser, Content: currentInput},

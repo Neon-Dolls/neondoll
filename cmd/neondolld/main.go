@@ -77,6 +77,22 @@ func newProductionToolExecutor(registry *body.Registry, dollID string) (*dollmin
 	return dollmind.NewToolExecutor(body.NewGuard(registry, authority), local, dollID), nil
 }
 
+func loadProductionDoll(ctx context.Context, store persistence.Store, dollID string) (*dollstate.DollState, error) {
+	state, err := store.LoadDoll(ctx, dollID)
+	if err == nil {
+		return state, nil
+	}
+	if !errors.Is(err, persistence.ErrDollNotFound) {
+		return nil, err
+	}
+	created := dollstate.NewDollState()
+	created.Identity = dollstate.Identity{DollID: dollID, CanonicalName: dollID}
+	if err := store.SaveDoll(ctx, &created); err != nil {
+		return nil, err
+	}
+	return &created, nil
+}
+
 func main() {
 	log := logger.New(logger.InfoLevel, os.Stdout)
 	log.Info(fmt.Sprintf("neondoll v%s starting — Core 1", version.String()))
@@ -219,6 +235,20 @@ func main() {
 		"local_id": string(body.LocalBodyID),
 		"count":    bodyRegistry.Count(),
 	})
+	dollID := cfg.Core.Profile
+	if dollID == "" {
+		dollID = "default"
+	}
+	dollState, err := loadProductionDoll(ctx, store, dollID)
+	if err != nil {
+		log.Error("production Doll state setup error", map[string]any{"doll_id": dollID, "error": err.Error()})
+		os.Exit(1)
+	}
+	cognitionToolExecutor, err := newProductionToolExecutor(bodyRegistry, dollState.Identity.DollID)
+	if err != nil {
+		log.Error("cognition tool executor setup error", map[string]any{"error": err.Error()})
+		os.Exit(1)
+	}
 	acceptanceControl, err := startAcceptanceControl(bodyRegistry)
 	if err != nil {
 		log.Error("acceptance control setup error", map[string]any{"error": err.Error()})
@@ -227,8 +257,9 @@ func main() {
 	defer acceptanceControl()
 
 	// Create the Interaction service (Doll Link ↔ Persistence bridge).
-	interactionSvc := interaction.New(store, interactionProvider, log,
+	interactionSvc := interaction.New(store, inference.NewToolEnabledProvider(interactionProvider), log,
 		interaction.WithModelConfiguration(interactionModel),
+		interaction.WithToolExecutor(cognitionToolExecutor),
 	)
 	interactionRouter, err := coreServices.InteractionRouter(interactionSvc)
 	if err != nil {
@@ -322,56 +353,11 @@ func main() {
 	// Pulse opportunities can actually enter cognition.
 	var pulseRunner *pulse.Runner
 	if cfg.Core.Pulse.Enabled {
-		// Determine which doll Pulse operates on behalf of.
-		dollID := cfg.Core.Profile
-		if dollID == "" {
-			dollID = "default"
-		}
-
-		// Load the host doll from persistence. If it does not exist,
-		// create a minimal initial state and persist it. Any other load
-		// failure (corruption, decoding, I/O) is fatal — never silently
-		// replace an existing Doll.
-		dollState, err := store.LoadDoll(ctx, dollID)
-		switch {
-		case err == nil:
-			// existing doll loaded successfully
-			log.Info("loaded existing doll state", map[string]any{"doll_id": dollID})
-
-		case errors.Is(err, persistence.ErrDollNotFound):
-			log.Info("no existing doll found, creating initial state",
-				map[string]any{"doll_id": dollID})
-			ds := dollstate.NewDollState()
-			ds.Identity = dollstate.Identity{
-				DollID:        dollID,
-				CanonicalName: dollID,
-			}
-			if err := store.SaveDoll(ctx, &ds); err != nil {
-				log.Error("save initial doll state error", map[string]any{"error": err.Error()})
-				os.Exit(1)
-			}
-			dollState = &ds
-			log.Info("initial doll state created", map[string]any{"doll_id": dollID})
-
-		default:
-			log.Error("fatal: failed to load existing doll — refusing to create replacement", map[string]any{
-				"doll_id": dollID,
-				"error":   err.Error(),
-			})
-			os.Exit(1)
-		}
-
 		// Create the MindAPI and Scheduler with the real provider
 		// and persist-backed API.
 		directCognitionProvider := inference.NewToolEnabledProvider(directProvider)
 		orientCognitionProvider := inference.NewToolEnabledProvider(orientProvider)
 		mindAPI := &productionMindAPI{state: dollState, store: store, provider: directCognitionProvider}
-		cognitionToolExecutor, err := newProductionToolExecutor(bodyRegistry, dollState.Identity.DollID)
-		if err != nil {
-			log.Error("cognition tool executor setup error", map[string]any{"error": err.Error()})
-			os.Exit(1)
-		}
-
 		// Create the Scheduler with the real provider and persist-backed API.
 		scheduler := dollmind.New(directCognitionProvider, log, mindAPI,
 			dollmind.WithModelConfiguration(directModel),
