@@ -85,10 +85,9 @@ blockers for this workstream:
 - External Interaction inference does not yet have multi-step tool
   orchestration. Turn IDs and history records are shaped to support it, but it
   must reuse the same fresh-build rule when introduced.
-- Interaction has not yet migrated onto the shared multi-step execution
-  component introduced after this audit. Its existing single-invocation path
-  remains freshly bounded; a later migration can add tool capability without
-  changing its persisted context source.
+- No inference path remains outside the shared multi-step execution component.
+  Future inference entry points must use the same boundary rather than adding
+  a direct provider call.
 
 Any new inference entry point or provider adapter must be treated as a new
 context-lifecycle boundary: it must select a complete model configuration,

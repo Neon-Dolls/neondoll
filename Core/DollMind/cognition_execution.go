@@ -2,7 +2,6 @@ package dollmind
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 
 	"github.com/Neon-Dolls/neondoll/Core/CognitiveExecution"
@@ -48,7 +47,7 @@ func (s *Scheduler) executeCognition(ctx context.Context, run *cognitionRunExecu
 				return nil, fmt.Errorf("bounded context: %w", err)
 			}
 			allExchanges := append(append([]cognitiveexecution.ToolExchange(nil), baseExchanges...), state.Exchanges...)
-			if err := bindCognitionToolMetadata(messages, state.Tools, allExchanges); err != nil {
+			if err := cognitiveexecution.BindToolContext(messages, state.Tools, allExchanges, "cognition_run.tool_exchange"); err != nil {
 				return nil, fmt.Errorf("tool protocol context: %w", err)
 			}
 			return messages, nil
@@ -75,7 +74,7 @@ func (s *Scheduler) executeCognition(ctx context.Context, run *cognitionRunExecu
 }
 
 func cognitionToolRecord(exchange cognitiveexecution.ToolExchange) (contextbuilder.CognitionWorkingRecord, error) {
-	content, err := cognitionToolContent(exchange.Call, exchange.Result)
+	content, err := cognitiveexecution.FormatToolExchange(exchange)
 	if err != nil {
 		return contextbuilder.CognitionWorkingRecord{}, err
 	}
@@ -85,49 +84,4 @@ func cognitionToolRecord(exchange cognitiveexecution.ToolExchange) (contextbuild
 		Provenance: "cognition_run.tool_exchange",
 		Required:   exchange.Required,
 	}, nil
-}
-
-func cognitionToolContent(call inference.ToolCall, result inference.ToolResult) (string, error) {
-	encodedCall, err := json.Marshal(call)
-	if err != nil {
-		return "", err
-	}
-	return "Tool call:\n" + string(encodedCall) + "\n" + inference.FormatToolResultForPrompt(result), nil
-}
-
-func bindCognitionToolMetadata(messages []inference.Message, tools []inference.Tool, exchanges []cognitiveexecution.ToolExchange) error {
-	used := make([]bool, len(exchanges))
-	for index := range messages {
-		if messages[index].Role == "system" {
-			messages[index].Tools = append([]inference.Tool(nil), tools...)
-			break
-		}
-	}
-	for index := range messages {
-		if messages[index].Provenance != "cognition_run.tool_exchange" {
-			continue
-		}
-		matched := false
-		for exchangeIndex := range exchanges {
-			if used[exchangeIndex] {
-				continue
-			}
-			content, err := cognitionToolContent(exchanges[exchangeIndex].Call, exchanges[exchangeIndex].Result)
-			if err != nil {
-				return err
-			}
-			if content != messages[index].Content {
-				continue
-			}
-			messages[index].ToolCall = &exchanges[exchangeIndex].Call
-			messages[index].ToolResult = &exchanges[exchangeIndex].Result
-			used[exchangeIndex] = true
-			matched = true
-			break
-		}
-		if !matched {
-			return fmt.Errorf("tool exchange metadata missing")
-		}
-	}
-	return nil
 }

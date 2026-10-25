@@ -153,6 +153,7 @@ type Request struct {
 	TokenBudget        int
 	SystemInstructions []string
 	RequiredMessages   []Message
+	TransientMessages  []TransientMessage
 }
 
 type SourceRequest struct {
@@ -160,6 +161,17 @@ type SourceRequest struct {
 	TokenBudget        int
 	SystemInstructions []string
 	RequiredMessages   []Message
+	TransientMessages  []TransientMessage
+}
+
+// TransientMessage participates in the existing sliding window without
+// becoming part of the resolved durable source. It is emitted after required
+// tail messages and is useful for execution-local correlated exchanges.
+type TransientMessage struct {
+	ID          string
+	Message     Message
+	Required    bool
+	WindowGroup string
 }
 
 type OmittedMessage struct {

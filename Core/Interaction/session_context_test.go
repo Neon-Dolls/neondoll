@@ -12,8 +12,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Neon-Dolls/neondoll/Core/Body"
+	"github.com/Neon-Dolls/neondoll/Core/CognitiveExecution"
 	"github.com/Neon-Dolls/neondoll/Core/Config"
 	contextbuilder "github.com/Neon-Dolls/neondoll/Core/ContextBuilder"
+	"github.com/Neon-Dolls/neondoll/Core/DollMind"
 	"github.com/Neon-Dolls/neondoll/Core/Inference"
 	"github.com/Neon-Dolls/neondoll/Core/Persistence"
 	"github.com/Neon-Dolls/neondoll/Core/Session"
@@ -31,6 +34,33 @@ type sessionContextProvider struct {
 type blockingSessionProvider struct {
 	entered chan inference.Request
 	release chan struct{}
+}
+
+type interactionToolProvider struct {
+	responses []*inference.Response
+	requests  []inference.Request
+}
+
+type sizedInteractionTools struct{ output string }
+
+func (tools sizedInteractionTools) Tools() []inference.Tool {
+	return []inference.Tool{
+		{Name: "runtime.info__read", CapabilityID: "runtime.info", OperationID: "read", TargetBodyID: string(body.LocalBodyID)},
+		{Name: "runtime.info__list", CapabilityID: "runtime.info", OperationID: "list", TargetBodyID: string(body.LocalBodyID)},
+	}
+}
+
+func (tools sizedInteractionTools) ExecuteCall(_ context.Context, call inference.ToolCall, _ *inference.Tool) inference.ToolResult {
+	return inference.ToolResult{
+		ToolCallID: call.ID, ExecutionID: "exec_" + call.ID, Status: inference.ToolResultSuccess,
+		Result: map[string]any{"output": tools.output},
+	}
+}
+
+func (provider *interactionToolProvider) ID() inference.ProviderID { return "interaction-tools" }
+func (provider *interactionToolProvider) Infer(_ context.Context, request inference.Request) (*inference.Response, error) {
+	provider.requests = append(provider.requests, request)
+	return provider.responses[len(provider.requests)-1], nil
 }
 
 func (provider *blockingSessionProvider) ID() inference.ProviderID { return "blocking-session" }
@@ -277,6 +307,162 @@ func TestSessionHistoryReconstructsAfterRestart(t *testing.T) {
 	if !strings.Contains(content, "remember this") || !strings.Contains(content, "before restart") || !strings.Contains(content, "after restart") {
 		t.Fatalf("reconstructed context = %q", content)
 	}
+}
+
+func TestInteractionUsesUnifiedMultiStepExecutionAndPersistsOneTurn(t *testing.T) {
+	store := openStore(t)
+	seedDoll(t, store, "tool-session-doll", "ToolSessionDoll")
+	sessions, history := interactionSessionStores(t, store)
+	created := createInteractionSession(t, sessions, "body-tools")
+	registry := body.NewRegistry()
+	local, _ := registry.Local()
+	guard := body.NewGuard(registry, body.NewRuleEvaluator(
+		body.AuthorityRule{Doll: "tool-session-doll", Body: body.LocalBodyID, Capability: "runtime.info", Operation: "read", Decision: body.AuthorityAllow},
+		body.AuthorityRule{Doll: "tool-session-doll", Body: body.LocalBodyID, Capability: "runtime.info", Operation: "list", Decision: body.AuthorityAllow},
+	))
+	provider := &interactionToolProvider{responses: []*inference.Response{
+		{ToolCalls: []inference.ToolCall{{ID: "interaction_A", Name: "runtime.info__read"}}},
+		{ToolCalls: []inference.ToolCall{{ID: "interaction_B", Name: "runtime.info__list"}}},
+		{Content: "interaction tools complete"},
+	}}
+	service := New(store, provider, logger.New(logger.ErrorLevel, io.Discard),
+		WithModelConfiguration(testModelConfiguration),
+		WithToolExecutor(dollmind.NewToolExecutor(guard, local, "tool-session-doll")),
+	)
+	event := newResponse("tool-session-doll", "inspect runtime")
+	response, err := service.HandleInteraction(context.Background(), created, &event)
+	if err != nil || response == nil || response.Type != events.TypeMessage {
+		t.Fatalf("HandleInteraction response=%+v err=%v", response, err)
+	}
+	if len(provider.requests) != 3 {
+		t.Fatalf("inference requests = %d, want 3", len(provider.requests))
+	}
+	turnID := provider.requests[0].TurnID
+	for index, request := range provider.requests {
+		if request.TurnID == "" || request.TurnID != turnID {
+			t.Errorf("iteration %d TurnID = %q, want %q", index, request.TurnID, turnID)
+		}
+		if request.Model != testModelConfiguration.Model || request.MaxTokens != testModelConfiguration.Budget.OutputTokens {
+			t.Errorf("iteration %d model/budget = %q/%d", index, request.Model, request.MaxTokens)
+		}
+		if tokens := approximateRequestTokens(request.Messages); tokens > testInputTokenBudget {
+			t.Errorf("iteration %d input tokens = %d, budget = %d", index, tokens, testInputTokenBudget)
+		}
+		if count := strings.Count(strings.Join(messageContents(request.Messages), "\n"), "inspect runtime"); count != 1 {
+			t.Errorf("iteration %d current-input count = %d, want 1", index, count)
+		}
+	}
+	if got := interactionMessageToolResults(provider.requests[1].Messages); len(got) != 1 || got[0].ToolCallID != "interaction_A" {
+		t.Fatalf("second iteration results = %+v", got)
+	}
+	if got := interactionMessageToolResults(provider.requests[2].Messages); len(got) != 2 || got[0].ToolCallID != "interaction_A" || got[1].ToolCallID != "interaction_B" {
+		t.Fatalf("third iteration results = %+v", got)
+	}
+	stored, err := history.ListSessionMessages(context.Background(), created.ID)
+	if err != nil || len(stored) != 2 {
+		t.Fatalf("stored history=%+v err=%v", stored, err)
+	}
+	if stored[0].TurnID != turnID || stored[1].TurnID != turnID || stored[0].Role != contextbuilder.RoleUser || stored[1].Role != contextbuilder.RoleAssistant {
+		t.Fatalf("durable turn = %+v", stored)
+	}
+	for _, message := range stored {
+		if message.Role == contextbuilder.RoleTool {
+			t.Fatalf("ephemeral tool exchange was persisted: %+v", stored)
+		}
+	}
+}
+
+func TestInteractionToolWindowOmitsConsumedExchangeButKeepsUnresolved(t *testing.T) {
+	store := openStore(t)
+	seedDoll(t, store, "window-tool-doll", "WindowToolDoll")
+	sessions, history := interactionSessionStores(t, store)
+	created := createInteractionSession(t, sessions, "body-window-tools")
+	tools := sizedInteractionTools{output: strings.Repeat("bounded-tool-output-", 12)}
+	provider := &interactionToolProvider{responses: []*inference.Response{
+		{ToolCalls: []inference.ToolCall{{ID: "call_A", Name: "runtime.info__read"}}},
+		{ToolCalls: []inference.ToolCall{{ID: "call_B", Name: "runtime.info__list"}}},
+		{Content: "bounded tools complete"},
+	}}
+	state, err := store.LoadDoll(context.Background(), "window-tool-doll")
+	if err != nil {
+		t.Fatal(err)
+	}
+	estimator := contextbuilder.ApproximateEstimator{}
+	input := "inspect within a constrained window"
+	baseCost := estimator.EstimateTokens(contextbuilder.Message{Role: contextbuilder.RoleUser, Content: input})
+	for _, instruction := range append(interactionInstructions(state), inference.FormatToolsForPrompt(tools.Tools())) {
+		baseCost += estimator.EstimateTokens(contextbuilder.Message{Role: contextbuilder.RoleSystem, Content: instruction})
+	}
+	exchangeContent, err := cognitiveexecution.FormatToolExchange(cognitiveexecution.ToolExchange{
+		Call: inference.ToolCall{ID: "call_A", Name: "runtime.info__read"},
+		Result: inference.ToolResult{ToolCallID: "call_A", ExecutionID: "exec_call_A", Status: inference.ToolResultSuccess,
+			Result: map[string]any{"output": tools.output}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	exchangeCost := estimator.EstimateTokens(contextbuilder.Message{Role: contextbuilder.RoleTool, Content: exchangeContent})
+	inputBudget := baseCost + exchangeCost + 4
+	model := config.ModelConfiguration{
+		Name: "constrained", Provider: "openai", Model: "constrained-interaction", Endpoint: inference.DefaultBaseURL,
+		Budget: inference.ModelContextBudget{ContextTokens: inputBudget + 80, OutputTokens: 60, RequiredOverheadTokens: 20},
+	}
+	service := New(store, provider, logger.New(logger.ErrorLevel, io.Discard),
+		WithModelConfiguration(model), WithToolExecutor(tools))
+	event := newResponse("window-tool-doll", input)
+	response, err := service.HandleInteraction(context.Background(), created, &event)
+	if err != nil || response == nil || response.Type != events.TypeMessage {
+		t.Fatalf("HandleInteraction response=%+v err=%v", response, err)
+	}
+	if got := interactionMessageToolResults(provider.requests[1].Messages); len(got) != 1 || got[0].ToolCallID != "call_A" {
+		t.Fatalf("required first exchange = %+v", got)
+	}
+	if got := interactionMessageToolResults(provider.requests[2].Messages); len(got) != 1 || got[0].ToolCallID != "call_B" {
+		t.Fatalf("bounded final exchanges = %+v, want only unresolved call_B", got)
+	}
+	stored, err := history.ListSessionMessages(context.Background(), created.ID)
+	if err != nil || len(stored) != 2 || stored[0].TurnID != stored[1].TurnID {
+		t.Fatalf("durable turn=%+v err=%v", stored, err)
+	}
+}
+
+func TestInteractionUnifiedExecutionKeepsUnauthorizedToolsDenied(t *testing.T) {
+	store := openStore(t)
+	seedDoll(t, store, "denied-tool-doll", "DeniedToolDoll")
+	sessions, _ := interactionSessionStores(t, store)
+	created := createInteractionSession(t, sessions, "body-denied-tools")
+	registry := body.NewRegistry()
+	if err := registry.RegisterCapability(body.LocalBodyID, body.Capability{ID: "private.info", Operations: []string{"read"}, Available: true}); err != nil {
+		t.Fatal(err)
+	}
+	local, _ := registry.Local()
+	guard := body.NewGuard(registry, body.NewRuleEvaluator())
+	provider := &interactionToolProvider{responses: []*inference.Response{
+		{ToolCalls: []inference.ToolCall{{ID: "denied_A", Name: "private.info__read"}}},
+		{Content: "denial handled"},
+	}}
+	service := New(store, provider, logger.New(logger.ErrorLevel, io.Discard),
+		WithModelConfiguration(testModelConfiguration),
+		WithToolExecutor(dollmind.NewToolExecutor(guard, local, "denied-tool-doll")),
+	)
+	event := newResponse("denied-tool-doll", "read private info")
+	if _, err := service.HandleInteraction(context.Background(), created, &event); err != nil {
+		t.Fatal(err)
+	}
+	results := interactionMessageToolResults(provider.requests[1].Messages)
+	if len(results) != 1 || results[0].Status != inference.ToolResultFailure || results[0].Error == nil || results[0].Error.Code != "denied" {
+		t.Fatalf("unauthorized result = %+v", results)
+	}
+}
+
+func interactionMessageToolResults(messages []inference.Message) []inference.ToolResult {
+	var results []inference.ToolResult
+	for _, message := range messages {
+		if message.ToolResult != nil {
+			results = append(results, *message.ToolResult)
+		}
+	}
+	return results
 }
 
 func TestFailedSessionInferenceDoesNotPersistTurn(t *testing.T) {
