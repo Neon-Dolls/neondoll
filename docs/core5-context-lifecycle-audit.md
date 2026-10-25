@@ -82,9 +82,6 @@ blockers for this workstream:
 - Cognitive Mind sections are selected as coarse whole records, and Memory
   context is limited to the currently defined recent references. Finer-grained
   relevance selection is a future policy improvement.
-- External Interaction inference does not yet have multi-step tool
-  orchestration. Turn IDs and history records are shaped to support it, but it
-  must reuse the same fresh-build rule when introduced.
 - No inference path remains outside the shared multi-step execution component.
   Future inference entry points must use the same boundary rather than adding
   a direct provider call.
