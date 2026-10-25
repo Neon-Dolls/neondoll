@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -154,7 +155,7 @@ func TestProductionTaskModelRoutingIntegration(t *testing.T) {
 	}
 	log := logger.New(logger.ErrorLevel, io.Discard)
 	registry := body.NewRegistry()
-	toolExecutor, err := newProductionToolExecutor(registry, state.Identity.DollID, nil)
+	toolExecutor, err := newProductionToolExecutor(registry, state.Identity.DollID, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -263,7 +264,7 @@ func TestProductionToolExecutorUsesPersistedDollIdentity(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	executor, err := newProductionToolExecutor(registry, "persisted-doll-42", nil)
+	executor, err := newProductionToolExecutor(registry, "persisted-doll-42", nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -284,6 +285,107 @@ func TestProductionToolExecutorUsesPersistedDollIdentity(t *testing.T) {
 	if denied.Status != inference.ToolResultFailure || denied.Error == nil || denied.Error.Code != "action_denied" {
 		t.Fatalf("unrelated operation result = %+v, want action-wide authority denial", denied)
 	}
+}
+
+type configuredRuntimeBody struct {
+	id         body.BodyID
+	executeErr error
+	executions int
+}
+
+func (candidate *configuredRuntimeBody) ID() body.BodyID     { return candidate.id }
+func (candidate *configuredRuntimeBody) Kind() body.BodyKind { return body.BodyKindRemote }
+func (candidate *configuredRuntimeBody) Name() string        { return string(candidate.id) }
+func (candidate *configuredRuntimeBody) Describe() []body.Capability {
+	return []body.Capability{{ID: "runtime.info", Operations: []string{"read"}, Available: true}}
+}
+func (candidate *configuredRuntimeBody) ResolveCapability(capability, operation string) error {
+	if capability != "runtime.info" {
+		return body.ErrUnsupportedCapability
+	}
+	if operation != "read" {
+		return body.ErrUnsupportedOperation
+	}
+	return nil
+}
+func (candidate *configuredRuntimeBody) RegisterCapability(body.Capability) error { return nil }
+func (candidate *configuredRuntimeBody) Execute(_ body.ExecutionRequest) (*body.ExecutionResult, error) {
+	candidate.executions++
+	if candidate.executeErr != nil {
+		return nil, candidate.executeErr
+	}
+	return &body.ExecutionResult{Status: body.StatusSuccess, Output: string(candidate.id)}, nil
+}
+
+func TestProductionToolExecutorAuthorizesConfiguredNonLocalBody(t *testing.T) {
+	registry := body.NewRegistry()
+	remote := &configuredRuntimeBody{id: "configured-remote"}
+	if err := registry.Register(remote); err != nil {
+		t.Fatal(err)
+	}
+	executor, err := newProductionToolExecutor(registry, "configured-doll", []config.BodyAuthorizationRule{{
+		Body: string(remote.id), Capability: "runtime.info", Operation: "read", Decision: body.AuthorityAllow,
+	}}, map[string]int{string(remote.id): 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result := executor.ExecuteCall(context.Background(), inference.ToolCall{ID: "configured-call"}, productionTool(t, executor, "runtime.info__read"))
+	if result.Status != inference.ToolResultSuccess || result.Result["output"] != string(remote.id) {
+		t.Fatalf("configured remote result = %+v", result)
+	}
+	if len(result.Attempts) != 1 || result.Attempts[0].BodyID != string(remote.id) || remote.executions != 1 {
+		t.Fatalf("attempts=%+v remote executions=%d", result.Attempts, remote.executions)
+	}
+}
+
+func TestProductionToolExecutorConfiguredFallback(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		decision   body.AuthorityDecision
+		executeErr error
+		wantStatus string
+	}{
+		{name: "Body denial", decision: body.AuthorityDeny, wantStatus: string(body.StatusDenied)},
+		{name: "Body failure", decision: body.AuthorityAllow, executeErr: errors.New("remote failed"), wantStatus: string(body.StatusFailed)},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			registry := body.NewRegistry()
+			remote := &configuredRuntimeBody{id: "preferred-remote", executeErr: test.executeErr}
+			if err := registry.Register(remote); err != nil {
+				t.Fatal(err)
+			}
+			rules := []config.BodyAuthorizationRule{
+				{Body: string(remote.id), Capability: "runtime.info", Operation: "read", Decision: test.decision, Scope: body.AuthorityScopeBody},
+				{Body: string(body.LocalBodyID), Capability: "runtime.info", Operation: "read", Decision: body.AuthorityAllow},
+			}
+			executor, err := newProductionToolExecutor(registry, "fallback-doll", rules, map[string]int{string(remote.id): 100})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			result := executor.ExecuteCall(context.Background(), inference.ToolCall{ID: "fallback-call"}, productionTool(t, executor, "runtime.info__read"))
+			if result.Status != inference.ToolResultSuccess {
+				t.Fatalf("fallback result = %+v", result)
+			}
+			if len(result.Attempts) != 2 || result.Attempts[0].BodyID != string(remote.id) || result.Attempts[0].Status != test.wantStatus ||
+				result.Attempts[1].BodyID != string(body.LocalBodyID) || result.Attempts[1].Status != string(body.StatusSuccess) {
+				t.Fatalf("fallback attempts = %+v", result.Attempts)
+			}
+		})
+	}
+}
+
+func productionTool(t *testing.T, executor *dollmind.ToolExecutor, name string) *inference.Tool {
+	t.Helper()
+	tools := executor.Tools()
+	for index := range tools {
+		if tools[index].Name == name {
+			return &tools[index]
+		}
+	}
+	t.Fatalf("production tool %q not found", name)
+	return nil
 }
 
 func modelConfiguration(model, endpoint string, contextTokens, outputTokens, overheadTokens int) config.ModelConfiguration {
