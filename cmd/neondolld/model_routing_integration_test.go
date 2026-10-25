@@ -76,13 +76,21 @@ func (endpoint *routingEndpoint) snapshot() []capturedChatRequest {
 
 func TestProductionTaskModelRoutingIntegration(t *testing.T) {
 	interactionEndpoint := newRoutingEndpoint(t, "interaction response")
-	orientEndpoint := newRoutingEndpoint(t, `{"summary":"pulse matters","matters":true,"reason":"routing proof"}`)
+	orientEndpoint := newRoutingEndpoint(t,
+		"TOOL_CALL: runtime.info__read\nARGUMENTS:\n{}",
+		"TOOL_CALL: runtime.info__list\nARGUMENTS:\n{}",
+		`{"summary":"pulse matters","matters":true,"reason":"routing proof"}`,
+	)
 	planEndpoint := newRoutingEndpoint(t,
 		"TOOL_CALL: runtime.info__read\nARGUMENTS:\n{}",
 		"TOOL_CALL: runtime.info__list\nARGUMENTS:\n{}",
 		`{"summary":"plan complete","proposed_action":"done","observations":["ok"],"should_reorient":false,"request_future_cognition":false}`,
 	)
-	directEndpoint := newRoutingEndpoint(t, "direct response")
+	directEndpoint := newRoutingEndpoint(t,
+		"TOOL_CALL: runtime.info__read\nARGUMENTS:\n{}",
+		"TOOL_CALL: runtime.info__list\nARGUMENTS:\n{}",
+		"direct response",
+	)
 
 	configuration := config.Defaults()
 	configuration.Inference = config.InferenceConfig{
@@ -169,9 +177,10 @@ func TestProductionTaskModelRoutingIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	scheduler := dollmind.New(directProvider, log, &productionMindAPI{state: state, store: store, provider: directProvider},
+	directCognitionProvider := inference.NewToolEnabledProvider(directProvider)
+	scheduler := dollmind.New(directCognitionProvider, log, &productionMindAPI{state: state, store: store, provider: directCognitionProvider},
 		dollmind.WithModelConfiguration(directModel),
-		dollmind.WithTaskModelConfiguration(config.InferenceTaskOrient, orientProvider, orientModel),
+		dollmind.WithTaskModelConfiguration(config.InferenceTaskOrient, inference.NewToolEnabledProvider(orientProvider), orientModel),
 		dollmind.WithTaskModelConfiguration(config.InferenceTaskPlan, inference.NewToolEnabledProvider(planProvider), planModel),
 		dollmind.WithToolExecutor(toolExecutor),
 	)
@@ -183,12 +192,18 @@ func TestProductionTaskModelRoutingIntegration(t *testing.T) {
 	}
 
 	assertEndpointRequests(t, "interaction", interactionEndpoint.snapshot(), "shared-model", 128, 832, 1)
-	assertEndpointRequests(t, "orient", orientEndpoint.snapshot(), "orient-model", 160, 960, 1)
+	orientRequests := orientEndpoint.snapshot()
+	assertEndpointRequests(t, "orient", orientRequests, "orient-model", 160, 960, 3)
+	assertToolContinuation(t, orientRequests[1], "tp_call_1", "runtime.info__read")
+	assertToolContinuation(t, orientRequests[2], "tp_call_1", "runtime.info__list")
 	planRequests := planEndpoint.snapshot()
 	assertEndpointRequests(t, "plan", planRequests, "plan-model", 200, 1300, 3)
 	assertToolContinuation(t, planRequests[1], "tp_call_1", "runtime.info__read")
 	assertToolContinuation(t, planRequests[2], "tp_call_1", "runtime.info__list")
-	assertEndpointRequests(t, "direct/default", directEndpoint.snapshot(), "shared-model", 300, 1648, 1)
+	directRequests := directEndpoint.snapshot()
+	assertEndpointRequests(t, "direct/default", directRequests, "shared-model", 300, 1648, 3)
+	assertToolContinuation(t, directRequests[1], "tp_call_1", "runtime.info__read")
+	assertToolContinuation(t, directRequests[2], "tp_call_1", "runtime.info__list")
 }
 
 func TestProductionTaskModelRoutingFailsBeforeInference(t *testing.T) {

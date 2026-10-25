@@ -15,9 +15,7 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/Neon-Dolls/neondoll/Core/CognitiveExecution"
 	"github.com/Neon-Dolls/neondoll/Core/Config"
-	contextbuilder "github.com/Neon-Dolls/neondoll/Core/ContextBuilder"
 	"github.com/Neon-Dolls/neondoll/Core/Inference"
 	"github.com/Neon-Dolls/neondoll/DollLink/Events"
 	"github.com/Neon-Dolls/neondoll/DollState"
@@ -296,7 +294,7 @@ func (s *Scheduler) Plan(ctx context.Context, eventType events.Type, input strin
 	if err != nil {
 		return nil, false, fmt.Errorf("plan model context budget: %w", err)
 	}
-	resp, err := s.executePlan(ctx, run, contextInstruction, selected)
+	resp, err := s.executeCognition(ctx, run, selected, inference.PurposePlan, 0.3, contextInstruction)
 	if err != nil {
 		return nil, false, fmt.Errorf("plan cognitive execution: %w", err)
 	}
@@ -435,101 +433,4 @@ func (s *Scheduler) materialiseExperience(plan *Plan) bool {
 		})
 
 	return true
-}
-
-// executePlan adapts the active ephemeral Cognitive Run to Core's shared
-// multi-step inference mechanism. The selected provider/model/budget is fixed
-// by Plan before execution and every iteration reconstructs bounded context.
-func (s *Scheduler) executePlan(ctx context.Context, run *cognitionRunExecution, contextInstruction string, selected taskModel) (*inference.Response, error) {
-	baseWorking := run.snapshotWorking()
-	var toolExecutor cognitiveexecution.ToolExecutor
-	if s.toolExecutor != nil {
-		toolExecutor = s.toolExecutor
-	}
-	return cognitiveexecution.Execute(ctx, cognitiveexecution.Request{
-		Provider:           selected.provider,
-		ModelConfiguration: selected.configuration,
-		Purpose:            inference.PurposePlan,
-		Temperature:        0.3,
-		ToolExecutor:       toolExecutor,
-		MaxToolCalls:       ToolCallLimit,
-		BuildContext: func(ctx context.Context, state cognitiveexecution.ContextState) ([]inference.Message, error) {
-			working := append([]contextbuilder.CognitionWorkingRecord(nil), baseWorking...)
-			for _, exchange := range state.Exchanges {
-				record, err := cognitionToolRecord(exchange)
-				if err != nil {
-					return nil, fmt.Errorf("plan tool context record: %w", err)
-				}
-				working = append(working, record)
-			}
-			if err := run.replaceWorking(working); err != nil {
-				return nil, fmt.Errorf("plan context working state: %w", err)
-			}
-			instructions := []string{contextInstruction}
-			if len(state.Tools) > 0 {
-				instructions = append(instructions, inference.FormatToolsForPrompt(state.Tools))
-			}
-			freshMessages, err := run.messages(ctx, state.InputTokenBudget, instructions...)
-			if err != nil {
-				return nil, fmt.Errorf("plan context: %w", err)
-			}
-			if err := bindCognitionToolMetadata(freshMessages, state.Tools, state.Exchanges); err != nil {
-				return nil, fmt.Errorf("plan tool protocol context: %w", err)
-			}
-			return freshMessages, nil
-		},
-	})
-}
-
-func cognitionToolRecord(exchange cognitiveexecution.ToolExchange) (contextbuilder.CognitionWorkingRecord, error) {
-	content, err := cognitionToolContent(exchange.Call, exchange.Result)
-	if err != nil {
-		return contextbuilder.CognitionWorkingRecord{}, err
-	}
-	return contextbuilder.CognitionWorkingRecord{
-		Role:       contextbuilder.RoleTool,
-		Content:    content,
-		Provenance: "cognition_run.tool_exchange",
-		Required:   exchange.Required,
-	}, nil
-}
-
-func cognitionToolContent(call inference.ToolCall, result inference.ToolResult) (string, error) {
-	encodedCall, err := json.Marshal(call)
-	if err != nil {
-		return "", err
-	}
-	return "Tool call:\n" + string(encodedCall) + "\n" + inference.FormatToolResultForPrompt(result), nil
-}
-
-func bindCognitionToolMetadata(messages []inference.Message, tools []inference.Tool, exchanges []cognitiveexecution.ToolExchange) error {
-	for index := range messages {
-		if messages[index].Role == "system" {
-			messages[index].Tools = append([]inference.Tool(nil), tools...)
-			break
-		}
-	}
-	for index := range messages {
-		if messages[index].Provenance != "cognition_run.tool_exchange" {
-			continue
-		}
-		matched := false
-		for exchangeIndex := range exchanges {
-			content, err := cognitionToolContent(exchanges[exchangeIndex].Call, exchanges[exchangeIndex].Result)
-			if err != nil {
-				return err
-			}
-			if content != messages[index].Content {
-				continue
-			}
-			messages[index].ToolCall = &exchanges[exchangeIndex].Call
-			messages[index].ToolResult = &exchanges[exchangeIndex].Result
-			matched = true
-			break
-		}
-		if !matched {
-			return fmt.Errorf("tool exchange metadata missing")
-		}
-	}
-	return nil
 }

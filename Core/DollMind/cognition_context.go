@@ -8,6 +8,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/Neon-Dolls/neondoll/Core/CognitiveExecution"
 	contextbuilder "github.com/Neon-Dolls/neondoll/Core/ContextBuilder"
 	"github.com/Neon-Dolls/neondoll/Core/Inference"
 )
@@ -21,6 +22,7 @@ type cognitionRunExecution struct {
 
 	mu      sync.Mutex
 	working []contextbuilder.CognitionWorkingRecord
+	tools   []cognitiveexecution.ToolExchange
 }
 
 func newCognitionRunExecution(id, objective, wakeEvidence string, mind MindAPI) (*cognitionRunExecution, error) {
@@ -99,6 +101,18 @@ func (run *cognitionRunExecution) replaceWorking(records []contextbuilder.Cognit
 	}
 	run.working = append(run.working[:0], records...)
 	return nil
+}
+
+func (run *cognitionRunExecution) snapshotToolExchanges() []cognitiveexecution.ToolExchange {
+	run.mu.Lock()
+	defer run.mu.Unlock()
+	return append([]cognitiveexecution.ToolExchange(nil), run.tools...)
+}
+
+func (run *cognitionRunExecution) appendToolExchanges(exchanges []cognitiveexecution.ToolExchange) {
+	run.mu.Lock()
+	defer run.mu.Unlock()
+	run.tools = append(run.tools, exchanges...)
 }
 
 func (run *cognitionRunExecution) messages(ctx context.Context, tokenBudget int, instructions ...string) ([]inference.Message, error) {

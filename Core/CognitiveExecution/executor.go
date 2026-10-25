@@ -52,9 +52,17 @@ type Request struct {
 	MaxToolCalls       int
 }
 
+// Result returns the terminal provider response and the correlated exchanges
+// consumed during this execution. Terminal exchanges are selectable context;
+// none remains required after the provider has produced its final response.
+type Result struct {
+	Response  *inference.Response
+	Exchanges []ToolExchange
+}
+
 // Execute runs one or more inference iterations until the provider returns a
 // final response. It never re-resolves the provider, model, or budget.
-func Execute(ctx context.Context, request Request) (*inference.Response, error) {
+func Execute(ctx context.Context, request Request) (*Result, error) {
 	if request.Provider == nil || request.BuildContext == nil {
 		return nil, fmt.Errorf("cognitive execution: provider and context builder are required")
 	}
@@ -111,7 +119,10 @@ func Execute(ctx context.Context, request Request) (*inference.Response, error) 
 			return nil, fmt.Errorf("cognitive execution: provider returned nil response")
 		}
 		if len(response.ToolCalls) == 0 {
-			return response, nil
+			for index := range exchanges {
+				exchanges[index].Required = false
+			}
+			return &Result{Response: response, Exchanges: exchanges}, nil
 		}
 		if request.ToolExecutor == nil {
 			return nil, fmt.Errorf("cognitive execution: provider requested tools without an executor")

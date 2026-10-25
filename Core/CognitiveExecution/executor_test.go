@@ -45,7 +45,7 @@ func TestExecuteRebuildsContextAndPinsModelAcrossToolIterations(t *testing.T) {
 		Budget: inference.ModelContextBudget{ContextTokens: 1600, OutputTokens: 200, RequiredOverheadTokens: 100},
 	}
 	var builds []cognitiveexecution.ContextState
-	response, err := cognitiveexecution.Execute(context.Background(), cognitiveexecution.Request{
+	result, err := cognitiveexecution.Execute(context.Background(), cognitiveexecution.Request{
 		Provider: provider, ModelConfiguration: model, Purpose: inference.PurposePlan,
 		Temperature: 0.3, ToolExecutor: tools,
 		BuildContext: func(_ context.Context, state cognitiveexecution.ContextState) ([]inference.Message, error) {
@@ -53,8 +53,8 @@ func TestExecuteRebuildsContextAndPinsModelAcrossToolIterations(t *testing.T) {
 			return []inference.Message{{Role: "system", Content: "bounded context"}}, nil
 		},
 	})
-	if err != nil || response.Content != "complete" {
-		t.Fatalf("Execute response=%+v err=%v", response, err)
+	if err != nil || result.Response.Content != "complete" {
+		t.Fatalf("Execute result=%+v err=%v", result, err)
 	}
 	if len(builds) != 3 || len(provider.requests) != 3 || len(tools.calls) != 2 {
 		t.Fatalf("builds=%d requests=%d tools=%d", len(builds), len(provider.requests), len(tools.calls))
@@ -69,6 +69,9 @@ func TestExecuteRebuildsContextAndPinsModelAcrossToolIterations(t *testing.T) {
 	}
 	if !builds[1].Exchanges[0].Required || builds[2].Exchanges[0].Required || !builds[2].Exchanges[1].Required {
 		t.Fatalf("required exchange lifecycle = %+v", builds)
+	}
+	if len(result.Exchanges) != 2 || result.Exchanges[0].Required || result.Exchanges[1].Required {
+		t.Fatalf("terminal exchange lifecycle = %+v", result.Exchanges)
 	}
 	if tools.calls[0].ID != "call-one" || tools.calls[1].ID != "call-two" {
 		t.Fatalf("tool correlation = %+v", tools.calls)

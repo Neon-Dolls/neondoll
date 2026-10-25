@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	body "github.com/Neon-Dolls/neondoll/Core/Body"
+	"github.com/Neon-Dolls/neondoll/Core/Config"
 	contextbuilder "github.com/Neon-Dolls/neondoll/Core/ContextBuilder"
 	"github.com/Neon-Dolls/neondoll/Core/Inference"
 	"github.com/Neon-Dolls/neondoll/Core/Pulse"
@@ -76,6 +77,68 @@ func TestPulseToolLoopRebuildsBoundedContextEachIteration(t *testing.T) {
 		if !strings.Contains(lastContext, evidence) {
 			t.Errorf("rebuilt context missing correlated evidence %q", evidence)
 		}
+	}
+}
+
+func TestOrientUsesUnifiedMultiStepExecution(t *testing.T) {
+	provider := &toolContextProvider{responses: []*inference.Response{
+		{ToolCalls: []inference.ToolCall{{ID: "orient_A", Name: "runtime.info__read"}}},
+		{ToolCalls: []inference.ToolCall{{ID: "orient_B", Name: "runtime.info__list"}}},
+		{Content: `{"summary":"oriented with tools","matters":false,"reason":"complete"}`},
+	}}
+	model := testModelConfiguration("orient-tools", inference.ModelContextBudget{
+		ContextTokens: 1536, OutputTokens: 240, RequiredOverheadTokens: 96,
+	})
+	scheduler := newPulseToolScheduler(provider, nil,
+		WithTaskModelConfiguration(config.InferenceTaskOrient, provider, model))
+
+	orientation, err := scheduler.Orient(context.Background(), events.TypeMessage, "inspect before orienting")
+	if err != nil || orientation.Summary != "oriented with tools" {
+		t.Fatalf("Orient result=%+v err=%v", orientation, err)
+	}
+	assertUnifiedToolIterations(t, provider, "orient-tools", 240, 1200, "orient_A", "orient_B")
+}
+
+func TestDirectCognitionUsesUnifiedMultiStepExecution(t *testing.T) {
+	provider := &toolContextProvider{responses: []*inference.Response{
+		{ToolCalls: []inference.ToolCall{{ID: "direct_A", Name: "runtime.info__read"}}},
+		{ToolCalls: []inference.ToolCall{{ID: "direct_B", Name: "runtime.info__list"}}},
+		{Content: "direct tools complete"},
+	}}
+	model := testModelConfiguration("direct-tools", inference.ModelContextBudget{
+		ContextTokens: 2048, OutputTokens: 300, RequiredOverheadTokens: 100,
+	})
+	scheduler := newPulseToolScheduler(provider, nil,
+		WithTaskModelConfiguration(config.InferenceTaskDirectCognition, provider, model))
+
+	result, err := scheduler.Run(context.Background(), LevelReflect, "inspect directly")
+	if err != nil || result.Actions[0].Payload["text"] != "direct tools complete" {
+		t.Fatalf("Run result=%+v err=%v", result, err)
+	}
+	assertUnifiedToolIterations(t, provider, "direct-tools", 300, 1648, "direct_A", "direct_B")
+}
+
+func assertUnifiedToolIterations(t *testing.T, provider *toolContextProvider, model string, outputBudget, inputBudget int, firstCall, secondCall string) {
+	t.Helper()
+	if len(provider.requests) != 3 {
+		t.Fatalf("%s inference requests = %d, want 3", model, len(provider.requests))
+	}
+	for index, request := range provider.requests {
+		if request.Model != model || request.MaxTokens != outputBudget {
+			t.Errorf("%s iteration %d request = %+v", model, index, request)
+		}
+		if tokens := estimatedInferenceTokens(request.Messages); tokens > inputBudget {
+			t.Errorf("%s iteration %d tokens = %d, budget = %d", model, index, tokens, inputBudget)
+		}
+		if provider.runIDs[index] == "" || provider.runIDs[index] != provider.runIDs[0] {
+			t.Errorf("%s iteration %d run ID = %q, want %q", model, index, provider.runIDs[index], provider.runIDs[0])
+		}
+	}
+	if got := messageToolResults(provider.requests[1].Messages); len(got) != 1 || got[0].ToolCallID != firstCall {
+		t.Fatalf("%s second iteration results = %+v", model, got)
+	}
+	if got := messageToolResults(provider.requests[2].Messages); len(got) != 2 || got[0].ToolCallID != firstCall || got[1].ToolCallID != secondCall {
+		t.Fatalf("%s third iteration results = %+v", model, got)
 	}
 }
 
