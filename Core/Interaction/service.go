@@ -133,13 +133,16 @@ func (s *Service) handleInteraction(ctx context.Context, sessionID session.ID, t
 				instructions = append(instructions, inference.FormatToolsForPrompt(execution.Tools))
 			}
 			required := []contextbuilder.Message{{Role: contextbuilder.RoleUser, Content: currentInput}}
-			for _, exchange := range execution.Exchanges {
+			transient := make([]contextbuilder.TransientMessage, 0, len(execution.Exchanges))
+			for index, exchange := range execution.Exchanges {
 				content, formatErr := cognitiveexecution.FormatToolExchange(exchange)
 				if formatErr != nil {
 					return nil, formatErr
 				}
-				required = append(required, contextbuilder.Message{
-					Role: contextbuilder.RoleTool, Content: content, Provenance: "interaction.tool_exchange",
+				id := fmt.Sprintf("%s/tool/%d", turnID, index)
+				transient = append(transient, contextbuilder.TransientMessage{
+					ID: id, Required: exchange.Required, WindowGroup: id,
+					Message: contextbuilder.Message{Role: contextbuilder.RoleTool, Content: content, Provenance: "interaction.tool_exchange"},
 				})
 			}
 			built, buildErr := s.builder.Build(ctx, contextbuilder.Request{
@@ -147,6 +150,7 @@ func (s *Service) handleInteraction(ctx context.Context, sessionID session.ID, t
 				TokenBudget:        execution.InputTokenBudget,
 				SystemInstructions: instructions,
 				RequiredMessages:   required,
+				TransientMessages:  transient,
 			})
 			if buildErr != nil {
 				return nil, buildErr

@@ -66,6 +66,7 @@ func (builder *Service) Build(ctx context.Context, request Request) (Result, err
 		TokenBudget:        request.TokenBudget,
 		SystemInstructions: request.SystemInstructions,
 		RequiredMessages:   request.RequiredMessages,
+		TransientMessages:  request.TransientMessages,
 	})
 	if err != nil {
 		return Result{}, err
@@ -127,16 +128,43 @@ func (builder *Service) BuildSource(ctx context.Context, request SourceRequest) 
 		result.Metadata.EstimatedTokens += cost
 	}
 
-	items := make([]WindowItem, len(resolved.Records))
-	for index, record := range resolved.Records {
+	items := make([]WindowItem, 0, len(resolved.Records)+len(request.TransientMessages))
+	historyIDs := make(map[string]struct{}, len(resolved.Records))
+	for _, record := range resolved.Records {
 		if !validRole(record.Role) {
 			return Result{}, ErrInvalidRequest
 		}
-		items[index] = WindowItem{
+		historyIDs[record.ID] = struct{}{}
+		items = append(items, WindowItem{
 			Record:          record,
 			EstimatedTokens: estimate(builder.estimator, Message{Role: record.Role, Content: record.Content, Provenance: record.Provenance}),
 			Required:        record.Required,
+		})
+	}
+	nextSequence := 0
+	if len(resolved.Records) > 0 {
+		nextSequence = resolved.Records[len(resolved.Records)-1].Sequence + 1
+	}
+	seenTransient := make(map[string]struct{}, len(request.TransientMessages))
+	for index, transient := range request.TransientMessages {
+		if strings.TrimSpace(transient.ID) == "" || !validRole(transient.Message.Role) || strings.TrimSpace(transient.Message.Content) == "" {
+			return Result{}, ErrInvalidRequest
 		}
+		if _, exists := historyIDs[transient.ID]; exists {
+			return Result{}, ErrInvalidRequest
+		}
+		if _, exists := seenTransient[transient.ID]; exists {
+			return Result{}, ErrInvalidRequest
+		}
+		seenTransient[transient.ID] = struct{}{}
+		record := ContextRecord{
+			ID: transient.ID, Source: request.Source, Sequence: nextSequence + index,
+			Role: transient.Message.Role, Content: transient.Message.Content, Provenance: transient.Message.Provenance,
+			Required: transient.Required, WindowGroup: transient.WindowGroup,
+		}
+		items = append(items, WindowItem{
+			Record: record, EstimatedTokens: estimate(builder.estimator, transient.Message), Required: transient.Required,
+		})
 	}
 	window, err := builder.policy.Select(WindowRequest{
 		Items:       items,
@@ -146,16 +174,31 @@ func (builder *Service) BuildSource(ctx context.Context, request SourceRequest) 
 		return Result{}, err
 	}
 	result.Metadata.EstimatedTokens += window.EstimatedTokens
-	result.Metadata.WindowStartSequence = window.StartSequence
-	result.Metadata.WindowEndSequence = window.EndSequence
-	result.Metadata.IncludedHistoryMessages = len(window.Items)
-	result.Metadata.OmittedHistoryMessages = len(window.OmittedMessages)
 	result.Metadata.OmittedMessages = window.OmittedMessages
+	for _, omitted := range window.OmittedMessages {
+		if _, ok := historyIDs[omitted.ID]; ok {
+			result.Metadata.OmittedHistoryMessages++
+		}
+	}
+	var transientTail []Message
 	for _, item := range window.Items {
-		result.Messages = append(result.Messages, Message{Role: item.Record.Role, Content: item.Record.Content, Provenance: item.Record.Provenance})
+		message := Message{Role: item.Record.Role, Content: item.Record.Content, Provenance: item.Record.Provenance}
+		if _, ok := historyIDs[item.Record.ID]; !ok {
+			transientTail = append(transientTail, message)
+			continue
+		}
+		result.Messages = append(result.Messages, message)
+		result.Metadata.IncludedHistoryMessages++
 		result.Metadata.IncludedMessageIDs = append(result.Metadata.IncludedMessageIDs, item.Record.ID)
+		if !item.Required {
+			if result.Metadata.WindowStartSequence == nil {
+				result.Metadata.WindowStartSequence = sequencePointer(item.Record.Sequence)
+			}
+			result.Metadata.WindowEndSequence = sequencePointer(item.Record.Sequence)
+		}
 	}
 	result.Messages = append(result.Messages, requiredTail...)
+	result.Messages = append(result.Messages, transientTail...)
 	return result, nil
 }
 

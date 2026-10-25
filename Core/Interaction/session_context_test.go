@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/Neon-Dolls/neondoll/Core/Body"
+	"github.com/Neon-Dolls/neondoll/Core/CognitiveExecution"
 	"github.com/Neon-Dolls/neondoll/Core/Config"
 	contextbuilder "github.com/Neon-Dolls/neondoll/Core/ContextBuilder"
 	"github.com/Neon-Dolls/neondoll/Core/DollMind"
@@ -38,6 +39,22 @@ type blockingSessionProvider struct {
 type interactionToolProvider struct {
 	responses []*inference.Response
 	requests  []inference.Request
+}
+
+type sizedInteractionTools struct{ output string }
+
+func (tools sizedInteractionTools) Tools() []inference.Tool {
+	return []inference.Tool{
+		{Name: "runtime.info__read", CapabilityID: "runtime.info", OperationID: "read", TargetBodyID: string(body.LocalBodyID)},
+		{Name: "runtime.info__list", CapabilityID: "runtime.info", OperationID: "list", TargetBodyID: string(body.LocalBodyID)},
+	}
+}
+
+func (tools sizedInteractionTools) ExecuteCall(_ context.Context, call inference.ToolCall, _ *inference.Tool) inference.ToolResult {
+	return inference.ToolResult{
+		ToolCallID: call.ID, ExecutionID: "exec_" + call.ID, Status: inference.ToolResultSuccess,
+		Result: map[string]any{"output": tools.output},
+	}
 }
 
 func (provider *interactionToolProvider) ID() inference.ProviderID { return "interaction-tools" }
@@ -352,6 +369,60 @@ func TestInteractionUsesUnifiedMultiStepExecutionAndPersistsOneTurn(t *testing.T
 		if message.Role == contextbuilder.RoleTool {
 			t.Fatalf("ephemeral tool exchange was persisted: %+v", stored)
 		}
+	}
+}
+
+func TestInteractionToolWindowOmitsConsumedExchangeButKeepsUnresolved(t *testing.T) {
+	store := openStore(t)
+	seedDoll(t, store, "window-tool-doll", "WindowToolDoll")
+	sessions, history := interactionSessionStores(t, store)
+	created := createInteractionSession(t, sessions, "body-window-tools")
+	tools := sizedInteractionTools{output: strings.Repeat("bounded-tool-output-", 12)}
+	provider := &interactionToolProvider{responses: []*inference.Response{
+		{ToolCalls: []inference.ToolCall{{ID: "call_A", Name: "runtime.info__read"}}},
+		{ToolCalls: []inference.ToolCall{{ID: "call_B", Name: "runtime.info__list"}}},
+		{Content: "bounded tools complete"},
+	}}
+	state, err := store.LoadDoll(context.Background(), "window-tool-doll")
+	if err != nil {
+		t.Fatal(err)
+	}
+	estimator := contextbuilder.ApproximateEstimator{}
+	input := "inspect within a constrained window"
+	baseCost := estimator.EstimateTokens(contextbuilder.Message{Role: contextbuilder.RoleUser, Content: input})
+	for _, instruction := range append(interactionInstructions(state), inference.FormatToolsForPrompt(tools.Tools())) {
+		baseCost += estimator.EstimateTokens(contextbuilder.Message{Role: contextbuilder.RoleSystem, Content: instruction})
+	}
+	exchangeContent, err := cognitiveexecution.FormatToolExchange(cognitiveexecution.ToolExchange{
+		Call: inference.ToolCall{ID: "call_A", Name: "runtime.info__read"},
+		Result: inference.ToolResult{ToolCallID: "call_A", ExecutionID: "exec_call_A", Status: inference.ToolResultSuccess,
+			Result: map[string]any{"output": tools.output}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	exchangeCost := estimator.EstimateTokens(contextbuilder.Message{Role: contextbuilder.RoleTool, Content: exchangeContent})
+	inputBudget := baseCost + exchangeCost + 4
+	model := config.ModelConfiguration{
+		Name: "constrained", Provider: "openai", Model: "constrained-interaction", Endpoint: inference.DefaultBaseURL,
+		Budget: inference.ModelContextBudget{ContextTokens: inputBudget + 80, OutputTokens: 60, RequiredOverheadTokens: 20},
+	}
+	service := New(store, provider, logger.New(logger.ErrorLevel, io.Discard),
+		WithModelConfiguration(model), WithToolExecutor(tools))
+	event := newResponse("window-tool-doll", input)
+	response, err := service.HandleInteraction(context.Background(), created, &event)
+	if err != nil || response == nil || response.Type != events.TypeMessage {
+		t.Fatalf("HandleInteraction response=%+v err=%v", response, err)
+	}
+	if got := interactionMessageToolResults(provider.requests[1].Messages); len(got) != 1 || got[0].ToolCallID != "call_A" {
+		t.Fatalf("required first exchange = %+v", got)
+	}
+	if got := interactionMessageToolResults(provider.requests[2].Messages); len(got) != 1 || got[0].ToolCallID != "call_B" {
+		t.Fatalf("bounded final exchanges = %+v, want only unresolved call_B", got)
+	}
+	stored, err := history.ListSessionMessages(context.Background(), created.ID)
+	if err != nil || len(stored) != 2 || stored[0].TurnID != stored[1].TurnID {
+		t.Fatalf("durable turn=%+v err=%v", stored, err)
 	}
 }
 

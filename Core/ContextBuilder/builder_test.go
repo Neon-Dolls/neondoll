@@ -262,6 +262,37 @@ func TestBuildPreservesPersistedSessionSystemMessages(t *testing.T) {
 	}
 }
 
+func TestBuildSelectsTransientTailWithRequiredOverflow(t *testing.T) {
+	fx := newFixture(t)
+	created := fx.createSession(t, "body-transient")
+	request := contextbuilder.Request{
+		SessionID: created.ID, TokenBudget: 15,
+		RequiredMessages: []contextbuilder.Message{{Role: contextbuilder.RoleUser, Content: "current"}},
+		TransientMessages: []contextbuilder.TransientMessage{
+			{ID: "old-tool", Message: contextbuilder.Message{Role: contextbuilder.RoleTool, Content: "old-tool"}, WindowGroup: "old-tool"},
+			{ID: "new-tool", Message: contextbuilder.Message{Role: contextbuilder.RoleTool, Content: "new-tool"}, Required: true, WindowGroup: "new-tool"},
+		},
+	}
+	result, err := fx.builder.Build(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []contextbuilder.Message{
+		{Role: contextbuilder.RoleUser, Content: "current"},
+		{Role: contextbuilder.RoleTool, Content: "new-tool"},
+	}
+	if !reflect.DeepEqual(result.Messages, want) {
+		t.Fatalf("messages = %+v, want %+v", result.Messages, want)
+	}
+	if len(result.Metadata.OmittedMessages) != 1 || result.Metadata.OmittedMessages[0].ID != "old-tool" {
+		t.Fatalf("omissions = %+v", result.Metadata.OmittedMessages)
+	}
+	request.TokenBudget = 14
+	if _, err := fx.builder.Build(context.Background(), request); !errors.Is(err, contextbuilder.ErrRequiredContextExceedsBudget) {
+		t.Fatalf("required transient overflow error = %v", err)
+	}
+}
+
 func TestConcurrentBuildsRemainSessionIsolated(t *testing.T) {
 	fx := newFixture(t)
 	first := fx.createSession(t, "body-one")
