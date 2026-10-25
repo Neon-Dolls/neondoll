@@ -87,8 +87,9 @@ type RejectedCandidate struct {
 }
 
 type Result struct {
-	Eligible []ExecutionCandidate
-	Rejected []RejectedCandidate
+	Requirement ActionRequirement
+	Eligible    []ExecutionCandidate
+	Rejected    []RejectedCandidate
 }
 
 // Resolve filters every candidate, then orders eligible candidates by
@@ -104,7 +105,7 @@ func Resolve(requirement ActionRequirement, constraints TaskConstraints, policy 
 	allowedKinds := kindSet(constraints.AllowedKinds)
 	allowedPolicyBodies := idSet(policy.AllowedBodyIDs)
 	seen := make(map[body.BodyID]struct{}, len(candidates))
-	result := Result{}
+	result := Result{Requirement: requirement}
 
 	for _, candidate := range candidates {
 		if candidate.Body == nil || candidate.Body.ID() == "" {

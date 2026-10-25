@@ -67,6 +67,9 @@ type GuardResult struct {
 
 	// Message is an optional human-readable explanation.
 	Message string
+
+	// Scope distinguishes Body-scoped denials from global prohibitions.
+	Scope AuthorityScope
 }
 
 // Authorize runs the M3 authority-only preflight path for one request:
@@ -108,6 +111,7 @@ func (g *Guard) Authorize(req AuthorityRequest) (GuardResult, error) {
 			Denied:  true,
 			Reason:  result.Reason,
 			Message: result.Message,
+			Scope:   result.Scope,
 		}, nil
 	}
 
@@ -203,7 +207,9 @@ func (g *Guard) ExecuteContext(ctx context.Context, req ExecutionRequest) Execut
 	}
 	authRes := g.evaluator.Evaluate(authReq)
 	if authRes.IsDeny() {
-		return terminal(req, StatusDenied, authRes.Reason, authRes.Message)
+		result := terminal(req, StatusDenied, authRes.Reason, authRes.Message)
+		result.DenialScope = authRes.Scope
+		return result
 	}
 
 	// 5. Invoke the Body operation with the same request that was

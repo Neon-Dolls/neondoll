@@ -46,6 +46,16 @@ const (
 // String returns the string representation of the decision.
 func (d AuthorityDecision) String() string { return string(d) }
 
+// AuthorityScope identifies whether a denial applies only to the attempted
+// Body execution path or prohibits the action across all Bodies. An empty
+// scope retains the legacy Body-scoped behavior.
+type AuthorityScope string
+
+const (
+	AuthorityScopeBody   AuthorityScope = "body"
+	AuthorityScopeGlobal AuthorityScope = "global"
+)
+
 // AuthorityResult is the explicit outcome of evaluating an AuthorityRequest.
 // A zero-value result (empty Decision) is treated as deny by consumers,
 // ensuring fail-closed default-deny behavior even from malfunctioning
@@ -61,6 +71,10 @@ type AuthorityResult struct {
 
 	// Message is an optional human-readable explanation of the decision.
 	Message string `json:"message,omitempty"`
+
+	// Scope is meaningful for denials. Global denials must stop alternative
+	// Body resolution; Body-scoped (and legacy empty) denials may permit it.
+	Scope AuthorityScope `json:"scope,omitempty"`
 }
 
 // IsAllow reports whether the decision is explicitly allow.
@@ -97,6 +111,7 @@ type AuthorityRule struct {
 	Decision   AuthorityDecision
 	Reason     string
 	Message    string
+	Scope      AuthorityScope
 }
 
 // RuleEvaluator is the deterministic M3 authority evaluator. It matches
@@ -130,6 +145,7 @@ func (e *RuleEvaluator) Evaluate(req AuthorityRequest) AuthorityResult {
 				Decision: r.Decision,
 				Reason:   r.Reason,
 				Message:  r.Message,
+				Scope:    r.Scope,
 			}
 		}
 	}

@@ -195,6 +195,11 @@ type ExecutionResult struct {
 
 	// Error is an optional human-readable explanation.
 	Error string `json:"error,omitempty"`
+
+	// DenialScope distinguishes a Body-scoped denial from a global owner or
+	// policy prohibition. It is empty for non-denials and legacy Body-scoped
+	// denials.
+	DenialScope AuthorityScope `json:"denial_scope,omitempty"`
 }
 
 // String returns a human-readable representation.
