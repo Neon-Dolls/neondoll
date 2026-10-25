@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Neon-Dolls/neondoll/Core/ActionPolicy"
 	"github.com/Neon-Dolls/neondoll/Core/Body"
 	"github.com/Neon-Dolls/neondoll/Core/Inference"
 	"github.com/Neon-Dolls/neondoll/DollLink/Events"
@@ -129,7 +130,7 @@ func setupConformanceScheduler(acts []scriptedAct, guardEval body.AuthorityEvalu
 	}
 	reg := body.NewRegistry()
 	guard := body.NewGuard(reg, guardEval)
-	exec := NewToolExecutor(reg, guard, allowAllEvaluator{}, "neondoll")
+	exec := NewToolExecutor(reg, guard, actionpolicy.Default(), "neondoll")
 
 	log := logger.New(logger.ErrorLevel, nil)
 	state := newConformanceState()
