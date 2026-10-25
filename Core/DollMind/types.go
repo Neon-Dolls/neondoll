@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/Neon-Dolls/neondoll/Core/CognitiveExecution"
 	"github.com/Neon-Dolls/neondoll/Core/Config"
 	contextbuilder "github.com/Neon-Dolls/neondoll/Core/ContextBuilder"
 	"github.com/Neon-Dolls/neondoll/Core/Inference"
@@ -141,7 +142,7 @@ func New(provider inference.Provider, log *logger.Logger, mindAPI MindAPI, opts 
 // ToolCallLimit is the maximum number of tool calls allowed in a single
 // Cognition Run (Core 2 default). This counts actual tool calls, not
 // provider round-trips.
-const ToolCallLimit = 10
+const ToolCallLimit = cognitiveexecution.DefaultToolCallLimit
 
 // WithTimeProvider sets the reference time source for DueIntentions and
 // Intention validation. Production defaults to time.Now; tests use a

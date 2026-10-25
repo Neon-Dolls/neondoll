@@ -62,6 +62,18 @@ func resolveTaskProvider(resolver *config.ModelResolver, task config.InferenceTa
 	return model, provider, nil
 }
 
+func newProductionToolExecutor(registry *body.Registry) (*dollmind.ToolExecutor, error) {
+	local, ok := registry.Local()
+	if !ok {
+		return nil, fmt.Errorf("production tool executor: local Body unavailable")
+	}
+	authority := body.NewRuleEvaluator(
+		body.AuthorityRule{Doll: "neondoll", Body: body.LocalBodyID, Capability: "runtime.info", Operation: "read", Decision: body.AuthorityAllow},
+		body.AuthorityRule{Doll: "neondoll", Body: body.LocalBodyID, Capability: "runtime.info", Operation: "list", Decision: body.AuthorityAllow},
+	)
+	return dollmind.NewToolExecutor(body.NewGuard(registry, authority), local), nil
+}
+
 func main() {
 	log := logger.New(logger.InfoLevel, os.Stdout)
 	log.Info(fmt.Sprintf("neondoll v%s starting — Core 1", version.String()))
@@ -204,6 +216,11 @@ func main() {
 		"local_id": string(body.LocalBodyID),
 		"count":    bodyRegistry.Count(),
 	})
+	cognitionToolExecutor, err := newProductionToolExecutor(bodyRegistry)
+	if err != nil {
+		log.Error("cognition tool executor setup error", map[string]any{"error": err.Error()})
+		os.Exit(1)
+	}
 	acceptanceControl, err := startAcceptanceControl(bodyRegistry)
 	if err != nil {
 		log.Error("acceptance control setup error", map[string]any{"error": err.Error()})
@@ -354,7 +371,8 @@ func main() {
 		scheduler := dollmind.New(directProvider, log, mindAPI,
 			dollmind.WithModelConfiguration(directModel),
 			dollmind.WithTaskModelConfiguration(config.InferenceTaskOrient, orientProvider, orientModel),
-			dollmind.WithTaskModelConfiguration(config.InferenceTaskPlan, planProvider, planModel),
+			dollmind.WithTaskModelConfiguration(config.InferenceTaskPlan, inference.NewToolEnabledProvider(planProvider), planModel),
+			dollmind.WithToolExecutor(cognitionToolExecutor),
 		)
 
 		// Wire the Scheduler as Pulse's MindEntrance.
