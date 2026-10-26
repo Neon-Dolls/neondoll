@@ -150,10 +150,6 @@ func main() {
 		log.Error("external identity resolver setup error", map[string]any{"error": err.Error()})
 		os.Exit(1)
 	}
-	// Gateway ingress integration is a later milestone. Constructing the
-	// immutable resolver here ensures production startup uses the validated,
-	// persistent Core mapping snapshot rather than Gateway-provided state.
-	_ = externalIdentityResolver
 
 	modelResolver, err := config.NewModelResolver(cfg.Inference)
 	if err != nil {
@@ -215,7 +211,7 @@ func main() {
 		log.Error("store does not implement Interaction Session Store")
 		os.Exit(1)
 	}
-	coreServices, err := runtime.NewServices(ctx, sessionStore)
+	coreServices, err := runtime.NewServices(ctx, sessionStore, runtime.WithExternalIdentityResolver(externalIdentityResolver))
 	if err != nil {
 		log.Error("Core runtime services setup error", map[string]any{"error": err.Error()})
 		os.Exit(1)
