@@ -56,8 +56,8 @@ type Principal struct {
 // Mapping is trusted Core configuration. Runtime callers cannot add or modify
 // mappings through Resolver.
 type Mapping struct {
-	Identity  Identity
-	Principal Principal
+	Identity  Identity  `json:"identity"`
+	Principal Principal `json:"principal"`
 }
 
 type Resolver interface {
@@ -79,6 +79,7 @@ type identityKey struct {
 
 func NewMemoryResolver(mappings []Mapping) (*MemoryResolver, error) {
 	resolved := make(map[identityKey]Principal, len(mappings))
+	principalAuthorities := make(map[PrincipalID]Authority, len(mappings))
 	for index, mapping := range mappings {
 		key, err := validatedKey(mapping.Identity)
 		if err != nil || !validPrincipal(mapping.Principal) {
@@ -87,10 +88,15 @@ func NewMemoryResolver(mappings []Mapping) (*MemoryResolver, error) {
 		if _, duplicate := resolved[key]; duplicate {
 			return nil, fmt.Errorf("%w: duplicate identity at index %d", ErrInvalidMapping, index)
 		}
-		resolved[key] = Principal{
+		principal := Principal{
 			ID:        PrincipalID(strings.TrimSpace(string(mapping.Principal.ID))),
 			Authority: mapping.Principal.Authority,
 		}
+		if authority, exists := principalAuthorities[principal.ID]; exists && authority != principal.Authority {
+			return nil, fmt.Errorf("%w: conflicting authority for principal %q at index %d", ErrInvalidMapping, principal.ID, index)
+		}
+		principalAuthorities[principal.ID] = principal.Authority
+		resolved[key] = principal
 	}
 	return &MemoryResolver{mappings: resolved}, nil
 }
