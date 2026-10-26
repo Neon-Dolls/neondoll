@@ -36,7 +36,8 @@ func TerminalDeliveryError(err error) error {
 	return terminalDeliveryError{error: err}
 }
 
-func (terminalDeliveryError) Terminal() bool { return true }
+func (terminalDeliveryError) Terminal() bool  { return true }
+func (e terminalDeliveryError) Unwrap() error { return e.error }
 
 func isTerminalDeliveryError(err error) bool {
 	var terminal interface{ Terminal() bool }
