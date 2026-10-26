@@ -24,6 +24,10 @@ type RouteRequest struct {
 	SessionID session.ID
 	Owner     session.Owner
 	Event     *events.Event
+	// onAuthorized is available only inside the Interaction package. Trusted
+	// ingress uses it for state that may be recorded only after Router verifies
+	// Session ownership and active lifecycle.
+	onAuthorized func(context.Context, *session.InteractionSession) error
 }
 
 // SessionHandler receives an interaction only after Router has resolved and
@@ -82,6 +86,11 @@ func (r *Router) RouteInteraction(ctx context.Context, request RouteRequest) (*e
 	}
 	if err != nil {
 		return nil, fmt.Errorf("interaction: resume session: %w", err)
+	}
+	if request.onAuthorized != nil {
+		if err := request.onAuthorized(ctx, resolved); err != nil {
+			return nil, fmt.Errorf("interaction: authorized route hook: %w", err)
+		}
 	}
 	return r.handler.HandleInteraction(ctx, resolved, request.Event)
 }

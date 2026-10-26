@@ -24,6 +24,7 @@ type Manager struct {
 }
 
 var _ Service = (*Manager)(nil)
+var _ ParticipantService = (*Manager)(nil)
 
 func New(store Store) *Manager { return NewWithClock(store, realClock{}) }
 
@@ -127,6 +128,33 @@ func (m *Manager) ListActive(ctx context.Context, filter *ActiveFilter) ([]*Inte
 		result[i] = clone(active)
 	}
 	return result, nil
+}
+
+func (m *Manager) BindParticipant(ctx context.Context, sessionID ID, principalID string) (*ParticipantBinding, error) {
+	if strings.TrimSpace(string(sessionID)) == "" || strings.TrimSpace(principalID) == "" {
+		return nil, ErrInvalidRequest
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.store.BindSessionParticipant(ctx, sessionID, strings.TrimSpace(principalID), m.clock.Now().UTC())
+}
+
+func (m *Manager) ListParticipants(ctx context.Context, sessionID ID) ([]*ParticipantBinding, error) {
+	if strings.TrimSpace(string(sessionID)) == "" {
+		return nil, ErrInvalidRequest
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.store.ListSessionParticipants(ctx, sessionID)
+}
+
+func (m *Manager) ListParticipantSessions(ctx context.Context, principalID string) ([]*ParticipantBinding, error) {
+	if strings.TrimSpace(principalID) == "" {
+		return nil, ErrInvalidRequest
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.store.ListPrincipalSessions(ctx, strings.TrimSpace(principalID))
 }
 
 func validOwner(owner Owner) bool {
