@@ -68,9 +68,9 @@ func (s *Services) InteractionRouter(handler interaction.SessionHandler) (intera
 // GatewayIngress binds the retained resolver and authenticated runtime
 // Gateway identity to an Interaction router. Gateway events cannot supply or
 // override the bound identity.
-func (s *Services) GatewayIngress(gateway externalidentity.GatewayInstanceID, router interaction.SessionRouter) (*interaction.GatewayIngress, error) {
+func (s *Services) GatewayIngress(gateway externalidentity.GatewayInstanceID, router interaction.SessionRouter, decisions ...interaction.PermissionDecisionHandler) (*interaction.GatewayIngress, error) {
 	if s == nil || s.externalIdentities == nil {
 		return nil, errors.New("runtime services: external identity resolver unavailable")
 	}
-	return interaction.NewGatewayIngress(gateway, s.externalIdentities, s.sessions, router)
+	return interaction.NewGatewayIngress(gateway, s.externalIdentities, s.sessions, router, decisions...)
 }
