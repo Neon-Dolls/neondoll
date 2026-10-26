@@ -2,10 +2,13 @@ package config
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/Neon-Dolls/neondoll/Core/ActionPolicy"
 )
 
 func TestDefaults(t *testing.T) {
@@ -51,6 +54,18 @@ func TestLoadNonexistent(t *testing.T) {
 	_, err := Load("/nonexistent/neondoll.json")
 	if err == nil {
 		t.Fatal("expected error for nonexistent file")
+	}
+}
+
+func TestLoadRejectsInvalidActionPolicy(t *testing.T) {
+	config := Defaults()
+	config.Core.ActionPolicy = []actionpolicy.Rule{{Capability: "camera", Operation: "capture", Decision: "unspecified"}}
+	path := filepath.Join(t.TempDir(), "invalid-action-policy.json")
+	if err := Save(path, &config); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path); !errors.Is(err, actionpolicy.ErrInvalidPolicy) {
+		t.Fatalf("Load error = %v", err)
 	}
 }
 

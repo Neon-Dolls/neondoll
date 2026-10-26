@@ -5,6 +5,7 @@ import (
 	"errors"
 	"sort"
 
+	"github.com/Neon-Dolls/neondoll/Core/ActionPolicy"
 	"github.com/Neon-Dolls/neondoll/Core/Body"
 	"github.com/Neon-Dolls/neondoll/Core/BodyResolver"
 	"github.com/Neon-Dolls/neondoll/Core/Inference"
@@ -14,12 +15,12 @@ import (
 // action-wide authority check, resolves trusted Registry Bodies, and delegates
 // every concrete attempt to BodyResolver.Coordinator and therefore Body.Guard.
 type ToolExecutor struct {
-	registry        *body.Registry
-	actionAuthority body.AuthorityEvaluator
-	coordinator     *bodyresolver.Coordinator
-	dollID          string
-	preferences     map[body.BodyID]int
-	ownerPolicy     bodyresolver.OwnerPolicy
+	registry     *body.Registry
+	actionPolicy actionpolicy.Policy
+	coordinator  *bodyresolver.Coordinator
+	dollID       string
+	preferences  map[body.BodyID]int
+	ownerPolicy  bodyresolver.OwnerPolicy
 }
 
 type ToolExecutorOption func(*ToolExecutor)
@@ -38,11 +39,11 @@ func WithBodyOwnerPolicy(policy bodyresolver.OwnerPolicy) ToolExecutorOption {
 }
 
 // NewToolExecutor composes existing Core authority, Registry, resolver, and
-// Guard boundaries. actionAuthority evaluates the Body-independent action;
+// Guard boundaries. actionPolicy evaluates the Body-independent action;
 // Guard independently authorizes every selected Body execution.
-func NewToolExecutor(registry *body.Registry, guard *body.Guard, actionAuthority body.AuthorityEvaluator, dollID string, options ...ToolExecutorOption) *ToolExecutor {
+func NewToolExecutor(registry *body.Registry, guard *body.Guard, actionPolicy actionpolicy.Policy, dollID string, options ...ToolExecutorOption) *ToolExecutor {
 	coordinator, _ := bodyresolver.NewCoordinator(guard)
-	executor := &ToolExecutor{registry: registry, actionAuthority: actionAuthority, coordinator: coordinator, dollID: dollID}
+	executor := &ToolExecutor{registry: registry, actionPolicy: actionPolicy, coordinator: coordinator, dollID: dollID}
 	for _, option := range options {
 		option(executor)
 	}
@@ -86,13 +87,21 @@ func (executor *ToolExecutor) ExecuteCall(ctx context.Context, call inference.To
 	if err := ctx.Err(); err != nil {
 		return failureResult(call.ID, "cancelled", err.Error())
 	}
-	if executor.registry == nil || executor.actionAuthority == nil || executor.coordinator == nil || executor.dollID == "" {
+	if executor.registry == nil || executor.actionPolicy == nil || executor.coordinator == nil || executor.dollID == "" {
 		return failureResult(call.ID, "invalid_configuration", "tool execution boundaries are unavailable")
 	}
 
-	action := body.AuthorityRequest{Doll: executor.dollID, Capability: tool.CapabilityID, Operation: tool.OperationID, Arguments: call.Arguments}
-	if decision := executor.actionAuthority.Evaluate(action); decision.IsDeny() {
+	decision := executor.actionPolicy.Evaluate(actionpolicy.Request{
+		Doll: executor.dollID, Capability: tool.CapabilityID, Operation: tool.OperationID, Arguments: call.Arguments,
+	})
+	switch decision.Decision {
+	case actionpolicy.DecisionAllow:
+	case actionpolicy.DecisionDeny:
 		return failureResult(call.ID, "action_denied", decision.Message)
+	case actionpolicy.DecisionRequireApproval:
+		return failureResult(call.ID, "approval_required", decision.Message)
+	default:
+		return failureResult(call.ID, "invalid_configuration", "action policy returned an invalid decision")
 	}
 
 	constraints := bodyresolver.TaskConstraints{}

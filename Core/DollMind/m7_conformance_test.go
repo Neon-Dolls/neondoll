@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Neon-Dolls/neondoll/Core/ActionPolicy"
 	"github.com/Neon-Dolls/neondoll/Core/Body"
 	"github.com/Neon-Dolls/neondoll/Core/Inference"
 	dollcard "github.com/Neon-Dolls/neondoll/DollCard"
@@ -100,7 +101,7 @@ func setupWakeScheduler(acts []scriptedAct, guardEval body.AuthorityEvaluator, i
 	}
 	reg := body.NewRegistry()
 	guard := body.NewGuard(reg, guardEval)
-	exec := NewToolExecutor(reg, guard, allowAllEvaluator{}, "neondoll")
+	exec := NewToolExecutor(reg, guard, actionpolicy.Default(), "neondoll")
 
 	log := logger.New(logger.ErrorLevel, nil)
 	state := wakeState(intentionID, subject, wakeTime)

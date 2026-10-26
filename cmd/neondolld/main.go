@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/Neon-Dolls/neondoll/Core/ActionPolicy"
 	"github.com/Neon-Dolls/neondoll/Core/Body"
 	"github.com/Neon-Dolls/neondoll/Core/Config"
 	"github.com/Neon-Dolls/neondoll/Core/DollMind"
@@ -62,17 +63,17 @@ func resolveTaskProvider(resolver *config.ModelResolver, task config.InferenceTa
 	return model, provider, nil
 }
 
-func newProductionToolExecutor(registry *body.Registry, dollID string, configuredRules []config.BodyAuthorizationRule, configuredPreferences map[string]int) (*dollmind.ToolExecutor, error) {
+func newProductionToolExecutor(registry *body.Registry, dollID string, actionRules []actionpolicy.Rule, configuredRules []config.BodyAuthorizationRule, configuredPreferences map[string]int) (*dollmind.ToolExecutor, error) {
 	if dollID == "" {
 		return nil, fmt.Errorf("production tool executor: Doll identity unavailable")
 	}
 	if _, ok := registry.Local(); !ok {
 		return nil, fmt.Errorf("production tool executor: local Body unavailable")
 	}
-	actionAuthority := body.NewRuleEvaluator(
-		body.AuthorityRule{Doll: dollID, Capability: "runtime.info", Operation: "read", Decision: body.AuthorityAllow},
-		body.AuthorityRule{Doll: dollID, Capability: "runtime.info", Operation: "list", Decision: body.AuthorityAllow},
-	)
+	actionPolicy, err := actionpolicy.New(actionRules)
+	if err != nil {
+		return nil, fmt.Errorf("production tool executor: action policy: %w", err)
+	}
 	bodyRules, err := productionBodyAuthorityRules(dollID, configuredRules)
 	if err != nil {
 		return nil, err
@@ -82,7 +83,7 @@ func newProductionToolExecutor(registry *body.Registry, dollID string, configure
 	for bodyID, preference := range configuredPreferences {
 		preferences[body.BodyID(bodyID)] = preference
 	}
-	return dollmind.NewToolExecutor(registry, body.NewGuard(registry, bodyAuthority), actionAuthority, dollID,
+	return dollmind.NewToolExecutor(registry, body.NewGuard(registry, bodyAuthority), actionPolicy, dollID,
 		dollmind.WithBodyPreferences(preferences)), nil
 }
 
@@ -279,7 +280,7 @@ func main() {
 		log.Error("production Doll state setup error", map[string]any{"doll_id": dollID, "error": err.Error()})
 		os.Exit(1)
 	}
-	cognitionToolExecutor, err := newProductionToolExecutor(bodyRegistry, dollState.Identity.DollID, cfg.Core.BodyAuthorization, cfg.Core.BodyPreferences)
+	cognitionToolExecutor, err := newProductionToolExecutor(bodyRegistry, dollState.Identity.DollID, cfg.Core.ActionPolicy, cfg.Core.BodyAuthorization, cfg.Core.BodyPreferences)
 	if err != nil {
 		log.Error("cognition tool executor setup error", map[string]any{"error": err.Error()})
 		os.Exit(1)

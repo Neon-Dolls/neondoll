@@ -7,6 +7,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/Neon-Dolls/neondoll/Core/ActionPolicy"
 	body "github.com/Neon-Dolls/neondoll/Core/Body"
 	"github.com/Neon-Dolls/neondoll/Core/Config"
 	contextbuilder "github.com/Neon-Dolls/neondoll/Core/ContextBuilder"
@@ -169,7 +170,7 @@ func newPulseToolScheduler(provider inference.Provider, executionBody body.Body,
 		panic(err)
 	}
 	guard := body.NewGuard(registry, allowAllEvaluator{})
-	executor := NewToolExecutor(registry, guard, allowAllEvaluator{}, "neondoll")
+	executor := NewToolExecutor(registry, guard, actionpolicy.Default(), "neondoll")
 	state := &dollstate.DollState{Identity: dollstate.Identity{DollID: "tool-doll", CanonicalName: "Spark"}}
 	return New(provider, logger.New(logger.ErrorLevel, nil), &orientMockAPI{state: state}, append([]Option{WithToolExecutor(executor)}, opts...)...)
 }

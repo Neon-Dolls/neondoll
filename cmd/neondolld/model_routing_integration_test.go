@@ -12,6 +12,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/Neon-Dolls/neondoll/Core/ActionPolicy"
 	"github.com/Neon-Dolls/neondoll/Core/Body"
 	"github.com/Neon-Dolls/neondoll/Core/Config"
 	contextbuilder "github.com/Neon-Dolls/neondoll/Core/ContextBuilder"
@@ -155,7 +156,7 @@ func TestProductionTaskModelRoutingIntegration(t *testing.T) {
 	}
 	log := logger.New(logger.ErrorLevel, io.Discard)
 	registry := body.NewRegistry()
-	toolExecutor, err := newProductionToolExecutor(registry, state.Identity.DollID, nil, nil)
+	toolExecutor, err := newProductionToolExecutor(registry, state.Identity.DollID, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -264,7 +265,7 @@ func TestProductionToolExecutorUsesPersistedDollIdentity(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	executor, err := newProductionToolExecutor(registry, "persisted-doll-42", nil, nil)
+	executor, err := newProductionToolExecutor(registry, "persisted-doll-42", nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -282,8 +283,8 @@ func TestProductionToolExecutorUsesPersistedDollIdentity(t *testing.T) {
 	denied := executor.ExecuteCall(context.Background(), inference.ToolCall{
 		ID: "call_unrelated", Name: "unrelated.info__read",
 	}, definitions["unrelated.info__read"])
-	if denied.Status != inference.ToolResultFailure || denied.Error == nil || denied.Error.Code != "action_denied" {
-		t.Fatalf("unrelated operation result = %+v, want action-wide authority denial", denied)
+	if denied.Status != inference.ToolResultFailure || denied.Error == nil || denied.Error.Code != "denied" {
+		t.Fatalf("unrelated operation result = %+v, want per-Body authority denial", denied)
 	}
 }
 
@@ -323,7 +324,7 @@ func TestProductionToolExecutorAuthorizesConfiguredNonLocalBody(t *testing.T) {
 	if err := registry.Register(remote); err != nil {
 		t.Fatal(err)
 	}
-	executor, err := newProductionToolExecutor(registry, "configured-doll", []config.BodyAuthorizationRule{{
+	executor, err := newProductionToolExecutor(registry, "configured-doll", nil, []config.BodyAuthorizationRule{{
 		Body: string(remote.id), Capability: "runtime.info", Operation: "read", Decision: body.AuthorityAllow,
 	}}, map[string]int{string(remote.id): 100})
 	if err != nil {
@@ -359,7 +360,7 @@ func TestProductionToolExecutorConfiguredFallback(t *testing.T) {
 				{Body: string(remote.id), Capability: "runtime.info", Operation: "read", Decision: test.decision, Scope: body.AuthorityScopeBody},
 				{Body: string(body.LocalBodyID), Capability: "runtime.info", Operation: "read", Decision: body.AuthorityAllow},
 			}
-			executor, err := newProductionToolExecutor(registry, "fallback-doll", rules, map[string]int{string(remote.id): 100})
+			executor, err := newProductionToolExecutor(registry, "fallback-doll", nil, rules, map[string]int{string(remote.id): 100})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -371,6 +372,41 @@ func TestProductionToolExecutorConfiguredFallback(t *testing.T) {
 			if len(result.Attempts) != 2 || result.Attempts[0].BodyID != string(remote.id) || result.Attempts[0].Status != test.wantStatus ||
 				result.Attempts[1].BodyID != string(body.LocalBodyID) || result.Attempts[1].Status != string(body.StatusSuccess) {
 				t.Fatalf("fallback attempts = %+v", result.Attempts)
+			}
+		})
+	}
+}
+
+func TestProductionToolExecutorEnforcesConfiguredActionPolicy(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		decision actionpolicy.Decision
+		wantCode string
+	}{
+		{name: "prohibited", decision: actionpolicy.DecisionDeny, wantCode: "action_denied"},
+		{name: "approval required", decision: actionpolicy.DecisionRequireApproval, wantCode: "approval_required"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			registry := body.NewRegistry()
+			remote := &configuredRuntimeBody{id: "policy-remote"}
+			if err := registry.Register(remote); err != nil {
+				t.Fatal(err)
+			}
+			executor, err := newProductionToolExecutor(registry, "policy-doll", []actionpolicy.Rule{{
+				Capability: "runtime.info", Operation: "read", Decision: test.decision,
+			}}, []config.BodyAuthorizationRule{{
+				Body: string(remote.id), Capability: "runtime.info", Operation: "read", Decision: body.AuthorityAllow,
+			}}, map[string]int{string(remote.id): 100})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			result := executor.ExecuteCall(context.Background(), inference.ToolCall{ID: "policy-call"}, productionTool(t, executor, "runtime.info__read"))
+			if result.Status != inference.ToolResultFailure || result.Error == nil || result.Error.Code != test.wantCode {
+				t.Fatalf("policy result = %+v", result)
+			}
+			if remote.executions != 0 || len(result.Attempts) != 0 || len(result.CandidateRejections) != 0 {
+				t.Fatalf("remote executions=%d attempts=%+v rejections=%+v", remote.executions, result.Attempts, result.CandidateRejections)
 			}
 		})
 	}

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/Neon-Dolls/neondoll/Core/ActionPolicy"
 	"github.com/Neon-Dolls/neondoll/Core/Body"
 	"github.com/Neon-Dolls/neondoll/Core/CognitiveExecution"
 	"github.com/Neon-Dolls/neondoll/Core/Config"
@@ -67,10 +68,40 @@ func TestToolExecutorActionProhibitionStopsBeforeResolution(t *testing.T) {
 		t.Fatal(err)
 	}
 	bodyAuthority := &recordingAuthority{}
-	executor := NewToolExecutor(registry, body.NewGuard(registry, bodyAuthority), body.NewRuleEvaluator(), "doll")
+	policy, err := actionpolicy.New([]actionpolicy.Rule{{
+		Capability: "test.echo", Operation: "run", Decision: actionpolicy.DecisionDeny, Reason: "owner_prohibited",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	executor := NewToolExecutor(registry, body.NewGuard(registry, bodyAuthority), policy, "doll")
 
 	result := executor.ExecuteCall(context.Background(), inference.ToolCall{ID: "call-denied"}, echoTool(""))
 	if result.Status != inference.ToolResultFailure || result.Error == nil || result.Error.Code != "action_denied" {
+		t.Fatalf("result = %+v", result)
+	}
+	if candidate.resolveCalls != 0 || candidate.executions != 0 || len(bodyAuthority.calls) != 0 {
+		t.Fatalf("resolution=%d executions=%d Body authority calls=%d", candidate.resolveCalls, candidate.executions, len(bodyAuthority.calls))
+	}
+}
+
+func TestToolExecutorApprovalRequirementStopsBeforeResolution(t *testing.T) {
+	registry := body.NewRegistry()
+	candidate := &resolverBody{id: "body-awaiting-approval"}
+	if err := registry.Register(candidate); err != nil {
+		t.Fatal(err)
+	}
+	bodyAuthority := &recordingAuthority{}
+	policy, err := actionpolicy.New([]actionpolicy.Rule{{
+		Capability: "test.echo", Operation: "run", Decision: actionpolicy.DecisionRequireApproval, Reason: "owner_approval",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	executor := NewToolExecutor(registry, body.NewGuard(registry, bodyAuthority), policy, "doll")
+
+	result := executor.ExecuteCall(context.Background(), inference.ToolCall{ID: "call-approval"}, echoTool(""))
+	if result.Status != inference.ToolResultFailure || result.Error == nil || result.Error.Code != "approval_required" {
 		t.Fatalf("result = %+v", result)
 	}
 	if candidate.resolveCalls != 0 || candidate.executions != 0 || len(bodyAuthority.calls) != 0 {
@@ -198,10 +229,7 @@ func resolverExecutor(t *testing.T, candidates []*resolverBody, authority body.A
 			t.Fatal(err)
 		}
 	}
-	actionAuthority := body.NewRuleEvaluator(body.AuthorityRule{
-		Doll: "doll", Capability: "test.echo", Operation: "run", Decision: body.AuthorityAllow,
-	})
-	return NewToolExecutor(registry, body.NewGuard(registry, authority), actionAuthority, "doll", WithBodyPreferences(preferences))
+	return NewToolExecutor(registry, body.NewGuard(registry, authority), actionpolicy.Default(), "doll", WithBodyPreferences(preferences))
 }
 
 func echoTool(target string) *inference.Tool {

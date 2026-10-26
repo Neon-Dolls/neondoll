@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/Neon-Dolls/neondoll/Core/ActionPolicy"
 	"github.com/Neon-Dolls/neondoll/Core/Body"
 	"github.com/Neon-Dolls/neondoll/Core/Inference"
 )
@@ -56,6 +57,7 @@ type CoreConfig struct {
 	Pulse             PulseConfig             `json:"pulse"`
 	BodyPreferences   map[string]int          `json:"body_preferences,omitempty"`
 	BodyAuthorization []BodyAuthorizationRule `json:"body_authorization,omitempty"`
+	ActionPolicy      []actionpolicy.Rule     `json:"action_policy,omitempty"`
 }
 
 // BodyAuthorizationRule configures the existing per-Body Guard evaluator.
@@ -166,6 +168,9 @@ func Load(path string) (*Config, error) {
 	}
 	if _, err := NewModelResolver(cfg.Inference); err != nil {
 		return nil, fmt.Errorf("config inference: %w", err)
+	}
+	if _, err := actionpolicy.New(cfg.Core.ActionPolicy); err != nil {
+		return nil, fmt.Errorf("config action policy: %w", err)
 	}
 	return &cfg, nil
 }
