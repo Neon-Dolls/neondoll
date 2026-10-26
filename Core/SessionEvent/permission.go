@@ -3,6 +3,7 @@ package sessionevent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"sort"
 
 	"github.com/Neon-Dolls/neondoll/Core/ExternalIdentity"
@@ -38,6 +39,11 @@ func (b *PermissionBridge) Present(ctx context.Context, requestID permissionrequ
 	}
 	if request.Status != permissionrequest.StatusPending {
 		return nil, permissionrequest.ErrInvalidTransition
+	}
+	if presentation, loadErr := b.delivery.store.LoadPermissionPresentation(ctx, string(requestID)); loadErr == nil {
+		return b.delivery.RetryDelivery(ctx, presentation.DeliveryID)
+	} else if !errors.Is(loadErr, ErrPresentationNotFound) {
+		return nil, loadErr
 	}
 	principal, err := b.principals.LookupPrincipal(ctx, externalidentity.PrincipalID(request.OwnerID))
 	if err != nil || principal.Authority != externalidentity.AuthorityOwner {
@@ -78,7 +84,7 @@ func (b *PermissionBridge) Present(ctx context.Context, requestID permissionrequ
 	if err != nil {
 		return nil, err
 	}
-	return b.delivery.Emit(ctx, event, request.OwnerID)
+	return b.delivery.EmitPermission(ctx, event, request.OwnerID, string(request.ID))
 }
 
 // Decide records one structured decision. Approval remains state only and
@@ -100,6 +106,13 @@ func (b *PermissionBridge) Decide(ctx context.Context, sessionID session.ID, act
 		}
 	}
 	if !bound {
+		return nil, permissionrequest.ErrUnauthorized
+	}
+	presentation, err := b.delivery.store.LoadPermissionPresentation(ctx, payload.RequestID)
+	if err != nil {
+		return nil, permissionrequest.ErrUnauthorized
+	}
+	if presentation.SessionID != sessionID {
 		return nil, permissionrequest.ErrUnauthorized
 	}
 	request, err := b.requests.Get(ctx, permissionrequest.ID(payload.RequestID))

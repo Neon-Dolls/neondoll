@@ -386,6 +386,20 @@ func createSchema(db *sql.DB) error {
 	if err != nil {
 		return fmt.Errorf("permission_requests table: %v", err)
 	}
+	_, err = db.Exec(`
+		CREATE TABLE IF NOT EXISTS permission_request_presentations (
+			request_id TEXT PRIMARY KEY,
+			session_id TEXT NOT NULL,
+			delivery_id TEXT NOT NULL UNIQUE,
+			created_at TEXT NOT NULL,
+			FOREIGN KEY (request_id) REFERENCES permission_requests(request_id) ON DELETE CASCADE,
+			FOREIGN KEY (session_id) REFERENCES interaction_sessions(session_id) ON DELETE CASCADE,
+			FOREIGN KEY (delivery_id) REFERENCES interaction_session_event_deliveries(delivery_id) ON DELETE CASCADE
+		);
+	`)
+	if err != nil {
+		return fmt.Errorf("permission_request_presentations table: %v", err)
+	}
 
 	return nil
 }

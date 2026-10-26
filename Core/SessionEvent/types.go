@@ -42,6 +42,7 @@ var (
 	ErrSessionUnavailable   = errors.New("session event: session unavailable")
 	ErrRecipientUnavailable = errors.New("session event: recipient unavailable")
 	ErrTransportUnavailable = errors.New("session event: transport unavailable")
+	ErrPresentationNotFound = errors.New("session event: permission presentation not found")
 )
 
 type Correlation struct {
@@ -114,6 +115,16 @@ type Delivery struct {
 	Error             string         `json:"error,omitempty"`
 	CreatedAt         time.Time      `json:"created_at"`
 	UpdatedAt         time.Time      `json:"updated_at"`
+}
+
+// PermissionPresentation durably binds a permission request to the exact
+// Session and delivery through which it was presented. Session membership or
+// Owner authority alone cannot authorize a decision through another Session.
+type PermissionPresentation struct {
+	RequestID  string     `json:"request_id"`
+	SessionID  session.ID `json:"session_id"`
+	DeliveryID string     `json:"delivery_id"`
+	CreatedAt  time.Time  `json:"created_at"`
 }
 
 func NewEvent(sessionID session.ID, typ Type, payload any, correlation Correlation, now time.Time) (Event, error) {

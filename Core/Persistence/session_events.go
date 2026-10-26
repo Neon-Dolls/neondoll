@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/Neon-Dolls/neondoll/Core/Session"
 	"github.com/Neon-Dolls/neondoll/Core/SessionEvent"
 )
 
@@ -17,11 +18,36 @@ const deliveryColumns = `delivery_id, event_id, session_id, target_principal_id,
 	event_json, status, error, created_at, updated_at`
 
 func (s *store) CreateDelivery(ctx context.Context, delivery *sessionevent.Delivery) error {
+	return insertDelivery(ctx, s.db, delivery)
+}
+
+func (s *store) CreatePermissionDelivery(ctx context.Context, delivery *sessionevent.Delivery, presentation sessionevent.PermissionPresentation) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := insertDelivery(ctx, tx, delivery); err != nil {
+		return err
+	}
+	_, err = tx.ExecContext(ctx, `INSERT INTO permission_request_presentations (request_id, session_id, delivery_id, created_at)
+		VALUES (?, ?, ?, ?)`, presentation.RequestID, presentation.SessionID, presentation.DeliveryID, formatTime(presentation.CreatedAt))
+	if err != nil {
+		return fmt.Errorf("create permission presentation: %w", err)
+	}
+	return tx.Commit()
+}
+
+type contextExecer interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}
+
+func insertDelivery(ctx context.Context, executor contextExecer, delivery *sessionevent.Delivery) error {
 	eventJSON, err := json.Marshal(delivery.Event)
 	if err != nil {
 		return fmt.Errorf("encode session event: %w", err)
 	}
-	_, err = s.db.ExecContext(ctx, `INSERT INTO interaction_session_event_deliveries (`+deliveryColumns+`)
+	_, err = executor.ExecContext(ctx, `INSERT INTO interaction_session_event_deliveries (`+deliveryColumns+`)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, delivery.ID, delivery.Event.ID, delivery.Event.SessionID,
 		delivery.TargetPrincipalID, delivery.Owner.Kind, delivery.Owner.InstanceID, string(eventJSON), delivery.Status,
 		delivery.Error, formatTime(delivery.CreatedAt), formatTime(delivery.UpdatedAt))
@@ -29,6 +55,26 @@ func (s *store) CreateDelivery(ctx context.Context, delivery *sessionevent.Deliv
 		return fmt.Errorf("create session event delivery: %w", err)
 	}
 	return nil
+}
+
+func (s *store) LoadPermissionPresentation(ctx context.Context, requestID string) (*sessionevent.PermissionPresentation, error) {
+	var presentation sessionevent.PermissionPresentation
+	var sessionID, createdAt string
+	err := s.db.QueryRowContext(ctx, `SELECT request_id, session_id, delivery_id, created_at
+		FROM permission_request_presentations WHERE request_id = ?`, requestID).
+		Scan(&presentation.RequestID, &sessionID, &presentation.DeliveryID, &createdAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, sessionevent.ErrPresentationNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	presentation.SessionID = session.ID(sessionID)
+	presentation.CreatedAt, err = time.Parse(time.RFC3339Nano, createdAt)
+	if err != nil {
+		return nil, err
+	}
+	return &presentation, nil
 }
 
 func (s *store) UpdateDelivery(ctx context.Context, id string, status sessionevent.DeliveryStatus, failure string, at time.Time) (*sessionevent.Delivery, error) {

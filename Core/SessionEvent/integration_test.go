@@ -23,6 +23,7 @@ type recordingTransport struct {
 	deliveries []sessionevent.Delivery
 	owners     []session.Owner
 	err        error
+	errors     []error
 }
 
 type testClock struct {
@@ -47,6 +48,11 @@ func (t *recordingTransport) DeliverSessionEvent(_ context.Context, owner sessio
 	defer t.mu.Unlock()
 	t.owners = append(t.owners, owner)
 	t.deliveries = append(t.deliveries, delivery)
+	if len(t.errors) > 0 {
+		err := t.errors[0]
+		t.errors = t.errors[1:]
+		return err
+	}
 	return t.err
 }
 
@@ -61,6 +67,26 @@ type echoHandler struct{}
 func (echoHandler) HandleInteraction(_ context.Context, _ *session.InteractionSession, event *events.Event) (*events.Event, error) {
 	response := events.NewResponse(event.ID, event.DollID, "legacy response")
 	return &response, nil
+}
+
+type participantView struct {
+	delegate *session.Manager
+	include  bool
+}
+
+func (v *participantView) BindParticipant(ctx context.Context, id session.ID, principal string) (*session.ParticipantBinding, error) {
+	return v.delegate.BindParticipant(ctx, id, principal)
+}
+
+func (v *participantView) ListParticipants(ctx context.Context, id session.ID) ([]*session.ParticipantBinding, error) {
+	if !v.include {
+		return nil, nil
+	}
+	return v.delegate.ListParticipants(ctx, id)
+}
+
+func (v *participantView) ListParticipantSessions(ctx context.Context, principal string) ([]*session.ParticipantBinding, error) {
+	return v.delegate.ListParticipantSessions(ctx, principal)
 }
 
 type eventFixture struct {
@@ -185,6 +211,9 @@ func TestCoreInitiatedPermissionDeliveryAndOwnerDecisions(t *testing.T) {
 	}
 
 	deniedRequest := f.createRequest(t)
+	if _, err := f.bridge.Present(context.Background(), deniedRequest.ID); err != nil {
+		t.Fatal(err)
+	}
 	denial, _ := sessionevent.NewEvent(f.session.ID, sessionevent.TypePermissionDecided,
 		sessionevent.PermissionDecidedPayload{RequestID: string(deniedRequest.ID), Decision: permissionrequest.DecisionDeny},
 		sessionevent.Correlation{RequestID: string(deniedRequest.ID)}, time.Now())
@@ -222,10 +251,50 @@ func TestPermissionDecisionIsolationAndClosedSession(t *testing.T) {
 	}
 }
 
+func TestPermissionDecisionMustArriveThroughPresentedSession(t *testing.T) {
+	f := newEventFixture(t)
+	f.admitOwner(t)
+	request := f.createRequest(t)
+	if _, err := f.bridge.Present(context.Background(), request.ID); err != nil {
+		t.Fatal(err)
+	}
+	other, err := f.sessions.Create(context.Background(), session.CreateRequest{
+		Owner: session.Owner{Kind: session.OwnerGateway, InstanceID: "gateway-one"}, ExternalConversationRef: "chat-2",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy := events.NewDollMessage("legacy-2", "doll-1", "join second session")
+	if _, err := f.ingress.HandleVerifiedInteraction(context.Background(), other.ID,
+		interaction.VerifiedExternalSender{Platform: "telegram", SubjectID: "owner-42"}, &legacy); err != nil {
+		t.Fatal(err)
+	}
+	decision, _ := sessionevent.NewEvent(other.ID, sessionevent.TypePermissionDecided,
+		sessionevent.PermissionDecidedPayload{RequestID: string(request.ID), Decision: permissionrequest.DecisionApprove},
+		sessionevent.Correlation{RequestID: string(request.ID)}, time.Now())
+	if _, err := f.ingress.HandleSessionEvent(context.Background(), interaction.VerifiedExternalSender{Platform: "telegram", SubjectID: "owner-42"}, decision); !errors.Is(err, permissionrequest.ErrUnauthorized) {
+		t.Fatalf("cross-session decision error = %v", err)
+	}
+	valid, _ := sessionevent.NewEvent(f.session.ID, sessionevent.TypePermissionDecided,
+		sessionevent.PermissionDecidedPayload{RequestID: string(request.ID), Decision: permissionrequest.DecisionApprove},
+		sessionevent.Correlation{RequestID: string(request.ID)}, time.Now())
+	approved, err := f.ingress.HandleSessionEvent(context.Background(), interaction.VerifiedExternalSender{Platform: "telegram", SubjectID: "owner-42"}, valid)
+	if err != nil || approved.Status != permissionrequest.StatusApproved {
+		t.Fatalf("valid decision=%#v error=%v", approved, err)
+	}
+	// A replay through the original Session remains idempotent.
+	if replayed, err := f.ingress.HandleSessionEvent(context.Background(), interaction.VerifiedExternalSender{Platform: "telegram", SubjectID: "owner-42"}, valid); err != nil || replayed.Status != permissionrequest.StatusApproved {
+		t.Fatalf("valid replay=%#v error=%v", replayed, err)
+	}
+}
+
 func TestExpiredAndUnrelatedPermissionDecisionsAreRejected(t *testing.T) {
 	f := newEventFixture(t)
 	f.admitOwner(t)
 	expired := f.createRequest(t)
+	if _, err := f.bridge.Present(context.Background(), expired.ID); err != nil {
+		t.Fatal(err)
+	}
 	f.clock.advance(2 * time.Hour)
 	decision, _ := sessionevent.NewEvent(f.session.ID, sessionevent.TypePermissionDecided,
 		sessionevent.PermissionDecidedPayload{RequestID: string(expired.ID), Decision: permissionrequest.DecisionApprove},
@@ -252,13 +321,17 @@ func TestExpiredAndUnrelatedPermissionDecisionsAreRejected(t *testing.T) {
 func TestPendingDeliverySurvivesRestartAndReplaysWithStableIdentity(t *testing.T) {
 	f := newEventFixture(t)
 	f.admitOwner(t)
-	event, err := sessionevent.NewEvent(f.session.ID, sessionevent.TypeStatus, sessionevent.StatusPayload{Status: "waiting"}, sessionevent.Correlation{RequestID: "request-1"}, time.Now())
+	request := f.createRequest(t)
+	event, err := sessionevent.NewEvent(f.session.ID, sessionevent.TypePermissionRequested, sessionevent.PermissionRequestedPayload{
+		RequestID: string(request.ID), Question: request.Question, Origin: string(request.Origin), ExpiresAt: request.ExpiresAt,
+	}, sessionevent.Correlation{RequestID: string(request.ID)}, time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
 	pending := &sessionevent.Delivery{ID: "delivery-stable", Event: event, TargetPrincipalID: "owner-zero", Owner: f.session.Owner,
 		Status: sessionevent.DeliveryPending, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}
-	if err := f.store.(sessionevent.Store).CreateDelivery(context.Background(), pending); err != nil {
+	presentation := sessionevent.PermissionPresentation{RequestID: string(request.ID), SessionID: f.session.ID, DeliveryID: pending.ID, CreatedAt: pending.CreatedAt}
+	if err := f.store.(sessionevent.Store).CreatePermissionDelivery(context.Background(), pending, presentation); err != nil {
 		t.Fatal(err)
 	}
 	if err := f.store.Close(); err != nil {
@@ -278,5 +351,58 @@ func TestPendingDeliverySurvivesRestartAndReplaysWithStableIdentity(t *testing.T
 	replayed, err := service.ReplayPending(context.Background())
 	if err != nil || len(replayed) != 1 || replayed[0].ID != pending.ID || replayed[0].Event.ID != event.ID || replayed[0].Status != sessionevent.DeliveryAccepted {
 		t.Fatalf("replayed=%#v err=%v", replayed, err)
+	}
+	restored, err := reopened.(sessionevent.Store).LoadPermissionPresentation(context.Background(), string(request.ID))
+	if err != nil || restored.SessionID != f.session.ID || restored.DeliveryID != pending.ID {
+		t.Fatalf("restored presentation=%#v error=%v", restored, err)
+	}
+}
+
+func TestReplayRevalidatesTargetRecipientMembership(t *testing.T) {
+	f := newEventFixture(t)
+	f.admitOwner(t)
+	event, _ := sessionevent.NewEvent(f.session.ID, sessionevent.TypeStatus, sessionevent.StatusPayload{Status: "waiting"}, sessionevent.Correlation{}, time.Now())
+	pending := &sessionevent.Delivery{ID: "delivery-membership", Event: event, TargetPrincipalID: "owner-zero", Owner: f.session.Owner,
+		Status: sessionevent.DeliveryPending, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}
+	if err := f.store.(sessionevent.Store).CreateDelivery(context.Background(), pending); err != nil {
+		t.Fatal(err)
+	}
+	view := &participantView{delegate: f.sessions, include: false}
+	service, err := sessionevent.New(f.store.(sessionevent.Store), f.sessions, view, f.transport)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replayed, err := service.ReplayPending(context.Background())
+	if err != nil || len(replayed) != 1 || replayed[0].Status != sessionevent.DeliveryFailed || replayed[0].Error != sessionevent.ErrRecipientUnavailable.Error() {
+		t.Fatalf("replayed=%#v error=%v", replayed, err)
+	}
+	if len(f.transport.deliveries) != 0 {
+		// No SessionEvent delivery should reach the adapter after membership is removed.
+		t.Fatalf("unexpected transport deliveries = %d", len(f.transport.deliveries))
+	}
+}
+
+func TestTransientDeliveryFailureRetriesWithStableDeliveryID(t *testing.T) {
+	f := newEventFixture(t)
+	f.admitOwner(t)
+	f.transport.errors = []error{errors.New("temporary gateway outage"), nil}
+	request := f.createRequest(t)
+	first, err := f.bridge.Present(context.Background(), request.ID)
+	if err == nil || first.Status != sessionevent.DeliveryPending || first.ID == "" {
+		t.Fatalf("first delivery=%#v error=%v", first, err)
+	}
+	second, err := f.bridge.Present(context.Background(), request.ID)
+	if err != nil || second.Status != sessionevent.DeliveryAccepted || second.ID != first.ID || second.Event.ID != first.Event.ID {
+		t.Fatalf("retry delivery=%#v error=%v", second, err)
+	}
+	if len(f.transport.deliveries) != 2 || f.transport.deliveries[0].ID != f.transport.deliveries[1].ID {
+		t.Fatalf("transport attempts = %#v", f.transport.deliveries)
+	}
+
+	terminalEvent, _ := sessionevent.NewEvent(f.session.ID, sessionevent.TypeStatus, sessionevent.StatusPayload{Status: "terminal"}, sessionevent.Correlation{}, time.Now())
+	f.transport.errors = []error{sessionevent.TerminalDeliveryError(errors.New("adapter rejected destination"))}
+	terminal, err := f.delivery.Emit(context.Background(), terminalEvent, "owner-zero")
+	if err == nil || terminal.Status != sessionevent.DeliveryFailed {
+		t.Fatalf("terminal delivery=%#v error=%v", terminal, err)
 	}
 }
