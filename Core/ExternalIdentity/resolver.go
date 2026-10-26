@@ -64,11 +64,20 @@ type Resolver interface {
 	Resolve(context.Context, PresentedIdentity) (Principal, error)
 }
 
+// PrincipalResolver extends ingress resolution with trusted reverse lookup.
+// Permission delivery uses it to re-check configured authority for a Core
+// principal rather than trusting durable Session membership.
+type PrincipalResolver interface {
+	Resolver
+	LookupPrincipal(context.Context, PrincipalID) (Principal, error)
+}
+
 // MemoryResolver is an immutable in-memory resolver built from trusted Core
 // configuration. Exact tuple matching prevents one Gateway from borrowing a
 // subject mapping established for another Gateway.
 type MemoryResolver struct {
-	mappings map[identityKey]Principal
+	mappings   map[identityKey]Principal
+	principals map[PrincipalID]Principal
 }
 
 type identityKey struct {
@@ -98,7 +107,25 @@ func NewMemoryResolver(mappings []Mapping) (*MemoryResolver, error) {
 		principalAuthorities[principal.ID] = principal.Authority
 		resolved[key] = principal
 	}
-	return &MemoryResolver{mappings: resolved}, nil
+	principals := make(map[PrincipalID]Principal, len(principalAuthorities))
+	for id, authority := range principalAuthorities {
+		principals[id] = Principal{ID: id, Authority: authority}
+	}
+	return &MemoryResolver{mappings: resolved, principals: principals}, nil
+}
+
+func (r *MemoryResolver) LookupPrincipal(ctx context.Context, id PrincipalID) (Principal, error) {
+	if err := ctx.Err(); err != nil {
+		return Principal{}, err
+	}
+	if r == nil || strings.TrimSpace(string(id)) == "" {
+		return Principal{}, ErrInvalidIdentity
+	}
+	principal, ok := r.principals[PrincipalID(strings.TrimSpace(string(id)))]
+	if !ok {
+		return Principal{}, ErrUnmapped
+	}
+	return principal, nil
 }
 
 func (r *MemoryResolver) Resolve(ctx context.Context, presented PresentedIdentity) (Principal, error) {
@@ -137,3 +164,4 @@ func validPrincipal(principal Principal) bool {
 }
 
 var _ Resolver = (*MemoryResolver)(nil)
+var _ PrincipalResolver = (*MemoryResolver)(nil)

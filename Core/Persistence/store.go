@@ -338,6 +338,27 @@ func createSchema(db *sql.DB) error {
 	if err != nil {
 		return fmt.Errorf("interaction_session_participants table: %v", err)
 	}
+	_, err = db.Exec(`
+		CREATE TABLE IF NOT EXISTS interaction_session_event_deliveries (
+			delivery_id TEXT PRIMARY KEY,
+			event_id TEXT NOT NULL UNIQUE,
+			session_id TEXT NOT NULL,
+			target_principal_id TEXT NOT NULL DEFAULT '',
+			owner_kind TEXT NOT NULL,
+			owner_instance_id TEXT NOT NULL,
+			event_json TEXT NOT NULL,
+			status TEXT NOT NULL,
+			error TEXT NOT NULL DEFAULT '',
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL,
+			FOREIGN KEY (session_id) REFERENCES interaction_sessions(session_id) ON DELETE CASCADE
+		);
+		CREATE INDEX IF NOT EXISTS interaction_session_event_deliveries_pending
+			ON interaction_session_event_deliveries(status, created_at, delivery_id);
+	`)
+	if err != nil {
+		return fmt.Errorf("interaction_session_event_deliveries table: %v", err)
+	}
 
 	// Core 5 permission requests are Core-owned durable decisions. Approval is
 	// deliberately separate from action execution.

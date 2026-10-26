@@ -42,6 +42,13 @@ type SessionRouter interface {
 	RouteInteraction(context.Context, RouteRequest) (*events.Event, error)
 }
 
+// SessionAuthorizer exposes the Router's existing ownership and lifecycle
+// checks to trusted structured-event ingress without fabricating a legacy
+// text interaction.
+type SessionAuthorizer interface {
+	AuthorizeSession(context.Context, session.ID, session.Owner, func(context.Context, *session.InteractionSession) error) (*session.InteractionSession, error)
+}
+
 type Router struct {
 	sessions session.Service
 	handler  SessionHandler
@@ -60,14 +67,25 @@ func (r *Router) RouteInteraction(ctx context.Context, request RouteRequest) (*e
 	if strings.TrimSpace(string(request.SessionID)) == "" || !validRouteOwner(request.Owner) || request.Event == nil {
 		return nil, ErrInvalidRoute
 	}
-	resolved, err := r.sessions.Lookup(ctx, request.SessionID)
+	resolved, err := r.AuthorizeSession(ctx, request.SessionID, request.Owner, request.onAuthorized)
+	if err != nil {
+		return nil, err
+	}
+	return r.handler.HandleInteraction(ctx, resolved, request.Event)
+}
+
+func (r *Router) AuthorizeSession(ctx context.Context, sessionID session.ID, owner session.Owner, onAuthorized func(context.Context, *session.InteractionSession) error) (*session.InteractionSession, error) {
+	if strings.TrimSpace(string(sessionID)) == "" || !validRouteOwner(owner) {
+		return nil, ErrInvalidRoute
+	}
+	resolved, err := r.sessions.Lookup(ctx, sessionID)
 	if errors.Is(err, session.ErrNotFound) {
 		return nil, ErrUnknownSession
 	}
 	if err != nil {
 		return nil, fmt.Errorf("interaction: lookup session: %w", err)
 	}
-	if resolved.Owner != request.Owner {
+	if resolved.Owner != owner {
 		return nil, ErrUnauthorizedSession
 	}
 	if resolved.Status != session.StatusActive {
@@ -77,7 +95,7 @@ func (r *Router) RouteInteraction(ctx context.Context, request RouteRequest) (*e
 	// Resume atomically rechecks the active lifecycle transition and updates
 	// session activity before dispatch. If a concurrent close wins that
 	// transition, this route is rejected rather than dispatched.
-	resolved, err = r.sessions.Resume(ctx, session.ResumeRequest{SessionID: request.SessionID})
+	resolved, err = r.sessions.Resume(ctx, session.ResumeRequest{SessionID: sessionID})
 	if errors.Is(err, session.ErrNotFound) {
 		return nil, ErrUnknownSession
 	}
@@ -87,12 +105,12 @@ func (r *Router) RouteInteraction(ctx context.Context, request RouteRequest) (*e
 	if err != nil {
 		return nil, fmt.Errorf("interaction: resume session: %w", err)
 	}
-	if request.onAuthorized != nil {
-		if err := request.onAuthorized(ctx, resolved); err != nil {
+	if onAuthorized != nil {
+		if err := onAuthorized(ctx, resolved); err != nil {
 			return nil, fmt.Errorf("interaction: authorized route hook: %w", err)
 		}
 	}
-	return r.handler.HandleInteraction(ctx, resolved, request.Event)
+	return resolved, nil
 }
 
 func validRouteOwner(owner session.Owner) bool {
