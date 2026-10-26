@@ -324,6 +324,33 @@ func createSchema(db *sql.DB) error {
 		}
 	}
 
+	// Core 5 permission requests are Core-owned durable decisions. Approval is
+	// deliberately separate from action execution.
+	_, err = db.Exec(`
+		CREATE TABLE IF NOT EXISTS permission_requests (
+			request_id TEXT PRIMARY KEY,
+			doll_id TEXT NOT NULL,
+			owner_id TEXT NOT NULL,
+			origin TEXT NOT NULL,
+			action TEXT NOT NULL DEFAULT '',
+			question TEXT NOT NULL DEFAULT '',
+			capability TEXT NOT NULL DEFAULT '',
+			operation TEXT NOT NULL DEFAULT '',
+			arguments_json TEXT NOT NULL DEFAULT '',
+			status TEXT NOT NULL,
+			created_at TEXT NOT NULL,
+			expires_at TEXT NOT NULL,
+			resolved_at TEXT,
+			resolving_authority TEXT NOT NULL DEFAULT '',
+			correlation_json TEXT NOT NULL DEFAULT '{}'
+		);
+		CREATE INDEX IF NOT EXISTS permission_requests_pending
+			ON permission_requests(status, created_at, request_id);
+	`)
+	if err != nil {
+		return fmt.Errorf("permission_requests table: %v", err)
+	}
+
 	return nil
 }
 
