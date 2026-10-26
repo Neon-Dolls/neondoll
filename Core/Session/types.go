@@ -71,6 +71,24 @@ type ActiveFilter struct {
 	Owner Owner
 }
 
+// ParticipantBinding records presence of a Core-resolved principal in an
+// Interaction Session. It conveys no authority; authorization continues to
+// use the principal's independently resolved classification and policy.
+type ParticipantBinding struct {
+	SessionID   ID        `json:"session_id"`
+	PrincipalID string    `json:"principal_id"`
+	JoinedAt    time.Time `json:"joined_at"`
+	LastSeenAt  time.Time `json:"last_seen_at"`
+}
+
+// ParticipantService is the durable participant-membership boundary used by
+// trusted ingress and future Session event delivery.
+type ParticipantService interface {
+	BindParticipant(context.Context, ID, string) (*ParticipantBinding, error)
+	ListParticipants(context.Context, ID) ([]*ParticipantBinding, error)
+	ListParticipantSessions(context.Context, string) ([]*ParticipantBinding, error)
+}
+
 // Service is the transport-independent session host exposed to future Gateway
 // integrations. Core retains lifecycle and conversation-mapping ownership.
 type Service interface {
@@ -90,4 +108,7 @@ type Store interface {
 	ResumeSession(context.Context, ID, time.Time) (*InteractionSession, error)
 	CloseSession(context.Context, ID, time.Time) (*InteractionSession, error)
 	ListActiveSessions(context.Context, *Owner) ([]*InteractionSession, error)
+	BindSessionParticipant(context.Context, ID, string, time.Time) (*ParticipantBinding, error)
+	ListSessionParticipants(context.Context, ID) ([]*ParticipantBinding, error)
+	ListPrincipalSessions(context.Context, string) ([]*ParticipantBinding, error)
 }

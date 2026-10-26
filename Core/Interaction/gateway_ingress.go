@@ -23,16 +23,17 @@ type VerifiedExternalSender struct {
 // GatewayIngress is bound to one authenticated Gateway instance by the Core
 // runtime. Per-event input cannot select or override that instance identity.
 type GatewayIngress struct {
-	gateway  externalidentity.GatewayInstanceID
-	resolver externalidentity.Resolver
-	router   SessionRouter
+	gateway      externalidentity.GatewayInstanceID
+	resolver     externalidentity.Resolver
+	participants session.ParticipantService
+	router       SessionRouter
 }
 
-func NewGatewayIngress(gateway externalidentity.GatewayInstanceID, resolver externalidentity.Resolver, router SessionRouter) (*GatewayIngress, error) {
-	if strings.TrimSpace(string(gateway)) == "" || resolver == nil || router == nil {
+func NewGatewayIngress(gateway externalidentity.GatewayInstanceID, resolver externalidentity.Resolver, participants session.ParticipantService, router SessionRouter) (*GatewayIngress, error) {
+	if strings.TrimSpace(string(gateway)) == "" || resolver == nil || participants == nil || router == nil {
 		return nil, ErrInvalidRoute
 	}
-	return &GatewayIngress{gateway: gateway, resolver: resolver, router: router}, nil
+	return &GatewayIngress{gateway: gateway, resolver: resolver, participants: participants, router: router}, nil
 }
 
 // HandleVerifiedInteraction resolves sender identity and routes through the
@@ -55,7 +56,14 @@ func (i *GatewayIngress) HandleVerifiedInteraction(ctx context.Context, sessionI
 		return nil, err
 	}
 	owner := session.Owner{Kind: session.OwnerGateway, InstanceID: string(i.gateway)}
-	return i.router.RouteInteraction(ctx, RouteRequest{SessionID: sessionID, Owner: owner, Event: event})
+	request := RouteRequest{SessionID: sessionID, Owner: owner, Event: event}
+	if err == nil {
+		request.onAuthorized = func(ctx context.Context, resolved *session.InteractionSession) error {
+			_, bindErr := i.participants.BindParticipant(ctx, resolved.ID, string(principal.ID))
+			return bindErr
+		}
+	}
+	return i.router.RouteInteraction(ctx, request)
 }
 
 type resolvedPrincipalKey struct{}

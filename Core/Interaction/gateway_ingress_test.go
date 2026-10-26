@@ -61,7 +61,7 @@ func createGatewayIngress(t *testing.T, gateway string) (*interaction.GatewayIng
 	if err != nil {
 		t.Fatal(err)
 	}
-	ingress, err := interaction.NewGatewayIngress(externalidentity.GatewayInstanceID(gateway), gatewayResolver(t), router)
+	ingress, err := interaction.NewGatewayIngress(externalidentity.GatewayInstanceID(gateway), gatewayResolver(t), sessions.(session.ParticipantService), router)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -81,7 +81,7 @@ func sendGatewayText(t *testing.T, ingress *interaction.GatewayIngress, sessionI
 }
 
 func TestGatewayIngressResolvesConfiguredOwnerAndPreservesTextRouting(t *testing.T) {
-	ingress, sessionID, handler, _ := createGatewayIngress(t, "gateway-one")
+	ingress, sessionID, handler, sessions := createGatewayIngress(t, "gateway-one")
 	if err := sendGatewayText(t, ingress, sessionID, "owner-42", nil); err != nil {
 		t.Fatal(err)
 	}
@@ -91,15 +91,23 @@ func TestGatewayIngressResolvesConfiguredOwnerAndPreservesTextRouting(t *testing
 	if handler.text != "legacy text remains intact" {
 		t.Fatalf("text = %q", handler.text)
 	}
+	bindings, err := sessions.(session.ParticipantService).ListParticipants(context.Background(), sessionID)
+	if err != nil || len(bindings) != 1 || bindings[0].PrincipalID != "owner-zero" {
+		t.Fatalf("participant bindings = %#v, %v", bindings, err)
+	}
 }
 
 func TestGatewayIngressLeavesUnknownSenderUnmapped(t *testing.T) {
-	ingress, sessionID, handler, _ := createGatewayIngress(t, "gateway-one")
+	ingress, sessionID, handler, sessions := createGatewayIngress(t, "gateway-one")
 	if err := sendGatewayText(t, ingress, sessionID, "unknown", nil); err != nil {
 		t.Fatal(err)
 	}
 	if handler.mapped || handler.principal != (externalidentity.Principal{}) {
 		t.Fatalf("unknown sender gained principal: %#v, mapped=%v", handler.principal, handler.mapped)
+	}
+	bindings, err := sessions.(session.ParticipantService).ListParticipants(context.Background(), sessionID)
+	if err != nil || len(bindings) != 0 {
+		t.Fatalf("unmapped sender bindings = %#v, %v", bindings, err)
 	}
 }
 
@@ -120,6 +128,10 @@ func TestGatewayIngressWrongGatewayCannotBorrowMappingOrSession(t *testing.T) {
 	if err := sendGatewayText(t, ingress, foreign.ID, "owner-42", nil); !errors.Is(err, interaction.ErrUnauthorizedSession) {
 		t.Fatalf("foreign session error = %v", err)
 	}
+	bindings, err := sessions.(session.ParticipantService).ListParticipants(context.Background(), foreign.ID)
+	if err != nil || len(bindings) != 0 {
+		t.Fatalf("wrong-Gateway bindings = %#v, %v", bindings, err)
+	}
 }
 
 func TestGatewayIngressIgnoresForgedPrincipalClaims(t *testing.T) {
@@ -130,5 +142,32 @@ func TestGatewayIngressIgnoresForgedPrincipalClaims(t *testing.T) {
 	}
 	if !handler.mapped || handler.principal.ID != "member-seven" || handler.principal.Authority != externalidentity.AuthorityParticipant {
 		t.Fatalf("forged claims changed principal: %#v", handler.principal)
+	}
+}
+
+func TestGatewayIngressBindsMultipleParticipantsAndDeduplicatesEvents(t *testing.T) {
+	ingress, sessionID, _, sessions := createGatewayIngress(t, "gateway-one")
+	for _, subject := range []string{"owner-42", "member-7", "owner-42"} {
+		if err := sendGatewayText(t, ingress, sessionID, subject, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	participants := sessions.(session.ParticipantService)
+	bindings, err := participants.ListParticipants(context.Background(), sessionID)
+	if err != nil || len(bindings) != 2 {
+		t.Fatalf("participant bindings = %#v, %v", bindings, err)
+	}
+	second, err := sessions.Create(context.Background(), session.CreateRequest{
+		Owner: session.Owner{Kind: session.OwnerGateway, InstanceID: "gateway-one"}, ExternalConversationRef: "second-chat",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sendGatewayText(t, ingress, second.ID, "owner-42", nil); err != nil {
+		t.Fatal(err)
+	}
+	principalSessions, err := participants.ListParticipantSessions(context.Background(), "owner-zero")
+	if err != nil || len(principalSessions) != 2 {
+		t.Fatalf("principal sessions = %#v, %v", principalSessions, err)
 	}
 }

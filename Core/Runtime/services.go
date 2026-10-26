@@ -14,7 +14,7 @@ import (
 // Core components consume shared runtime services. It owns no transport or
 // model context; durable resources remain owned by the daemon lifecycle.
 type Services struct {
-	sessions           session.Service
+	sessions           *session.Manager
 	externalIdentities externalidentity.Resolver
 }
 
@@ -72,5 +72,5 @@ func (s *Services) GatewayIngress(gateway externalidentity.GatewayInstanceID, ro
 	if s == nil || s.externalIdentities == nil {
 		return nil, errors.New("runtime services: external identity resolver unavailable")
 	}
-	return interaction.NewGatewayIngress(gateway, s.externalIdentities, router)
+	return interaction.NewGatewayIngress(gateway, s.externalIdentities, s.sessions, router)
 }
