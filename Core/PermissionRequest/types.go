@@ -28,6 +28,9 @@ var (
 	ErrNotFound          = errors.New("permission request: not found")
 	ErrInvalidRequest    = errors.New("permission request: invalid request")
 	ErrInvalidTransition = errors.New("permission request: invalid lifecycle transition")
+	ErrUnauthenticated   = errors.New("permission request: unauthenticated owner")
+	ErrUnauthorized      = errors.New("permission request: unauthorized owner")
+	ErrExpired           = errors.New("permission request: expired")
 )
 
 // Correlation keeps permission decisions traceable to the execution that

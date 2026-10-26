@@ -8,6 +8,7 @@ import (
 
 	"github.com/Neon-Dolls/neondoll/Core/Enrollment"
 	"github.com/Neon-Dolls/neondoll/Core/Invitation"
+	"github.com/Neon-Dolls/neondoll/Core/PermissionRequest"
 	"github.com/Neon-Dolls/neondoll/DollNetwork"
 )
 
@@ -32,6 +33,29 @@ func (b *Boundary) AuthorizeEnrollment(ctx context.Context, _ string, _ enrollme
 func (b *Boundary) authorize(ctx context.Context) context.Context {
 	return context.WithValue(ctx, authorizationKey{}, b.token)
 }
+
+func (b *Boundary) AuthenticateOwner(ctx context.Context) (permissionrequest.AuthenticatedOwner, error) {
+	if b == nil || ctx.Value(authorizationKey{}) != b.token {
+		return permissionrequest.AuthenticatedOwner{}, permissionrequest.ErrUnauthenticated
+	}
+	return permissionrequest.AuthenticatedOwner{ID: localOwnerID}, nil
+}
+
+func (b *Boundary) AuthorizeDoll(ctx context.Context, actor permissionrequest.AuthenticatedOwner, dollID string) error {
+	if b == nil || ctx.Value(authorizationKey{}) != b.token || actor.ID != localOwnerID || dollID == "" {
+		return permissionrequest.ErrUnauthorized
+	}
+	return nil
+}
+
+// AuthenticatePermissionDecisions marks a context as originating from the
+// existing local administrative boundary. The returned context carries an
+// unforgeable in-process capability, not a caller-supplied Owner ID.
+func (b *Boundary) AuthenticatePermissionDecisions(ctx context.Context) context.Context {
+	return b.authorize(ctx)
+}
+
+var _ permissionrequest.OwnerDecisionBoundary = (*Boundary)(nil)
 
 type Service struct {
 	enrollment  *enrollment.Service
