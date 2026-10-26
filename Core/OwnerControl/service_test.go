@@ -11,10 +11,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Neon-Dolls/neondoll/Core/ActionPolicy"
 	"github.com/Neon-Dolls/neondoll/Core/Enrollment"
 	"github.com/Neon-Dolls/neondoll/Core/Invitation"
 	"github.com/Neon-Dolls/neondoll/Core/Network"
 	"github.com/Neon-Dolls/neondoll/Core/OwnerControl"
+	"github.com/Neon-Dolls/neondoll/Core/PermissionRequest"
 	"github.com/Neon-Dolls/neondoll/Core/Persistence"
 	"github.com/Neon-Dolls/neondoll/DollNetwork"
 )
@@ -24,11 +26,12 @@ type clock struct{ now time.Time }
 func (c *clock) Now() time.Time { return c.now }
 
 type fixture struct {
-	store      persistence.Store
-	network    *network.Network
-	enrollment *enrollment.Service
-	owner      *ownercontrol.Service
-	clock      *clock
+	store       persistence.Store
+	network     *network.Network
+	enrollment  *enrollment.Service
+	permissions *permissionrequest.Manager
+	owner       *ownercontrol.Service
+	clock       *clock
 }
 
 func newFixture(t *testing.T) *fixture {
@@ -52,7 +55,10 @@ func newFixture(t *testing.T) *fixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &fixture{store: store, network: nw, enrollment: enrollments, owner: ownercontrol.NewService(enrollments, invitations, boundary), clock: clock}
+	permissions := permissionrequest.NewWithClock(store.(permissionrequest.Store), actionpolicy.Default(), clock)
+	access := permissionrequest.NewAccessService(permissions, boundary)
+	return &fixture{store: store, network: nw, enrollment: enrollments, permissions: permissions,
+		owner: ownercontrol.NewService(enrollments, invitations, boundary, access), clock: clock}
 }
 
 func keys(t *testing.T) (ed25519.PublicKey, ed25519.PrivateKey, string) {
@@ -178,6 +184,13 @@ func TestOwnerInvitationIsExpiringAndSingleUse(t *testing.T) {
 func TestUnixOwnerControlClientAndSocketPermissions(t *testing.T) {
 	fx := newFixture(t)
 	begin(t, fx, "socket-pending")
+	permission, err := fx.permissions.Create(context.Background(), permissionrequest.CreateRequest{
+		DollID: "owner-control-test", OwnerID: "local-admin", Origin: permissionrequest.OriginVoluntary,
+		Question: "May I continue?", ExpiresAt: fx.clock.now.Add(time.Hour),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	path := filepath.Join(t.TempDir(), "admin.sock")
 	server, err := ownercontrol.NewServer(path, fx.owner)
 	if err != nil {
@@ -202,5 +215,13 @@ func TestUnixOwnerControlClientAndSocketPermissions(t *testing.T) {
 	pending, err := client.ListPending(context.Background())
 	if err != nil || len(pending) != 1 {
 		t.Fatalf("local client pending = %#v, %v", pending, err)
+	}
+	permissions, err := client.ListPermissionRequests(context.Background())
+	if err != nil || len(permissions) != 1 || permissions[0].ID != permission.ID {
+		t.Fatalf("permission list = %#v, %v", permissions, err)
+	}
+	detail, err := client.GetPermissionRequest(context.Background(), permission.ID)
+	if err != nil || detail.ID != permission.ID || detail.Question != permission.Question {
+		t.Fatalf("permission detail = %#v, %v", detail, err)
 	}
 }

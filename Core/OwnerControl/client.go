@@ -11,6 +11,7 @@ import (
 
 	"github.com/Neon-Dolls/neondoll/Core/Enrollment"
 	"github.com/Neon-Dolls/neondoll/Core/Invitation"
+	"github.com/Neon-Dolls/neondoll/Core/PermissionRequest"
 	"github.com/Neon-Dolls/neondoll/DollNetwork"
 )
 
@@ -45,6 +46,17 @@ func (c *Client) ListBodies(ctx context.Context) ([]*enrollment.BodyRecord, erro
 }
 func (c *Client) Revoke(ctx context.Context, bodyID string) error {
 	return c.do(ctx, http.MethodPost, "/v1/revoke", revokeRequest{BodyID: bodyID}, nil)
+}
+
+func (c *Client) ListPermissionRequests(ctx context.Context) ([]*permissionrequest.Request, error) {
+	var result []*permissionrequest.Request
+	return result, c.do(ctx, http.MethodGet, "/v1/permission-requests", nil, &result)
+}
+
+func (c *Client) GetPermissionRequest(ctx context.Context, id permissionrequest.ID) (*permissionrequest.Request, error) {
+	var result permissionrequest.Request
+	err := c.do(ctx, http.MethodGet, "/v1/permission-requests/"+string(id), nil, &result)
+	return &result, err
 }
 
 func (c *Client) do(ctx context.Context, method, path string, body, result any) error {

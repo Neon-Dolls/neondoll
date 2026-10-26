@@ -61,10 +61,11 @@ type Service struct {
 	enrollment  *enrollment.Service
 	invitations *invitation.Service
 	boundary    *Boundary
+	permissions *permissionrequest.AccessService
 }
 
-func NewService(enrollments *enrollment.Service, invitations *invitation.Service, boundary *Boundary) *Service {
-	return &Service{enrollment: enrollments, invitations: invitations, boundary: boundary}
+func NewService(enrollments *enrollment.Service, invitations *invitation.Service, boundary *Boundary, permissions *permissionrequest.AccessService) *Service {
+	return &Service{enrollment: enrollments, invitations: invitations, boundary: boundary, permissions: permissions}
 }
 
 func (s *Service) ListPending(ctx context.Context) ([]*enrollment.PendingEnrollment, error) {
@@ -93,4 +94,18 @@ func (s *Service) ListBodies(ctx context.Context) ([]*enrollment.BodyRecord, err
 
 func (s *Service) Revoke(ctx context.Context, bodyID string) error {
 	return s.enrollment.Revoke(s.boundary.authorize(ctx), bodyID, localOwnerID)
+}
+
+func (s *Service) ListPermissionRequests(ctx context.Context) ([]*permissionrequest.Request, error) {
+	if s.permissions == nil {
+		return nil, permissionrequest.ErrInvalidRequest
+	}
+	return s.permissions.ListPending(s.boundary.authorize(ctx))
+}
+
+func (s *Service) GetPermissionRequest(ctx context.Context, id permissionrequest.ID) (*permissionrequest.Request, error) {
+	if s.permissions == nil {
+		return nil, permissionrequest.ErrInvalidRequest
+	}
+	return s.permissions.Get(s.boundary.authorize(ctx), id)
 }

@@ -19,11 +19,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Neon-Dolls/neondoll/Core/ActionPolicy"
 	corebody "github.com/Neon-Dolls/neondoll/Core/Body"
 	"github.com/Neon-Dolls/neondoll/Core/Enrollment"
 	"github.com/Neon-Dolls/neondoll/Core/Invitation"
 	"github.com/Neon-Dolls/neondoll/Core/Network"
 	"github.com/Neon-Dolls/neondoll/Core/OwnerControl"
+	"github.com/Neon-Dolls/neondoll/Core/PermissionRequest"
 	"github.com/Neon-Dolls/neondoll/Core/Persistence"
 	ws "github.com/Neon-Dolls/neondoll/DollLink/WebSocket"
 	"github.com/Neon-Dolls/neondoll/test/referencebody"
@@ -139,7 +141,9 @@ func runReferenceCoreProcess() error {
 	})
 	server.SetListener(listener)
 	ownerSocket := filepath.Join(stateDir, "neondoll-admin.sock")
-	ownerServer, err := ownercontrol.NewServer(ownerSocket, ownercontrol.NewService(enrollmentService, invitationService, ownerBoundary))
+	permissionManager := permissionrequest.New(store.(permissionrequest.Store), actionpolicy.Default())
+	permissionAccess := permissionrequest.NewAccessService(permissionManager, ownerBoundary)
+	ownerServer, err := ownercontrol.NewServer(ownerSocket, ownercontrol.NewService(enrollmentService, invitationService, ownerBoundary, permissionAccess))
 	if err != nil {
 		return err
 	}

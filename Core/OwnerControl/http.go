@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/Neon-Dolls/neondoll/Core/Enrollment"
+	"github.com/Neon-Dolls/neondoll/Core/PermissionRequest"
 	"github.com/Neon-Dolls/neondoll/DollNetwork"
 )
 
@@ -106,6 +107,14 @@ func NewServer(path string, service *Service) (*Server, error) {
 		}
 		writeError(w, service.Revoke(r.Context(), request.BodyID))
 	})
+	mux.HandleFunc("GET /v1/permission-requests", func(w http.ResponseWriter, r *http.Request) {
+		value, err := service.ListPermissionRequests(r.Context())
+		writeResult(w, value, err)
+	})
+	mux.HandleFunc("GET /v1/permission-requests/{id}", func(w http.ResponseWriter, r *http.Request) {
+		value, err := service.GetPermissionRequest(r.Context(), permissionrequest.ID(r.PathValue("id")))
+		writeResult(w, value, err)
+	})
 	server.http = &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 	return server, nil
 }
@@ -154,6 +163,14 @@ func writeError(w http.ResponseWriter, err error) {
 func writeAPIError(w http.ResponseWriter, err error) {
 	status := http.StatusInternalServerError
 	switch {
+	case errors.Is(err, permissionrequest.ErrUnauthenticated), errors.Is(err, permissionrequest.ErrUnauthorized):
+		status = http.StatusForbidden
+	case errors.Is(err, permissionrequest.ErrNotFound):
+		status = http.StatusNotFound
+	case errors.Is(err, permissionrequest.ErrExpired):
+		status = http.StatusGone
+	case errors.Is(err, permissionrequest.ErrInvalidRequest):
+		status = http.StatusBadRequest
 	case errors.Is(err, enrollment.ErrUnauthorized):
 		status = http.StatusForbidden
 	case errors.Is(err, enrollment.ErrUnknownBody), errors.Is(err, enrollment.ErrUnknownRequest):

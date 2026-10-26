@@ -24,6 +24,7 @@ import (
 	"github.com/Neon-Dolls/neondoll/Core/Invitation"
 	"github.com/Neon-Dolls/neondoll/Core/Network"
 	"github.com/Neon-Dolls/neondoll/Core/OwnerControl"
+	"github.com/Neon-Dolls/neondoll/Core/PermissionRequest"
 	"github.com/Neon-Dolls/neondoll/Core/Persistence"
 	"github.com/Neon-Dolls/neondoll/Core/Pulse"
 	"github.com/Neon-Dolls/neondoll/Core/Runtime"
@@ -341,7 +342,19 @@ func main() {
 	log.Info("ws transport created", map[string]any{"listen": listenAddr})
 
 	adminSocket := filepath.Join(cfg.Paths.DataDir, "neondoll-admin.sock")
-	ownerService := ownercontrol.NewService(enrollmentService, invitationService, ownerBoundary)
+	permissionStore, ok := store.(permissionrequest.Store)
+	if !ok {
+		log.Error("store does not implement Permission Request Store")
+		os.Exit(1)
+	}
+	permissionPolicy, err := actionpolicy.New(cfg.Core.ActionPolicy)
+	if err != nil {
+		log.Error("permission request policy setup error", map[string]any{"error": err.Error()})
+		os.Exit(1)
+	}
+	permissionManager := permissionrequest.New(permissionStore, permissionPolicy)
+	permissionAccess := permissionrequest.NewAccessService(permissionManager, ownerBoundary)
+	ownerService := ownercontrol.NewService(enrollmentService, invitationService, ownerBoundary, permissionAccess)
 	ownerServer, err := ownercontrol.NewServer(adminSocket, ownerService)
 	if err != nil {
 		log.Error("owner control setup error", map[string]any{"error": err.Error()})
