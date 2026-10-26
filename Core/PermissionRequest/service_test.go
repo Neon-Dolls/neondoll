@@ -23,12 +23,17 @@ type fixture struct {
 	path    string
 	store   persistence.Store
 	clock   *clock
+	policy  actionpolicy.Policy
 	service *permissionrequest.Manager
 }
 
 func newFixture(t *testing.T) *fixture {
+	return newFixtureWithPolicy(t, actionpolicy.Default())
+}
+
+func newFixtureWithPolicy(t *testing.T, policy actionpolicy.Policy) *fixture {
 	t.Helper()
-	fx := &fixture{t: t, path: filepath.Join(t.TempDir(), "core.db"), clock: &clock{now: time.Date(2026, 10, 26, 12, 0, 0, 0, time.UTC)}}
+	fx := &fixture{t: t, path: filepath.Join(t.TempDir(), "core.db"), policy: policy, clock: &clock{now: time.Date(2026, 10, 26, 12, 0, 0, 0, time.UTC)}}
 	fx.reopen()
 	t.Cleanup(func() { _ = fx.store.Close() })
 	return fx
@@ -50,7 +55,7 @@ func (f *fixture) reopen() {
 	if !ok {
 		f.t.Fatal("persistence store does not implement permission request store")
 	}
-	f.service = permissionrequest.NewWithClock(permissionStore, f.clock)
+	f.service = permissionrequest.NewWithClock(permissionStore, f.policy, f.clock)
 }
 
 func (f *fixture) create(origin permissionrequest.Origin) *permissionrequest.Request {
@@ -61,11 +66,6 @@ func (f *fixture) create(origin permissionrequest.Origin) *permissionrequest.Req
 		ExpiresAt:   f.clock.now.Add(time.Hour),
 		Correlation: permissionrequest.Correlation{CognitiveRunID: "run-1", ToolCallID: "call-1"},
 	}
-	if origin == permissionrequest.OriginPolicyRequired {
-		input.PolicyDecision = actionpolicy.DecisionRequireApproval
-	} else {
-		input.PolicyDecision = actionpolicy.DecisionAllow
-	}
 	value, err := f.service.Create(context.Background(), input)
 	if err != nil {
 		f.t.Fatal(err)
@@ -74,7 +74,13 @@ func (f *fixture) create(origin permissionrequest.Origin) *permissionrequest.Req
 }
 
 func TestCreateVoluntaryAndPolicyRequired(t *testing.T) {
-	fx := newFixture(t)
+	policy, err := actionpolicy.New([]actionpolicy.Rule{{
+		Capability: "runtime.info", Operation: "read", Decision: actionpolicy.DecisionRequireApproval,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fx := newFixtureWithPolicy(t, policy)
 	voluntary, err := fx.service.Create(context.Background(), permissionrequest.CreateRequest{
 		DollID: "doll-1", OwnerID: "owner-1", Origin: permissionrequest.OriginVoluntary,
 		Question: "May I contact the owner?", ExpiresAt: fx.clock.now.Add(time.Hour),
@@ -82,23 +88,81 @@ func TestCreateVoluntaryAndPolicyRequired(t *testing.T) {
 	if err != nil || voluntary.Status != permissionrequest.StatusPending || voluntary.Question == "" {
 		t.Fatalf("voluntary create = %#v, %v", voluntary, err)
 	}
-	policy := fx.create(permissionrequest.OriginPolicyRequired)
-	if policy.Capability != "runtime.info" || policy.Operation != "read" {
-		t.Fatalf("policy request = %#v", policy)
+	request := fx.create(permissionrequest.OriginPolicyRequired)
+	if request.Capability != "runtime.info" || request.Operation != "read" {
+		t.Fatalf("policy request = %#v", request)
 	}
 
+}
+
+func TestProhibitedActionCannotBeCreatedAsPolicyRequired(t *testing.T) {
+	policy, err := actionpolicy.New([]actionpolicy.Rule{{
+		Capability: "network", Operation: "publish", Decision: actionpolicy.DecisionDeny,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fx := newFixtureWithPolicy(t, policy)
 	_, err = fx.service.Create(context.Background(), permissionrequest.CreateRequest{
 		DollID: "doll-1", OwnerID: "owner-1", Origin: permissionrequest.OriginPolicyRequired,
-		Action: "forbidden", Capability: "runtime.info", Operation: "read", ExpiresAt: fx.clock.now.Add(time.Hour),
-		PolicyDecision: actionpolicy.DecisionDeny,
+		Action: "publish network data", Capability: "network", Operation: "publish",
+		ExpiresAt: fx.clock.now.Add(time.Hour),
 	})
 	if !errors.Is(err, permissionrequest.ErrInvalidRequest) {
-		t.Fatalf("prohibited action error = %v", err)
+		t.Fatalf("prohibited policy-required action error = %v", err)
+	}
+}
+
+func TestVoluntaryActionCannotBypassProhibition(t *testing.T) {
+	policy, err := actionpolicy.New([]actionpolicy.Rule{{
+		Capability: "network", Operation: "publish", Decision: actionpolicy.DecisionDeny,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fx := newFixtureWithPolicy(t, policy)
+	_, err = fx.service.Create(context.Background(), permissionrequest.CreateRequest{
+		DollID: "doll-1", OwnerID: "owner-1", Origin: permissionrequest.OriginVoluntary,
+		Action: "publish network data", Question: "Should I publish this?", Capability: "network", Operation: "publish",
+		ExpiresAt: fx.clock.now.Add(time.Hour),
+	})
+	if !errors.Is(err, permissionrequest.ErrInvalidRequest) {
+		t.Fatalf("prohibited voluntary action error = %v", err)
+	}
+}
+
+func TestValidPolicyRequiredRequestUsesTrustedPolicy(t *testing.T) {
+	policy, err := actionpolicy.New([]actionpolicy.Rule{{
+		Doll: "doll-1", Capability: "network", Operation: "publish", Decision: actionpolicy.DecisionRequireApproval,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fx := newFixtureWithPolicy(t, policy)
+	got, err := fx.service.Create(context.Background(), permissionrequest.CreateRequest{
+		DollID: "doll-1", OwnerID: "owner-1", Origin: permissionrequest.OriginPolicyRequired,
+		Action: "publish network data", Capability: "network", Operation: "publish",
+		ExpiresAt: fx.clock.now.Add(time.Hour),
+	})
+	if err != nil || got.Status != permissionrequest.StatusPending {
+		t.Fatalf("policy-required create = %#v, %v", got, err)
+	}
+}
+
+func TestUnrestrictedVoluntaryQuestion(t *testing.T) {
+	fx := newFixture(t)
+	got, err := fx.service.Create(context.Background(), permissionrequest.CreateRequest{
+		DollID: "doll-1", OwnerID: "owner-1", Origin: permissionrequest.OriginVoluntary,
+		Question: "Would you prefer the blue option?", ExpiresAt: fx.clock.now.Add(time.Hour),
+	})
+	if err != nil || got.Question == "" || got.Status != permissionrequest.StatusPending {
+		t.Fatalf("voluntary question = %#v, %v", got, err)
 	}
 }
 
 func TestPersistenceAndCorrelationAcrossRestart(t *testing.T) {
-	fx := newFixture(t)
+	policy, _ := actionpolicy.New([]actionpolicy.Rule{{Capability: "runtime.info", Operation: "read", Decision: actionpolicy.DecisionRequireApproval}})
+	fx := newFixtureWithPolicy(t, policy)
 	created := fx.create(permissionrequest.OriginPolicyRequired)
 	fx.reopen()
 	loaded, err := fx.service.Get(context.Background(), created.ID)
@@ -115,7 +179,8 @@ func TestPersistenceAndCorrelationAcrossRestart(t *testing.T) {
 }
 
 func TestApprovalDenialAndIdempotence(t *testing.T) {
-	fx := newFixture(t)
+	policy, _ := actionpolicy.New([]actionpolicy.Rule{{Capability: "runtime.info", Operation: "read", Decision: actionpolicy.DecisionRequireApproval}})
+	fx := newFixtureWithPolicy(t, policy)
 	approved := fx.create(permissionrequest.OriginPolicyRequired)
 	got, err := fx.service.Approve(context.Background(), approved.ID, "owner-1")
 	if err != nil || got.Status != permissionrequest.StatusApproved || got.ResolvedAt == nil || got.ResolvingAuthority != "owner-1" {
@@ -166,7 +231,8 @@ func TestCancellationExpirationAndInvalidTransitions(t *testing.T) {
 }
 
 func TestConcurrentConflictingResolutionHasOneWinner(t *testing.T) {
-	fx := newFixture(t)
+	policy, _ := actionpolicy.New([]actionpolicy.Rule{{Capability: "runtime.info", Operation: "read", Decision: actionpolicy.DecisionRequireApproval}})
+	fx := newFixtureWithPolicy(t, policy)
 	request := fx.create(permissionrequest.OriginPolicyRequired)
 
 	start := make(chan struct{})
@@ -229,7 +295,7 @@ func TestValidation(t *testing.T) {
 		"past expiry":       {DollID: "d", OwnerID: "o", Origin: permissionrequest.OriginVoluntary, Question: "why", ExpiresAt: fx.clock.now},
 		"missing content":   {DollID: "d", OwnerID: "o", Origin: permissionrequest.OriginVoluntary, ExpiresAt: fx.clock.now.Add(time.Hour)},
 		"bad arguments":     {DollID: "d", OwnerID: "o", Origin: permissionrequest.OriginVoluntary, Action: "a", Arguments: json.RawMessage(`{`), ExpiresAt: fx.clock.now.Add(time.Hour)},
-		"unverified policy": {DollID: "d", OwnerID: "o", Origin: permissionrequest.OriginPolicyRequired, Action: "a", Capability: "c", Operation: "o", ExpiresAt: fx.clock.now.Add(time.Hour)},
+		"unrequired policy": {DollID: "d", OwnerID: "o", Origin: permissionrequest.OriginPolicyRequired, Action: "a", Capability: "c", Operation: "o", ExpiresAt: fx.clock.now.Add(time.Hour)},
 	} {
 		t.Run(name, func(t *testing.T) {
 			if _, err := fx.service.Create(context.Background(), input); !errors.Is(err, permissionrequest.ErrInvalidRequest) {

@@ -7,8 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"time"
-
-	"github.com/Neon-Dolls/neondoll/Core/ActionPolicy"
 )
 
 type ID string
@@ -70,9 +68,6 @@ type CreateRequest struct {
 	Arguments   json.RawMessage
 	ExpiresAt   time.Time
 	Correlation Correlation
-	// PolicyDecision is required for policy-required requests and prevents a
-	// prohibited action from being converted into an approval request.
-	PolicyDecision actionpolicy.Decision
 }
 
 type Service interface {

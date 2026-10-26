@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Neon-Dolls/neondoll/Core/ActionPolicy"
@@ -18,21 +19,27 @@ type realClock struct{}
 func (realClock) Now() time.Time { return time.Now() }
 
 type Manager struct {
-	store Store
-	clock Clock
+	store  Store
+	policy actionpolicy.Policy
+	clock  Clock
+	mu     sync.Mutex
 }
 
 var _ Service = (*Manager)(nil)
 
-func New(store Store) *Manager { return NewWithClock(store, realClock{}) }
+func New(store Store, policy actionpolicy.Policy) *Manager {
+	return NewWithClock(store, policy, realClock{})
+}
 
-func NewWithClock(store Store, clock Clock) *Manager {
-	return &Manager{store: store, clock: clock}
+func NewWithClock(store Store, policy actionpolicy.Policy, clock Clock) *Manager {
+	return &Manager{store: store, policy: policy, clock: clock}
 }
 
 func (m *Manager) Create(ctx context.Context, input CreateRequest) (*Request, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	now := m.clock.Now().UTC()
-	if err := validateCreate(input, now); err != nil {
+	if err := m.validateCreate(input, now); err != nil {
 		return nil, err
 	}
 	value := &Request{
@@ -49,6 +56,8 @@ func (m *Manager) Create(ctx context.Context, input CreateRequest) (*Request, er
 }
 
 func (m *Manager) Get(ctx context.Context, id ID) (*Request, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if strings.TrimSpace(string(id)) == "" {
 		return nil, ErrInvalidRequest
 	}
@@ -64,6 +73,8 @@ func (m *Manager) Get(ctx context.Context, id ID) (*Request, error) {
 }
 
 func (m *Manager) ListPending(ctx context.Context) ([]*Request, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	values, err := m.store.ListPendingPermissionRequests(ctx)
 	if err != nil {
 		return nil, err
@@ -94,6 +105,8 @@ func (m *Manager) Cancel(ctx context.Context, id ID) (*Request, error) {
 }
 
 func (m *Manager) Expire(ctx context.Context, id ID) (*Request, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if strings.TrimSpace(string(id)) == "" {
 		return nil, ErrInvalidRequest
 	}
@@ -111,6 +124,8 @@ func (m *Manager) Expire(ctx context.Context, id ID) (*Request, error) {
 }
 
 func (m *Manager) resolve(ctx context.Context, id ID, target Status, authority string) (*Request, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if strings.TrimSpace(string(id)) == "" || ((target == StatusApproved || target == StatusDenied) && strings.TrimSpace(authority) == "") {
 		return nil, ErrInvalidRequest
 	}
@@ -160,7 +175,7 @@ func (m *Manager) transition(ctx context.Context, current *Request, target Statu
 	return clone(updated), nil
 }
 
-func validateCreate(input CreateRequest, now time.Time) error {
+func (m *Manager) validateCreate(input CreateRequest, now time.Time) error {
 	if strings.TrimSpace(input.DollID) == "" || strings.TrimSpace(input.OwnerID) == "" || !input.ExpiresAt.After(now) {
 		return ErrInvalidRequest
 	}
@@ -168,18 +183,34 @@ func validateCreate(input CreateRequest, now time.Time) error {
 		return ErrInvalidRequest
 	}
 	hasAction := strings.TrimSpace(input.Action) != ""
-	if input.PolicyDecision == actionpolicy.DecisionDeny ||
-		(input.Origin == OriginPolicyRequired && input.PolicyDecision != actionpolicy.DecisionRequireApproval) ||
-		(hasAction && input.Origin == OriginVoluntary && input.PolicyDecision != actionpolicy.DecisionAllow) {
-		return ErrInvalidRequest
-	}
 	if !hasAction && strings.TrimSpace(input.Question) == "" {
 		return ErrInvalidRequest
 	}
-	if input.Origin == OriginPolicyRequired && (strings.TrimSpace(input.Capability) == "" || strings.TrimSpace(input.Operation) == "") {
+	if !hasAction {
+		if input.Origin != OriginVoluntary || strings.TrimSpace(input.Capability) != "" || strings.TrimSpace(input.Operation) != "" {
+			return ErrInvalidRequest
+		}
+		return nil
+	}
+	if m.policy == nil || strings.TrimSpace(input.Capability) == "" || strings.TrimSpace(input.Operation) == "" {
 		return ErrInvalidRequest
 	}
 	if len(input.Arguments) > 0 && !json.Valid(input.Arguments) {
+		return ErrInvalidRequest
+	}
+	arguments := make(map[string]any)
+	if len(input.Arguments) > 0 {
+		if err := json.Unmarshal(input.Arguments, &arguments); err != nil {
+			return ErrInvalidRequest
+		}
+	}
+	decision := m.policy.Evaluate(actionpolicy.Request{
+		Doll: strings.TrimSpace(input.DollID), Capability: strings.TrimSpace(input.Capability),
+		Operation: strings.TrimSpace(input.Operation), Arguments: arguments,
+	}).Decision
+	if decision == actionpolicy.DecisionDeny ||
+		(input.Origin == OriginPolicyRequired && decision != actionpolicy.DecisionRequireApproval) ||
+		(input.Origin == OriginVoluntary && decision != actionpolicy.DecisionAllow) {
 		return ErrInvalidRequest
 	}
 	return nil
