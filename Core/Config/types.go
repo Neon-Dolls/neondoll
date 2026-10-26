@@ -9,6 +9,7 @@ import (
 
 	"github.com/Neon-Dolls/neondoll/Core/ActionPolicy"
 	"github.com/Neon-Dolls/neondoll/Core/Body"
+	"github.com/Neon-Dolls/neondoll/Core/ExternalIdentity"
 	"github.com/Neon-Dolls/neondoll/Core/Inference"
 )
 
@@ -52,12 +53,13 @@ type PulseConfig struct {
 
 // CoreConfig for runtime settings.
 type CoreConfig struct {
-	Profile           string                  `json:"profile"`
-	Environment       string                  `json:"environment"`
-	Pulse             PulseConfig             `json:"pulse"`
-	BodyPreferences   map[string]int          `json:"body_preferences,omitempty"`
-	BodyAuthorization []BodyAuthorizationRule `json:"body_authorization,omitempty"`
-	ActionPolicy      []actionpolicy.Rule     `json:"action_policy,omitempty"`
+	Profile            string                     `json:"profile"`
+	Environment        string                     `json:"environment"`
+	Pulse              PulseConfig                `json:"pulse"`
+	BodyPreferences    map[string]int             `json:"body_preferences,omitempty"`
+	BodyAuthorization  []BodyAuthorizationRule    `json:"body_authorization,omitempty"`
+	ActionPolicy       []actionpolicy.Rule        `json:"action_policy,omitempty"`
+	ExternalIdentities []externalidentity.Mapping `json:"external_identity_mappings,omitempty"`
 }
 
 // BodyAuthorizationRule configures the existing per-Body Guard evaluator.
@@ -172,7 +174,16 @@ func Load(path string) (*Config, error) {
 	if _, err := actionpolicy.New(cfg.Core.ActionPolicy); err != nil {
 		return nil, fmt.Errorf("config action policy: %w", err)
 	}
+	if _, err := NewExternalIdentityResolver(cfg.Core); err != nil {
+		return nil, fmt.Errorf("config external identities: %w", err)
+	}
 	return &cfg, nil
+}
+
+// NewExternalIdentityResolver builds the immutable runtime resolver from
+// trusted, persistent Core configuration.
+func NewExternalIdentityResolver(core CoreConfig) (*externalidentity.MemoryResolver, error) {
+	return externalidentity.NewMemoryResolver(core.ExternalIdentities)
 }
 
 // Save writes a Config to a JSON file.

@@ -95,3 +95,25 @@ func TestMappingValidationAndImmutability(t *testing.T) {
 		t.Fatalf("duplicate mapping error = %v", err)
 	}
 }
+
+func TestMultipleIdentitiesMaySharePrincipalButNotConflictOnAuthority(t *testing.T) {
+	mappings := []Mapping{
+		{Identity: Identity{GatewayInstanceID: "telegram", Platform: "telegram", SubjectID: "42"}, Principal: Principal{ID: "owner", Authority: AuthorityOwner}},
+		{Identity: Identity{GatewayInstanceID: "desktop", Platform: "desktop", SubjectID: "zero"}, Principal: Principal{ID: "owner", Authority: AuthorityOwner}},
+	}
+	resolver, err := NewMemoryResolver(mappings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, mapping := range mappings {
+		principal, err := resolver.Resolve(context.Background(), PresentedIdentity{Identity: mapping.Identity})
+		if err != nil || principal.ID != "owner" || principal.Authority != AuthorityOwner {
+			t.Fatalf("Resolve(%+v) = %#v, %v", mapping.Identity, principal, err)
+		}
+	}
+
+	mappings[1].Principal.Authority = AuthorityPeer
+	if _, err := NewMemoryResolver(mappings); !errors.Is(err, ErrInvalidMapping) {
+		t.Fatalf("conflicting principal authority error = %v", err)
+	}
+}

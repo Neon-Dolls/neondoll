@@ -145,6 +145,15 @@ func main() {
 		defaults := config.Defaults()
 		cfg = &defaults
 	}
+	externalIdentityResolver, err := config.NewExternalIdentityResolver(cfg.Core)
+	if err != nil {
+		log.Error("external identity resolver setup error", map[string]any{"error": err.Error()})
+		os.Exit(1)
+	}
+	// Gateway ingress integration is a later milestone. Constructing the
+	// immutable resolver here ensures production startup uses the validated,
+	// persistent Core mapping snapshot rather than Gateway-provided state.
+	_ = externalIdentityResolver
 
 	modelResolver, err := config.NewModelResolver(cfg.Inference)
 	if err != nil {
