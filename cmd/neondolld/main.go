@@ -24,10 +24,12 @@ import (
 	"github.com/Neon-Dolls/neondoll/Core/Invitation"
 	"github.com/Neon-Dolls/neondoll/Core/Network"
 	"github.com/Neon-Dolls/neondoll/Core/OwnerControl"
+	"github.com/Neon-Dolls/neondoll/Core/PermissionRequest"
 	"github.com/Neon-Dolls/neondoll/Core/Persistence"
 	"github.com/Neon-Dolls/neondoll/Core/Pulse"
 	"github.com/Neon-Dolls/neondoll/Core/Runtime"
 	"github.com/Neon-Dolls/neondoll/Core/Session"
+	"github.com/Neon-Dolls/neondoll/Core/SessionEvent"
 	"github.com/Neon-Dolls/neondoll/DollLink/WebSocket"
 	"github.com/Neon-Dolls/neondoll/DollState"
 	"github.com/Neon-Dolls/neondoll/pkg/logger"
@@ -312,6 +314,29 @@ func main() {
 		log.Error("authenticated Body interaction ingress setup error", map[string]any{"error": err.Error()})
 		os.Exit(1)
 	}
+	actionPolicy, err := actionpolicy.New(cfg.Core.ActionPolicy)
+	if err != nil {
+		log.Error("Gateway permission policy setup error", map[string]any{"error": err.Error()})
+		os.Exit(1)
+	}
+	eventStore, ok := store.(sessionevent.Store)
+	if !ok {
+		log.Error("store does not implement Session Event Store")
+		os.Exit(1)
+	}
+	permissionStore, ok := store.(permissionrequest.Store)
+	if !ok {
+		log.Error("store does not implement Permission Request Store")
+		os.Exit(1)
+	}
+	gatewayRuntime, err := runtime.NewGatewayRuntime(ctx, coreServices, eventStore, permissionStore,
+		externalIdentityResolver, interactionRouter, actionPolicy)
+	if err != nil {
+		log.Error("Gateway runtime setup error", map[string]any{"error": err.Error()})
+		os.Exit(1)
+	}
+	defer gatewayRuntime.Shutdown(context.Background())
+	log.Info("Gateway runtime ready")
 
 	// Create WebSocket transport.
 	wsCfg := ws.Config{Listen: listenAddr}
@@ -492,6 +517,9 @@ func main() {
 		}
 		if err := ownerServer.Shutdown(shutdownCtx); err != nil {
 			log.Error("owner control shutdown error", map[string]any{"error": err.Error()})
+		}
+		if err := gatewayRuntime.Shutdown(shutdownCtx); err != nil {
+			log.Error("Gateway runtime shutdown error", map[string]any{"error": err.Error()})
 		}
 		if pulseRunner != nil {
 			pulseRunner.Stop()
