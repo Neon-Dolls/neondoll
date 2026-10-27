@@ -5,7 +5,10 @@ package gateway
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"strings"
 
 	"github.com/Neon-Dolls/neondoll/Core/ExternalIdentity"
 	"github.com/Neon-Dolls/neondoll/Core/Interaction"
@@ -16,8 +19,10 @@ import (
 )
 
 const (
-	LegacyABIVersion     = 0
-	StructuredABIVersion = 1
+	LegacySessionEventVersion     = 0
+	StructuredSessionEventVersion = 1
+	WASMEnvelopeVersion0          = 0
+	WASMTypeSessionEvent          = "session.event"
 )
 
 var (
@@ -37,35 +42,86 @@ type VerifiedSender struct {
 	Claims    map[string]string `json:"claims,omitempty"`
 }
 
-// OutboundEnvelope is the versioned ABI object passed to Gateway adapters.
-// DeliveryID remains stable across retry and is the adapter deduplication key.
+// OutboundEnvelope deliberately uses the existing Telegram WASM host/guest
+// envelope shape (v/type/payload). The payload is the canonical Core delivery;
+// its DeliveryID remains the adapter deduplication key.
 type OutboundEnvelope struct {
-	ABIVersion int                   `json:"abi_version"`
-	Delivery   sessionevent.Delivery `json:"delivery"`
+	Version uint32          `json:"v"`
+	Type    string          `json:"type"`
+	Payload json.RawMessage `json:"payload"`
+}
+
+func NewOutboundEnvelope(delivery sessionevent.Delivery) (OutboundEnvelope, error) {
+	payload, err := json.Marshal(delivery)
+	if err != nil {
+		return OutboundEnvelope{}, fmt.Errorf("gateway: encode Session delivery: %w", err)
+	}
+	return OutboundEnvelope{Version: WASMEnvelopeVersion0, Type: WASMTypeSessionEvent, Payload: payload}, nil
+}
+
+func (e OutboundEnvelope) DecodeDelivery() (sessionevent.Delivery, error) {
+	if e.Version != WASMEnvelopeVersion0 || e.Type != WASMTypeSessionEvent || !json.Valid(e.Payload) {
+		return sessionevent.Delivery{}, ErrInvalidAdapter
+	}
+	var delivery sessionevent.Delivery
+	if err := json.Unmarshal(e.Payload, &delivery); err != nil || strings.TrimSpace(delivery.ID) == "" {
+		return sessionevent.Delivery{}, ErrInvalidAdapter
+	}
+	return delivery, nil
+}
+
+type PlatformResponse struct {
+	SessionID session.ID    `json:"session_id"`
+	Event     *events.Event `json:"event,omitempty"`
 }
 
 // Ingress is bound by Host to one configured Gateway instance. Adapters never
 // pass their own instance ID or claim another Gateway's Session ownership.
 type Ingress interface {
 	HandleLegacy(context.Context, session.ID, VerifiedSender, *events.Event) (*events.Event, error)
+	HandlePlatformMessage(context.Context, string, VerifiedSender, *events.Event) (*PlatformResponse, error)
 	HandleSessionEvent(context.Context, VerifiedSender, sessionevent.Event) (*permissionrequest.Request, error)
 }
 
 // Adapter is the Core-managed Gateway ABI. Existing text-only Gateways use
-// LegacyABIVersion and retain HandleLegacy support. Structured outbound and
-// decision events require StructuredABIVersion.
+// LegacySessionEventVersion and retain HandleLegacy support. Structured outbound and
+// decision events require StructuredSessionEventVersion.
 type Adapter interface {
 	InstanceID() externalidentity.GatewayInstanceID
-	ABIVersion() int
+	SessionEventVersion() int
 	Start(context.Context, Ingress) error
 	Deliver(context.Context, OutboundEnvelope) error
 	Stop(context.Context) error
 }
 
 type boundIngress struct {
-	version int
-	ingress *interaction.GatewayIngress
-	replay  ReplayFunc
+	version  int
+	gateway  externalidentity.GatewayInstanceID
+	sessions session.Service
+	ingress  *interaction.GatewayIngress
+	replay   ReplayFunc
+}
+
+func (b *boundIngress) HandlePlatformMessage(ctx context.Context, conversationRef string, sender VerifiedSender, event *events.Event) (*PlatformResponse, error) {
+	if b.sessions == nil || strings.TrimSpace(conversationRef) == "" || event == nil {
+		return nil, ErrHostNotConfigured
+	}
+	owner := session.Owner{Kind: session.OwnerGateway, InstanceID: string(b.gateway)}
+	resolved, err := b.sessions.Resume(ctx, session.ResumeRequest{Owner: owner, ExternalConversationRef: conversationRef})
+	if errors.Is(err, session.ErrNotFound) {
+		resolved, err = b.sessions.Create(ctx, session.CreateRequest{Owner: owner, ExternalConversationRef: conversationRef})
+		if errors.Is(err, session.ErrConversationInUse) {
+			resolved, err = b.sessions.Resume(ctx, session.ResumeRequest{Owner: owner, ExternalConversationRef: conversationRef})
+		}
+	}
+	if err != nil {
+		return nil, err
+	}
+	response, err := b.HandleLegacy(ctx, resolved.ID, sender, event)
+	if err != nil {
+		return nil, err
+	}
+	return &PlatformResponse{SessionID: resolved.ID, Event: response}, nil
 }
 
 func (b *boundIngress) HandleLegacy(ctx context.Context, sessionID session.ID, sender VerifiedSender, event *events.Event) (*events.Event, error) {
@@ -82,7 +138,7 @@ func (b *boundIngress) HandleLegacy(ctx context.Context, sessionID session.ID, s
 }
 
 func (b *boundIngress) HandleSessionEvent(ctx context.Context, sender VerifiedSender, event sessionevent.Event) (*permissionrequest.Request, error) {
-	if b.version < StructuredABIVersion {
+	if b.version < StructuredSessionEventVersion {
 		return nil, ErrUnsupportedABI
 	}
 	request, err := b.ingress.HandleSessionEvent(ctx, interaction.VerifiedExternalSender{

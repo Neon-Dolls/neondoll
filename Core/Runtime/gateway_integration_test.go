@@ -2,7 +2,9 @@ package runtime_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -20,6 +22,20 @@ import (
 	"github.com/Neon-Dolls/neondoll/DollLink/Events"
 )
 
+// telegramPR4Event matches contract.GatewayEventEnvelope in
+// dividebyzero/neondoll-gateway-telegram PR #4. Conversion into trusted Core
+// metadata belongs to the managed adapter, not to SessionEvent semantics.
+type telegramPR4Event struct {
+	EventVersion int    `json:"event_version"`
+	EventType    string `json:"event_type"`
+	Source       string `json:"source"`
+	UpdateID     int64  `json:"update_id"`
+	MessageID    int64  `json:"message_id"`
+	ChatID       int64  `json:"chat_id"`
+	SenderID     int64  `json:"sender_id"`
+	Text         string `json:"text"`
+}
+
 type hostedAdapter struct {
 	id      externalidentity.GatewayInstanceID
 	version int
@@ -31,7 +47,7 @@ type hostedAdapter struct {
 }
 
 func (a *hostedAdapter) InstanceID() externalidentity.GatewayInstanceID { return a.id }
-func (a *hostedAdapter) ABIVersion() int                                { return a.version }
+func (a *hostedAdapter) SessionEventVersion() int                       { return a.version }
 func (a *hostedAdapter) Start(_ context.Context, ingress gateway.Ingress) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -97,10 +113,10 @@ func newGatewayFixture(t *testing.T) *gatewayFixture {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = store.Close() })
-	resolver, err := externalidentity.NewMemoryResolver([]externalidentity.Mapping{{
-		Identity:  externalidentity.Identity{GatewayInstanceID: "gateway-main", Platform: "test", SubjectID: "owner-external"},
-		Principal: externalidentity.Principal{ID: "owner-core", Authority: externalidentity.AuthorityOwner},
-	}})
+	resolver, err := externalidentity.NewMemoryResolver([]externalidentity.Mapping{
+		{Identity: externalidentity.Identity{GatewayInstanceID: "gateway-main", Platform: "test", SubjectID: "owner-external"}, Principal: externalidentity.Principal{ID: "owner-core", Authority: externalidentity.AuthorityOwner}},
+		{Identity: externalidentity.Identity{GatewayInstanceID: "gateway-main", Platform: "telegram", SubjectID: "12345"}, Principal: externalidentity.Principal{ID: "owner-core", Authority: externalidentity.AuthorityOwner}},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -153,7 +169,7 @@ func (f *gatewayFixture) admitOwner(t *testing.T, adapter *hostedAdapter) {
 
 func TestProductionGatewayRuntimeStructuredPermissionsAndLegacyCompatibility(t *testing.T) {
 	f := newGatewayFixture(t)
-	adapter := f.register(t, gateway.StructuredABIVersion)
+	adapter := f.register(t, gateway.StructuredSessionEventVersion)
 	f.admitOwner(t, adapter)
 
 	request, delivery, err := f.runtime.CreatePermission(context.Background(), permissionrequest.CreateRequest{
@@ -165,8 +181,12 @@ func TestProductionGatewayRuntimeStructuredPermissionsAndLegacyCompatibility(t *
 		t.Fatalf("permission request=%#v delivery=%#v error=%v", request, delivery, err)
 	}
 	delivered := adapter.delivered()
-	if len(delivered) != 1 || delivered[0].ABIVersion != gateway.StructuredABIVersion ||
-		delivered[0].Delivery.ID != delivery.ID || delivered[0].Delivery.TargetPrincipalID != "owner-core" {
+	if len(delivered) != 1 {
+		t.Fatalf("outbound envelopes = %#v", delivered)
+	}
+	decoded, decodeErr := delivered[0].DecodeDelivery()
+	if decodeErr != nil || delivered[0].Version != gateway.WASMEnvelopeVersion0 ||
+		decoded.ID != delivery.ID || decoded.TargetPrincipalID != "owner-core" {
 		t.Fatalf("outbound envelopes = %#v", delivered)
 	}
 	decision, _ := sessionevent.NewEvent(f.session.ID, sessionevent.TypePermissionDecided,
@@ -196,9 +216,37 @@ func TestProductionGatewayRuntimeStructuredPermissionsAndLegacyCompatibility(t *
 	}
 }
 
+func TestTelegramPR4InboundEnvelopeUsesCoreOwnedSessionResolution(t *testing.T) {
+	f := newGatewayFixture(t)
+	adapter := f.register(t, gateway.StructuredSessionEventVersion)
+	const fixture = `{"event_version":1,"event_type":"message.incoming","source":"telegram","update_id":42,"message_id":7,"chat_id":9001,"chat_type":"private","sender_id":12345,"sender_name":"Owner","text":"hello","received_at":1700000000}`
+	var incoming telegramPR4Event
+	if err := json.Unmarshal([]byte(fixture), &incoming); err != nil {
+		t.Fatal(err)
+	}
+	if incoming.EventVersion != 1 || incoming.EventType != "message.incoming" {
+		t.Fatalf("Telegram fixture = %#v", incoming)
+	}
+	sender := gateway.VerifiedSender{Platform: "telegram", SubjectID: fmt.Sprint(incoming.SenderID)}
+	event := events.NewDollMessage(fmt.Sprintf("telegram:%d", incoming.UpdateID), "doll-1", incoming.Text)
+	first, err := adapter.endpoint().HandlePlatformMessage(context.Background(), fmt.Sprintf("telegram/chat/%d", incoming.ChatID), sender, &event)
+	if err != nil || first.SessionID == "" || first.Event.CorrelationID != event.ID {
+		t.Fatalf("first platform response=%#v error=%v", first, err)
+	}
+	event2 := events.NewDollMessage("telegram:43", "doll-1", "again")
+	second, err := adapter.endpoint().HandlePlatformMessage(context.Background(), fmt.Sprintf("telegram/chat/%d", incoming.ChatID), sender, &event2)
+	if err != nil || second.SessionID != first.SessionID {
+		t.Fatalf("second platform response=%#v error=%v", second, err)
+	}
+	resolved, err := f.services.Sessions().Lookup(context.Background(), first.SessionID)
+	if err != nil || resolved.Owner.InstanceID != "gateway-main" || resolved.ExternalConversationRef != "telegram/chat/9001" {
+		t.Fatalf("Core Session=%#v error=%v", resolved, err)
+	}
+}
+
 func TestGatewayUnavailabilityAndRestartReplayDurableDelivery(t *testing.T) {
 	f := newGatewayFixture(t)
-	first := f.register(t, gateway.StructuredABIVersion)
+	first := f.register(t, gateway.StructuredSessionEventVersion)
 	f.admitOwner(t, first)
 	if err := f.runtime.Unregister(context.Background(), "gateway-main"); err != nil {
 		t.Fatal(err)
@@ -227,12 +275,16 @@ func TestGatewayUnavailabilityAndRestartReplayDurableDelivery(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer restarted.Shutdown(context.Background())
-	replacement := &hostedAdapter{id: "gateway-main", version: gateway.StructuredABIVersion}
+	replacement := &hostedAdapter{id: "gateway-main", version: gateway.StructuredSessionEventVersion}
 	if err := restarted.Register(context.Background(), replacement); err != nil {
 		t.Fatal(err)
 	}
 	delivered := replacement.delivered()
-	if len(delivered) != 1 || delivered[0].Delivery.ID != pending.ID || delivered[0].Delivery.Event.ID != pending.Event.ID {
+	if len(delivered) != 1 {
+		t.Fatalf("replayed envelopes = %#v", delivered)
+	}
+	decoded, decodeErr := delivered[0].DecodeDelivery()
+	if decodeErr != nil || decoded.ID != pending.ID || decoded.Event.ID != pending.Event.ID {
 		t.Fatalf("replayed envelopes = %#v", delivered)
 	}
 	stored, err := restarted.Events().GetDelivery(context.Background(), pending.ID)
@@ -243,7 +295,7 @@ func TestGatewayUnavailabilityAndRestartReplayDurableDelivery(t *testing.T) {
 
 func TestPendingPermissionPresentsWhenOwnerSessionBecomesEligible(t *testing.T) {
 	f := newGatewayFixture(t)
-	adapter := f.register(t, gateway.StructuredABIVersion)
+	adapter := f.register(t, gateway.StructuredSessionEventVersion)
 	request, delivery, err := f.runtime.CreatePermission(context.Background(), permissionrequest.CreateRequest{
 		DollID: "doll-1", OwnerID: "owner-core", Origin: permissionrequest.OriginVoluntary,
 		Question: "Present after ingress?", ExpiresAt: time.Now().Add(time.Hour),
@@ -254,14 +306,18 @@ func TestPendingPermissionPresentsWhenOwnerSessionBecomesEligible(t *testing.T) 
 	}
 	f.admitOwner(t, adapter)
 	delivered := adapter.delivered()
-	if len(delivered) != 1 || delivered[0].Delivery.Event.Correlation.RequestID != string(request.ID) {
+	if len(delivered) != 1 {
+		t.Fatalf("post-ingress deliveries = %#v", delivered)
+	}
+	decoded, decodeErr := delivered[0].DecodeDelivery()
+	if decodeErr != nil || decoded.Event.Correlation.RequestID != string(request.ID) {
 		t.Fatalf("post-ingress deliveries = %#v", delivered)
 	}
 }
 
 func TestLegacyGatewayRejectsStructuredEventsWithoutBreakingText(t *testing.T) {
 	f := newGatewayFixture(t)
-	adapter := f.register(t, gateway.LegacyABIVersion)
+	adapter := f.register(t, gateway.LegacySessionEventVersion)
 	f.admitOwner(t, adapter)
 	event, _ := sessionevent.NewEvent(f.session.ID, sessionevent.TypeStatus,
 		sessionevent.StatusPayload{Status: "ready"}, sessionevent.Correlation{}, time.Now())

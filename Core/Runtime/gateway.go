@@ -51,7 +51,7 @@ func NewGatewayRuntime(
 	runtime := &GatewayRuntime{host: host, events: events, permissions: permissions, bridge: bridge}
 	if err := host.Configure(func(id externalidentity.GatewayInstanceID) (*interaction.GatewayIngress, error) {
 		return services.GatewayIngress(id, router, bridge)
-	}, runtime.replay); err != nil {
+	}, runtime.replay, gateway.WithSessionService(services.Sessions())); err != nil {
 		return nil, err
 	}
 	// Pending records are retained when no adapter is currently available.

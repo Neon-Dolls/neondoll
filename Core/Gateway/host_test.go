@@ -31,7 +31,7 @@ type concurrencyAdapter struct {
 }
 
 func (a *concurrencyAdapter) InstanceID() externalidentity.GatewayInstanceID { return a.id }
-func (*concurrencyAdapter) ABIVersion() int                                  { return StructuredABIVersion }
+func (*concurrencyAdapter) SessionEventVersion() int                         { return StructuredSessionEventVersion }
 func (a *concurrencyAdapter) Start(context.Context, Ingress) error {
 	a.starts.Add(1)
 	if a.startEntered != nil {

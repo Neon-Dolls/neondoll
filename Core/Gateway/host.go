@@ -13,9 +13,15 @@ import (
 
 type IngressFactory func(externalidentity.GatewayInstanceID) (*interaction.GatewayIngress, error)
 type ReplayFunc func(context.Context) error
+type HostOption func(*Host)
+
+func WithSessionService(sessions session.Service) HostOption {
+	return func(host *Host) { host.sessions = sessions }
+}
 
 type managedAdapter struct {
 	adapter    Adapter
+	version    int
 	active     bool
 	startDone  chan struct{}
 	deliveries sync.WaitGroup
@@ -23,8 +29,8 @@ type managedAdapter struct {
 	stopErr    error
 }
 
-func newManagedAdapter(adapter Adapter) *managedAdapter {
-	return &managedAdapter{adapter: adapter, startDone: make(chan struct{})}
+func newManagedAdapter(adapter Adapter, version int) *managedAdapter {
+	return &managedAdapter{adapter: adapter, version: version, startDone: make(chan struct{})}
 }
 
 func (m *managedAdapter) stop(ctx context.Context) error {
@@ -41,6 +47,7 @@ type Host struct {
 	adapters map[externalidentity.GatewayInstanceID]*managedAdapter
 	ingress  IngressFactory
 	replay   ReplayFunc
+	sessions session.Service
 	closed   bool
 }
 
@@ -48,7 +55,7 @@ func NewHost() *Host {
 	return &Host{adapters: make(map[externalidentity.GatewayInstanceID]*managedAdapter)}
 }
 
-func (h *Host) Configure(ingress IngressFactory, replay ReplayFunc) error {
+func (h *Host) Configure(ingress IngressFactory, replay ReplayFunc, options ...HostOption) error {
 	if h == nil || ingress == nil || replay == nil {
 		return ErrHostNotConfigured
 	}
@@ -58,16 +65,24 @@ func (h *Host) Configure(ingress IngressFactory, replay ReplayFunc) error {
 		return ErrHostNotConfigured
 	}
 	h.ingress, h.replay = ingress, replay
+	for _, option := range options {
+		if option != nil {
+			option(h)
+		}
+	}
 	return nil
 }
 
 func (h *Host) Register(ctx context.Context, adapter Adapter) error {
-	if h == nil || adapter == nil || strings.TrimSpace(string(adapter.InstanceID())) == "" ||
-		(adapter.ABIVersion() != LegacyABIVersion && adapter.ABIVersion() != StructuredABIVersion) {
+	if h == nil || adapter == nil {
 		return ErrInvalidAdapter
 	}
 	id := adapter.InstanceID()
-	managed := newManagedAdapter(adapter)
+	version := adapter.SessionEventVersion()
+	if strings.TrimSpace(string(id)) == "" || (version != LegacySessionEventVersion && version != StructuredSessionEventVersion) {
+		return ErrInvalidAdapter
+	}
+	managed := newManagedAdapter(adapter, version)
 	h.mu.Lock()
 	if h.closed || h.ingress == nil || h.replay == nil {
 		h.mu.Unlock()
@@ -84,7 +99,7 @@ func (h *Host) Register(ctx context.Context, adapter Adapter) error {
 
 	ingress, err := factory(id)
 	if err == nil {
-		err = adapter.Start(ctx, &boundIngress{version: adapter.ABIVersion(), ingress: ingress, replay: replay})
+		err = adapter.Start(ctx, &boundIngress{version: version, gateway: id, sessions: h.sessions, ingress: ingress, replay: replay})
 	}
 
 	h.mu.Lock()
@@ -139,14 +154,18 @@ func (h *Host) DeliverSessionEvent(ctx context.Context, owner session.Owner, del
 		h.mu.Unlock()
 		return ErrUnavailable
 	}
-	if managed.adapter.ABIVersion() < StructuredABIVersion {
+	if managed.version < StructuredSessionEventVersion {
 		h.mu.Unlock()
 		return sessionevent.TerminalDeliveryError(ErrUnsupportedABI)
 	}
 	managed.deliveries.Add(1)
 	h.mu.Unlock()
 	defer managed.deliveries.Done()
-	return managed.adapter.Deliver(ctx, OutboundEnvelope{ABIVersion: StructuredABIVersion, Delivery: delivery})
+	envelope, err := NewOutboundEnvelope(delivery)
+	if err != nil {
+		return sessionevent.TerminalDeliveryError(err)
+	}
+	return managed.adapter.Deliver(ctx, envelope)
 }
 
 func (h *Host) Shutdown(ctx context.Context) error {
