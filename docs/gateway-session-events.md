@@ -24,9 +24,21 @@ requested capabilities, separately granted capabilities, HTTPS allowlist,
 scoped secret-file names, and Gateway routing configuration. A request has no
 effect unless trusted Core configuration grants it.
 
-Relative artifacts resolve under `paths.data_dir`. Relative secrets resolve
-under `paths.secrets_dir`; contents never enter the configuration projection.
-State lives beneath `paths.data_dir/extensions/state`, namespaced per instance.
+Relative artifacts resolve under `paths.data_dir`; absolute paths and paths
+which escape that directory are rejected. Relative secrets resolve under
+`paths.secrets_dir`; contents never enter the configuration projection. State
+lives beneath `paths.data_dir/extensions/state`, namespaced per instance.
+
+There are two explicit installation sources:
+
+- configuration-managed installations are declared in the Core configuration
+  and reference an integrity-pinned artifact already located beneath
+  `paths.data_dir`;
+- locally installed artifacts are integrity-checked at the trusted local source,
+  copied to `paths.data_dir/extensions/installed/<instance>/module.wasm`, and
+  reconstructed from the persisted staged manifest after restart.
+
+Gateway events cannot install extensions or modify either source.
 
 ```json
 {
@@ -77,10 +89,23 @@ secret of that name, not Telegram-specific authority in Core. `session.route`
 also includes the existing `chat_id` alias alongside the generic conversation
 reference.
 
-The current Telegram PR #5 artifact loads and initializes unchanged. Its
-polling cursor still lives only in WASM memory; a Telegram-side follow-up must
-use `state_get/state_put` for cursor recovery. Core already supplies that
-capability, so this requires no further Core ABI change.
+The current Telegram PR #5 artifact loads and initializes unchanged. Reproduce
+that compatibility check after independently building the Telegram guest:
+
+```sh
+NEONDOLL_TELEGRAM_WASM=/path/to/neondoll-gateway-telegram/wasm/build/gateway.wasm \
+  go test ./Core/Extension \
+  -run TestTelegramABICompatibilityWhenArtifactAvailable -count=1 -v
+```
+
+Core durably stages each emitted `message.incoming` before invoking trusted
+ingress, retries ingress failures without polling past the event, and replies
+with `inbound.accepted` containing the stable event ID only after acceptance.
+The current Telegram PR #5 guest still advances its in-memory polling cursor
+when it emits the event. To close the remaining guest-side crash window, it
+must advance and persist that cursor through `state_get`/`state_put` only after
+the matching `inbound.accepted`. Core already supplies these ABI v2 capabilities
+and no Core rebuild or ABI change is required.
 
 ## Security and lifecycle
 
@@ -92,5 +117,8 @@ lifecycle before stopping and releasing the module.
 
 Configuration reconstructs enabled installations after daemon restart.
 Gateway Sessions and pending deliveries remain Core-owned and replay through
-stable delivery IDs. Durable extension state isolates cursors and
-deduplication data by Core-assigned installation identity.
+stable delivery IDs. A single per-installation dispatcher classifies inbound
+events and correlated `delivery.result` envelopes, so polling and delivery can
+never consume one another's output. Durable extension state isolates inbound
+pending records, cursors, and deduplication data by Core-assigned installation
+identity.

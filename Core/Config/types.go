@@ -54,6 +54,7 @@ type ExtensionManifest struct {
 	Contract      string            `json:"contract"`
 	ABI           int               `json:"abi_version"`
 	Enabled       bool              `json:"enabled"`
+	ManagedBy     string            `json:"managed_by,omitempty"`
 	Artifact      ExtensionArtifact `json:"artifact"`
 	Configuration json.RawMessage   `json:"configuration,omitempty"`
 	Requested     []string          `json:"requested_capabilities,omitempty"`
@@ -202,16 +203,6 @@ func Load(path string) (*Config, error) {
 	}
 	if _, err := NewExternalIdentityResolver(cfg.Core); err != nil {
 		return nil, fmt.Errorf("config external identities: %w", err)
-	}
-	instances := map[string]bool{}
-	for _, manifest := range cfg.Extensions {
-		if manifest.Version != 1 || manifest.Contract != "gateway" || manifest.ABI != 2 || manifest.ExtensionID == "" || manifest.InstanceID == "" || manifest.Artifact.Path == "" || len(manifest.Artifact.SHA256) != 64 || manifest.Gateway == nil {
-			return nil, fmt.Errorf("config extensions: invalid manifest %q", manifest.InstanceID)
-		}
-		if instances[manifest.InstanceID] {
-			return nil, fmt.Errorf("config extensions: duplicate instance %q", manifest.InstanceID)
-		}
-		instances[manifest.InstanceID] = true
 	}
 	return &cfg, nil
 }

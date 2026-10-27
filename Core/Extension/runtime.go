@@ -133,9 +133,9 @@ func (r *WASMRuntime) Load(ctx context.Context, manifest Manifest, dataRoot stri
 	if err := manifest.Validate(); err != nil {
 		return err
 	}
-	artifact := manifest.Artifact.Path
-	if !filepath.IsAbs(artifact) {
-		artifact = filepath.Join(dataRoot, artifact)
+	artifact, err := resolveWithin(dataRoot, manifest.Artifact.Path)
+	if err != nil {
+		return err
 	}
 	wasm, err := os.ReadFile(artifact)
 	if err != nil {
@@ -201,6 +201,25 @@ func (r *WASMRuntime) Load(ctx context.Context, manifest Manifest, dataRoot stri
 		_ = r.Unload(context.Background(), manifest.InstanceID)
 	}
 	return err
+}
+
+func resolveWithin(root, path string) (string, error) {
+	if root == "" || path == "" || filepath.IsAbs(path) {
+		return "", ErrInvalidManifest
+	}
+	root, err := filepath.Abs(root)
+	if err != nil {
+		return "", err
+	}
+	resolved, err := filepath.Abs(filepath.Join(root, filepath.Clean(path)))
+	if err != nil {
+		return "", err
+	}
+	rel, err := filepath.Rel(root, resolved)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", ErrInvalidManifest
+	}
+	return resolved, nil
 }
 func verifySHA256(data []byte, want string) bool {
 	return fmt.Sprintf("%x", sha256Sum(data)) == strings.ToLower(want)

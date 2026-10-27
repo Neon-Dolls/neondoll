@@ -1,6 +1,8 @@
 package main
 
-import "unsafe"
+import (
+	"unsafe"
+)
 
 func main() {}
 
@@ -12,6 +14,7 @@ func statePut(kp, kn, vp, vn uint32) int32
 
 var buffer [65536]byte
 var emitted bool
+var deliveryID string
 
 //export gateway_event_buf
 func eventBuffer() uint32 { return uint32(uintptr(unsafe.Pointer(&buffer[0]))) }
@@ -42,7 +45,44 @@ func pollGateway() int32 {
 
 //export gateway_handle_event
 func handleEvent(ptr, size uint32) int32 {
-	data := []byte(`{"event_type":"delivery.result","ok":true}`)
-	outgoing(uint32(uintptr(unsafe.Pointer(&data[0]))), uint32(len(data)))
+	data := unsafe.Slice((*byte)(unsafe.Pointer(uintptr(ptr))), size)
+	if contains(data, `"type":"session.route"`) {
+		deliveryID = stringField(data, `"delivery_id":"`)
+	}
+	if contains(data, `"type":"session.event"`) {
+		result := []byte(`{"event_type":"delivery.result","delivery_id":"` + deliveryID + `","ok":true}`)
+		outgoing(uint32(uintptr(unsafe.Pointer(&result[0]))), uint32(len(result)))
+	}
 	return 0
+}
+
+func contains(data []byte, target string) bool { return find(data, target) >= 0 }
+
+func stringField(data []byte, prefix string) string {
+	start := find(data, prefix)
+	if start < 0 {
+		return ""
+	}
+	start += len(prefix)
+	end := start
+	for end < len(data) && data[end] != '"' {
+		end++
+	}
+	return string(data[start:end])
+}
+
+func find(data []byte, target string) int {
+	for i := 0; i+len(target) <= len(data); i++ {
+		matched := true
+		for j := range target {
+			if data[i+j] != target[j] {
+				matched = false
+				break
+			}
+		}
+		if matched {
+			return i
+		}
+	}
+	return -1
 }

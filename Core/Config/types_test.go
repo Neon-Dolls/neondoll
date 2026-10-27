@@ -79,15 +79,15 @@ func TestLoadGatewayExtensionProductionConfiguration(t *testing.T) {
 	}
 }
 
-func TestLoadRejectsInvalidGatewayExtensionConfiguration(t *testing.T) {
+func TestLoadDefersExtensionValidationToExtensionManager(t *testing.T) {
 	cfg := Defaults()
 	cfg.Extensions = []ExtensionManifest{{Version: 1, InstanceID: "telegram-main", Contract: "gateway"}}
 	path := filepath.Join(t.TempDir(), "neondoll.json")
 	if err := Save(path, &cfg); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Load(path); err == nil {
-		t.Fatal("Load accepted invalid Telegram Gateway")
+	if _, err := Load(path); err != nil {
+		t.Fatalf("generic config loader duplicated extension validation: %v", err)
 	}
 }
 

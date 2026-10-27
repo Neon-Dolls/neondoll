@@ -21,8 +21,12 @@ import (
 )
 
 type testIngress struct {
-	mu       sync.Mutex
-	messages []gateway.VerifiedSender
+	mu            sync.Mutex
+	messages      []gateway.VerifiedSender
+	failures      int
+	attempts      int
+	handleEntered chan struct{}
+	handleRelease chan struct{}
 }
 
 func (*testIngress) ResolvePlatformSession(context.Context, string) (session.ID, error) {
@@ -32,6 +36,24 @@ func (*testIngress) ExternalConversationRef(context.Context, session.ID) (string
 	return "synthetic/chat/7", nil
 }
 func (i *testIngress) HandleLegacy(_ context.Context, _ session.ID, s gateway.VerifiedSender, _ *events.Event) (*events.Event, error) {
+	i.mu.Lock()
+	i.attempts++
+	if i.failures > 0 {
+		i.failures--
+		i.mu.Unlock()
+		return nil, errors.New("transient ingress failure")
+	}
+	i.mu.Unlock()
+	if i.handleEntered != nil {
+		select {
+		case <-i.handleEntered:
+		default:
+			close(i.handleEntered)
+		}
+	}
+	if i.handleRelease != nil {
+		<-i.handleRelease
+	}
 	i.mu.Lock()
 	i.messages = append(i.messages, s)
 	i.mu.Unlock()
@@ -46,13 +68,19 @@ func (*testIngress) HandleSessionEvent(context.Context, gateway.VerifiedSender, 
 }
 
 type testHost struct {
-	mu       sync.Mutex
-	ingress  *testIngress
-	adapters map[string]gateway.Adapter
+	mu                sync.Mutex
+	ingress           *testIngress
+	adapters          map[string]gateway.Adapter
+	registers         int
+	registerEntered   chan struct{}
+	registerRelease   chan struct{}
+	unregisterEntered chan struct{}
+	unregisterRelease chan struct{}
 }
 
 func (h *testHost) Register(ctx context.Context, a gateway.Adapter) error {
 	h.mu.Lock()
+	h.registers++
 	if h.adapters == nil {
 		h.adapters = map[string]gateway.Adapter{}
 	}
@@ -62,9 +90,29 @@ func (h *testHost) Register(ctx context.Context, a gateway.Adapter) error {
 	}
 	h.adapters[string(a.InstanceID())] = a
 	h.mu.Unlock()
+	if h.registerEntered != nil {
+		select {
+		case <-h.registerEntered:
+		default:
+			close(h.registerEntered)
+		}
+	}
+	if h.registerRelease != nil {
+		<-h.registerRelease
+	}
 	return a.Start(ctx, h.ingress)
 }
 func (h *testHost) Unregister(ctx context.Context, id externalidentity.GatewayInstanceID) error {
+	if h.unregisterEntered != nil {
+		select {
+		case <-h.unregisterEntered:
+		default:
+			close(h.unregisterEntered)
+		}
+	}
+	if h.unregisterRelease != nil {
+		<-h.unregisterRelease
+	}
 	h.mu.Lock()
 	a := h.adapters[string(id)]
 	delete(h.adapters, string(id))
@@ -177,6 +225,234 @@ func TestManifestValidationAndDurableStateRestart(t *testing.T) {
 	bad.Artifact.SHA256 = fmt.Sprintf("%064d", 0)
 	if err := runtime.Load(context.Background(), bad, findRepoRoot(t)); !errors.Is(err, ErrInvalidManifest) {
 		t.Fatalf("integrity error = %v", err)
+	}
+}
+
+func TestInboundFailurePersistsAndRetriesAfterRestart(t *testing.T) {
+	ctx, root, stateRoot := context.Background(), findRepoRoot(t), filepath.Join(t.TempDir(), "state")
+	manifest := testManifest(t, "retry")
+	firstRuntime, _ := NewWASMRuntime(ctx, NewFileStateStore(stateRoot), t.TempDir())
+	failing := &testIngress{failures: 100}
+	firstHost := &testHost{ingress: failing}
+	firstManager, err := NewManager(firstRuntime, firstHost, root, []Manifest{manifest})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = firstManager.LoadEnabled(ctx); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		failing.mu.Lock()
+		attempts := failing.attempts
+		failing.mu.Unlock()
+		if attempts > 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("ingress was not attempted")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if err = firstManager.Shutdown(ctx); err != nil {
+		t.Fatal(err)
+	}
+	secondRuntime, _ := NewWASMRuntime(ctx, NewFileStateStore(stateRoot), t.TempDir())
+	succeeding := &testIngress{}
+	secondManager, err := NewManager(secondRuntime, &testHost{ingress: succeeding}, root, []Manifest{manifest})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer secondManager.Shutdown(ctx)
+	if err = secondManager.LoadEnabled(ctx); err != nil {
+		t.Fatal(err)
+	}
+	deadline = time.Now().Add(2 * time.Second)
+	for {
+		succeeding.mu.Lock()
+		count := len(succeeding.messages)
+		succeeding.mu.Unlock()
+		if count == 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("retried messages=%d", count)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+func TestDispatcherSeparatesInterleavedInboundAndDeliveryResults(t *testing.T) {
+	ctx, root := context.Background(), findRepoRoot(t)
+	runtime, err := NewWASMRuntime(ctx, NewFileStateStore(filepath.Join(t.TempDir(), "state")), t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ingress := &testIngress{handleEntered: make(chan struct{}), handleRelease: make(chan struct{})}
+	host := &testHost{ingress: ingress}
+	manager, err := NewManager(runtime, host, root, []Manifest{testManifest(t, "interleaved")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manager.Shutdown(ctx)
+	if err = manager.LoadEnabled(ctx); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-ingress.handleEntered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("inbound event did not reach Core")
+	}
+	event, err := sessionevent.NewEvent("session-1", sessionevent.TypeMessage, sessionevent.MessagePayload{Parts: []sessionevent.MessagePart{{Type: sessionevent.PartText, Text: "outbound"}}}, sessionevent.Correlation{}, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	delivery := sessionevent.Delivery{ID: "interleaved-delivery", Event: event, Owner: session.Owner{Kind: session.OwnerGateway, InstanceID: "interleaved"}}
+	envelope, err := gateway.NewOutboundEnvelope(delivery)
+	if err != nil {
+		t.Fatal(err)
+	}
+	host.mu.Lock()
+	adapter := host.adapters["interleaved"]
+	host.mu.Unlock()
+	delivered := make(chan error, 1)
+	go func() { delivered <- adapter.Deliver(ctx, envelope) }()
+	select {
+	case err = <-delivered:
+		t.Fatalf("delivery bypassed blocked dispatcher: %v", err)
+	case <-time.After(25 * time.Millisecond):
+	}
+	close(ingress.handleRelease)
+	if err = <-delivered; err != nil {
+		t.Fatal(err)
+	}
+	ingress.mu.Lock()
+	messageCount := len(ingress.messages)
+	ingress.mu.Unlock()
+	if messageCount != 1 {
+		t.Fatalf("inbound messages=%d", messageCount)
+	}
+}
+
+func TestConcurrentLifecycleIsSerializedAndStatusRemainsRunning(t *testing.T) {
+	ctx, root := context.Background(), findRepoRoot(t)
+	runtime, _ := NewWASMRuntime(ctx, NewFileStateStore(filepath.Join(t.TempDir(), "state")), t.TempDir())
+	host := &testHost{ingress: &testIngress{}, registerEntered: make(chan struct{}), registerRelease: make(chan struct{})}
+	manager, err := NewManager(runtime, host, root, []Manifest{testManifest(t, "concurrent")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	results := make(chan error, 2)
+	go func() { results <- manager.Enable(ctx, "concurrent") }()
+	<-host.registerEntered
+	go func() { results <- manager.Enable(ctx, "concurrent") }()
+	close(host.registerRelease)
+	if err = <-results; err != nil {
+		t.Fatal(err)
+	}
+	if err = <-results; err != nil {
+		t.Fatal(err)
+	}
+	host.mu.Lock()
+	registers := host.registers
+	host.mu.Unlock()
+	if registers != 1 {
+		t.Fatalf("Register calls=%d", registers)
+	}
+	host.unregisterEntered = make(chan struct{})
+	host.unregisterRelease = make(chan struct{})
+	disabled := make(chan error, 1)
+	go func() { disabled <- manager.Disable(ctx, "concurrent") }()
+	<-host.unregisterEntered
+	statuses := manager.Statuses()
+	if len(statuses) != 1 || !statuses[0].Running {
+		t.Fatalf("status during stop=%#v", statuses)
+	}
+	close(host.unregisterRelease)
+	if err = <-disabled; err != nil {
+		t.Fatal(err)
+	}
+	if manager.Statuses()[0].Running {
+		t.Fatal("installation still running after disable")
+	}
+	if err = manager.Shutdown(ctx); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestConcurrentShutdownWaitsForLifecycleCompletion(t *testing.T) {
+	ctx, root := context.Background(), findRepoRoot(t)
+	runtime, _ := NewWASMRuntime(ctx, NewFileStateStore(filepath.Join(t.TempDir(), "state")), t.TempDir())
+	host := &testHost{ingress: &testIngress{}}
+	manager, err := NewManager(runtime, host, root, []Manifest{testManifest(t, "shutdown")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = manager.LoadEnabled(ctx); err != nil {
+		t.Fatal(err)
+	}
+	host.unregisterEntered = make(chan struct{})
+	host.unregisterRelease = make(chan struct{})
+	results := make(chan error, 2)
+	go func() { results <- manager.Shutdown(ctx) }()
+	<-host.unregisterEntered
+	go func() { results <- manager.Shutdown(ctx) }()
+	select {
+	case err = <-results:
+		t.Fatalf("shutdown returned before adapter stopped: %v", err)
+	case <-time.After(25 * time.Millisecond):
+	}
+	close(host.unregisterRelease)
+	for range 2 {
+		if err = <-results; err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestInstallStagesArtifactAndReconstructsManifest(t *testing.T) {
+	ctx, dataRoot := context.Background(), t.TempDir()
+	runtime, _ := NewWASMRuntime(ctx, NewFileStateStore(filepath.Join(dataRoot, "state")), t.TempDir())
+	manager, err := NewManager(runtime, &testHost{ingress: &testIngress{}}, dataRoot, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest := testManifest(t, "installed")
+	manifest.Artifact.Path = filepath.Join(findRepoRoot(t), "Core/Extension/testdata/gateway.wasm")
+	manifest.Enabled = false
+	if err = manager.Install(manifest); err != nil {
+		t.Fatal(err)
+	}
+	if err = manager.Shutdown(ctx); err != nil {
+		t.Fatal(err)
+	}
+	staged := filepath.Join(dataRoot, "extensions", "installed", "installed", "module.wasm")
+	if _, err = os.Stat(staged); err != nil {
+		t.Fatal(err)
+	}
+	runtime2, _ := NewWASMRuntime(ctx, NewFileStateStore(filepath.Join(dataRoot, "state")), t.TempDir())
+	manager2, err := NewManager(runtime2, &testHost{ingress: &testIngress{}}, dataRoot, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manager2.Shutdown(ctx)
+	statuses := manager2.Statuses()
+	if len(statuses) != 1 || statuses[0].ManagedBy != ManagedInstalled {
+		t.Fatalf("reconstructed statuses=%#v", statuses)
+	}
+}
+
+func TestConfiguredArtifactCannotEscapeDataRoot(t *testing.T) {
+	ctx, dataRoot := context.Background(), t.TempDir()
+	runtime, err := NewWASMRuntime(ctx, NewFileStateStore(filepath.Join(t.TempDir(), "state")), t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close(ctx)
+	manifest := testManifest(t, "escape")
+	manifest.Artifact.Path = "../gateway.wasm"
+	if err = runtime.Load(ctx, manifest, dataRoot); !errors.Is(err, ErrInvalidManifest) {
+		t.Fatalf("path escape error=%v", err)
 	}
 }
 

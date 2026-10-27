@@ -15,6 +15,8 @@ const (
 	ContractGateway       = "gateway"
 	ContractCapability    = "capability"
 	ContractPackageSource = "package_source"
+	ManagedConfiguration  = "configuration"
+	ManagedInstalled      = "installed"
 )
 
 type Capability string
@@ -51,6 +53,7 @@ type Manifest struct {
 	Contract      string                `json:"contract"`
 	ABI           int                   `json:"abi_version"`
 	Enabled       bool                  `json:"enabled"`
+	ManagedBy     string                `json:"managed_by,omitempty"`
 	Artifact      Artifact              `json:"artifact"`
 	Configuration json.RawMessage       `json:"configuration,omitempty"`
 	Requested     []Capability          `json:"requested_capabilities,omitempty"`
@@ -76,6 +79,9 @@ func (m Manifest) Validate() error {
 	}
 	if m.ABI != GuestABIVersion {
 		return ErrUnsupportedABI
+	}
+	if m.ManagedBy != "" && m.ManagedBy != ManagedConfiguration && m.ManagedBy != ManagedInstalled {
+		return ErrInvalidManifest
 	}
 	if m.Gateway == nil || strings.TrimSpace(m.Gateway.Platform) == "" || strings.TrimSpace(m.Gateway.DollID) == "" || strings.TrimSpace(m.Gateway.ConversationPrefix) == "" {
 		return ErrInvalidManifest
