@@ -14,22 +14,40 @@ import (
 type IngressFactory func(externalidentity.GatewayInstanceID) (*interaction.GatewayIngress, error)
 type ReplayFunc func(context.Context) error
 
+type managedAdapter struct {
+	adapter    Adapter
+	active     bool
+	startDone  chan struct{}
+	deliveries sync.WaitGroup
+	stopOnce   sync.Once
+	stopErr    error
+}
+
+func newManagedAdapter(adapter Adapter) *managedAdapter {
+	return &managedAdapter{adapter: adapter, startDone: make(chan struct{})}
+}
+
+func (m *managedAdapter) stop(ctx context.Context) error {
+	m.deliveries.Wait()
+	m.stopOnce.Do(func() { m.stopErr = m.adapter.Stop(ctx) })
+	return m.stopErr
+}
+
 // Host owns installed Gateway lifecycles and is the production SessionEvent
-// transport for Gateway-owned Sessions.
+// transport. Host.mu is never held across adapter code or waits. Delivery Add
+// and lifecycle exclusion are serialized under Host.mu before Wait begins.
 type Host struct {
-	mu       sync.RWMutex
-	adapters map[externalidentity.GatewayInstanceID]Adapter
+	mu       sync.Mutex
+	adapters map[externalidentity.GatewayInstanceID]*managedAdapter
 	ingress  IngressFactory
 	replay   ReplayFunc
 	closed   bool
 }
 
 func NewHost() *Host {
-	return &Host{adapters: make(map[externalidentity.GatewayInstanceID]Adapter)}
+	return &Host{adapters: make(map[externalidentity.GatewayInstanceID]*managedAdapter)}
 }
 
-// Configure installs Core-owned ingress and replay boundaries before any
-// Gateway instance can start.
 func (h *Host) Configure(ingress IngressFactory, replay ReplayFunc) error {
 	if h == nil || ingress == nil || replay == nil {
 		return ErrHostNotConfigured
@@ -48,76 +66,87 @@ func (h *Host) Register(ctx context.Context, adapter Adapter) error {
 		(adapter.ABIVersion() != LegacyABIVersion && adapter.ABIVersion() != StructuredABIVersion) {
 		return ErrInvalidAdapter
 	}
+	id := adapter.InstanceID()
+	managed := newManagedAdapter(adapter)
 	h.mu.Lock()
 	if h.closed || h.ingress == nil || h.replay == nil {
 		h.mu.Unlock()
 		return ErrHostNotConfigured
 	}
-	id := adapter.InstanceID()
 	if _, exists := h.adapters[id]; exists {
 		h.mu.Unlock()
 		return ErrAlreadyRegistered
 	}
+	// Reserve the instance before invoking factory or adapter code.
+	h.adapters[id] = managed
 	factory, replay := h.ingress, h.replay
 	h.mu.Unlock()
 
 	ingress, err := factory(id)
-	if err != nil {
-		return err
-	}
-	if err := adapter.Start(ctx, &boundIngress{version: adapter.ABIVersion(), ingress: ingress, replay: replay}); err != nil {
-		return err
+	if err == nil {
+		err = adapter.Start(ctx, &boundIngress{version: adapter.ABIVersion(), ingress: ingress, replay: replay})
 	}
 
 	h.mu.Lock()
-	if h.closed || h.adapters[id] != nil {
-		h.mu.Unlock()
-		_ = adapter.Stop(context.Background())
-		if h.closed {
-			return ErrHostNotConfigured
+	close(managed.startDone)
+	current := h.adapters[id] == managed
+	if err != nil || h.closed || !current {
+		if current {
+			delete(h.adapters, id)
 		}
-		return ErrAlreadyRegistered
+		h.mu.Unlock()
+		_ = managed.stop(context.Background())
+		if err != nil {
+			return err
+		}
+		return ErrHostNotConfigured
 	}
-	h.adapters[id] = adapter
+	managed.active = true
 	h.mu.Unlock()
 
-	// The adapter is visible before replay, so pending deliveries can resolve
-	// this instance. Failures remain durable and retryable.
 	if err := replay(ctx); err != nil {
-		h.mu.Lock()
-		delete(h.adapters, id)
-		h.mu.Unlock()
-		_ = adapter.Stop(context.Background())
+		_ = h.unregister(context.Background(), id, managed)
 		return err
 	}
 	return nil
 }
 
 func (h *Host) Unregister(ctx context.Context, id externalidentity.GatewayInstanceID) error {
+	return h.unregister(ctx, id, nil)
+}
+
+func (h *Host) unregister(ctx context.Context, id externalidentity.GatewayInstanceID, expected *managedAdapter) error {
 	h.mu.Lock()
-	adapter := h.adapters[id]
-	delete(h.adapters, id)
-	h.mu.Unlock()
-	if adapter == nil {
+	managed := h.adapters[id]
+	if managed == nil || (expected != nil && managed != expected) {
+		h.mu.Unlock()
 		return ErrUnavailable
 	}
-	return adapter.Stop(ctx)
+	delete(h.adapters, id)
+	managed.active = false
+	h.mu.Unlock()
+	<-managed.startDone
+	return managed.stop(ctx)
 }
 
 func (h *Host) DeliverSessionEvent(ctx context.Context, owner session.Owner, delivery sessionevent.Delivery) error {
 	if owner.Kind != session.OwnerGateway {
 		return sessionevent.TerminalDeliveryError(ErrUnsupportedOwner)
 	}
-	h.mu.RLock()
-	defer h.mu.RUnlock()
-	adapter := h.adapters[externalidentity.GatewayInstanceID(owner.InstanceID)]
-	if adapter == nil {
+	h.mu.Lock()
+	managed := h.adapters[externalidentity.GatewayInstanceID(owner.InstanceID)]
+	if managed == nil || !managed.active {
+		h.mu.Unlock()
 		return ErrUnavailable
 	}
-	if adapter.ABIVersion() < StructuredABIVersion {
+	if managed.adapter.ABIVersion() < StructuredABIVersion {
+		h.mu.Unlock()
 		return sessionevent.TerminalDeliveryError(ErrUnsupportedABI)
 	}
-	return adapter.Deliver(ctx, OutboundEnvelope{ABIVersion: StructuredABIVersion, Delivery: delivery})
+	managed.deliveries.Add(1)
+	h.mu.Unlock()
+	defer managed.deliveries.Done()
+	return managed.adapter.Deliver(ctx, OutboundEnvelope{ABIVersion: StructuredABIVersion, Delivery: delivery})
 }
 
 func (h *Host) Shutdown(ctx context.Context) error {
@@ -127,15 +156,18 @@ func (h *Host) Shutdown(ctx context.Context) error {
 		return nil
 	}
 	h.closed = true
-	adapters := make([]Adapter, 0, len(h.adapters))
+	managed := make([]*managedAdapter, 0, len(h.adapters))
 	for id, adapter := range h.adapters {
-		adapters = append(adapters, adapter)
+		adapter.active = false
+		managed = append(managed, adapter)
 		delete(h.adapters, id)
 	}
 	h.mu.Unlock()
+
 	var first error
-	for _, adapter := range adapters {
-		if err := adapter.Stop(ctx); err != nil && first == nil {
+	for _, adapter := range managed {
+		<-adapter.startDone
+		if err := adapter.stop(ctx); err != nil && first == nil {
 			first = err
 		}
 	}
