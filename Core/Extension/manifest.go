@@ -1,6 +1,7 @@
 package extension
 
 import (
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -60,8 +61,11 @@ type Manifest struct {
 }
 
 func (m Manifest) Validate() error {
-	if m.Version != ManifestVersion || strings.TrimSpace(m.ExtensionID) == "" || strings.TrimSpace(m.InstanceID) == "" ||
+	if m.Version != ManifestVersion || !validID(m.ExtensionID) || !validID(m.InstanceID) ||
 		strings.TrimSpace(m.Artifact.Path) == "" || len(m.Artifact.SHA256) != 64 {
+		return ErrInvalidManifest
+	}
+	if _, err := hex.DecodeString(m.Artifact.SHA256); err != nil {
 		return ErrInvalidManifest
 	}
 	if m.Contract != ContractGateway {
@@ -101,6 +105,18 @@ func (m Manifest) Validate() error {
 		}
 	}
 	return nil
+}
+
+func validID(value string) bool {
+	if value == "" {
+		return false
+	}
+	for _, r := range value {
+		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-' || r == '_' || r == '.') {
+			return false
+		}
+	}
+	return true
 }
 
 func ValidateManifests(manifests []Manifest) error {

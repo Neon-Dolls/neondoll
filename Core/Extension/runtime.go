@@ -21,6 +21,7 @@ import (
 )
 
 const maxGuestEvent = 4096
+const maxHTTPResponse = 4 << 20
 
 type GuestMessage struct {
 	Version uint32          `json:"v"`
@@ -295,6 +296,9 @@ func (r *WASMRuntime) httpGet(ctx context.Context, m api.Module, up, un, bp, bma
 	if i == nil || !i.manifest.GrantedCapability(CapabilityHTTP) {
 		result(0, 2, 0)
 		return
+	}
+	if bmax > maxHTTPResponse {
+		bmax = maxHTTPResponse
 	}
 	raw, ok := m.Memory().Read(up, un)
 	if !ok {
