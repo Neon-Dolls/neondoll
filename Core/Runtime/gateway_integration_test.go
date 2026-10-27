@@ -244,6 +244,39 @@ func TestTelegramPR4InboundEnvelopeUsesCoreOwnedSessionResolution(t *testing.T) 
 	}
 }
 
+func TestGatewayIngressResolvesAndAuthorizesTransportRoutes(t *testing.T) {
+	f := newGatewayFixture(t)
+	adapter := f.register(t, gateway.StructuredSessionEventVersion)
+
+	created, err := adapter.endpoint().ResolvePlatformSession(context.Background(), "telegram/chat/9001")
+	if err != nil {
+		t.Fatal(err)
+	}
+	route, err := adapter.endpoint().SessionRoute(context.Background(), created.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if route.SessionID != created.SessionID || route.ExternalConversationRef != "telegram/chat/9001" {
+		t.Fatalf("route = %#v", route)
+	}
+
+	foreign, err := f.services.Sessions().Create(context.Background(), session.CreateRequest{
+		Owner: session.Owner{Kind: session.OwnerGateway, InstanceID: "gateway-other"}, ExternalConversationRef: "telegram/chat/42",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := adapter.endpoint().SessionRoute(context.Background(), foreign.ID); !errors.Is(err, gateway.ErrUnavailable) {
+		t.Fatalf("foreign route error = %v", err)
+	}
+	if _, err := f.services.Sessions().Close(context.Background(), created.SessionID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := adapter.endpoint().SessionRoute(context.Background(), created.SessionID); !errors.Is(err, gateway.ErrUnavailable) {
+		t.Fatalf("closed route error = %v", err)
+	}
+}
+
 func TestGatewayUnavailabilityAndRestartReplayDurableDelivery(t *testing.T) {
 	f := newGatewayFixture(t)
 	first := f.register(t, gateway.StructuredSessionEventVersion)
