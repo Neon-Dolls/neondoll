@@ -29,13 +29,22 @@ type managedAdapter struct {
 	stopErr    error
 }
 
+type adapterCallbackKey struct{}
+
+func callbackAdapter(ctx context.Context) *managedAdapter {
+	managed, _ := ctx.Value(adapterCallbackKey{}).(*managedAdapter)
+	return managed
+}
+
 func newManagedAdapter(adapter Adapter, version int) *managedAdapter {
 	return &managedAdapter{adapter: adapter, version: version, startDone: make(chan struct{})}
 }
 
 func (m *managedAdapter) stop(ctx context.Context) error {
 	m.deliveries.Wait()
-	m.stopOnce.Do(func() { m.stopErr = m.adapter.Stop(ctx) })
+	m.stopOnce.Do(func() {
+		m.stopErr = m.adapter.Stop(context.WithValue(ctx, adapterCallbackKey{}, m))
+	})
 	return m.stopErr
 }
 
@@ -43,12 +52,14 @@ func (m *managedAdapter) stop(ctx context.Context) error {
 // transport. Host.mu is never held across adapter code or waits. Delivery Add
 // and lifecycle exclusion are serialized under Host.mu before Wait begins.
 type Host struct {
-	mu       sync.Mutex
-	adapters map[externalidentity.GatewayInstanceID]*managedAdapter
-	ingress  IngressFactory
-	replay   ReplayFunc
-	sessions session.Service
-	closed   bool
+	mu           sync.Mutex
+	adapters     map[externalidentity.GatewayInstanceID]*managedAdapter
+	ingress      IngressFactory
+	replay       ReplayFunc
+	sessions     session.Service
+	closed       bool
+	shutdownDone chan struct{}
+	shutdownErr  error
 }
 
 func NewHost() *Host {
@@ -99,7 +110,7 @@ func (h *Host) Register(ctx context.Context, adapter Adapter) error {
 
 	ingress, err := factory(id)
 	if err == nil {
-		err = adapter.Start(ctx, &boundIngress{version: version, gateway: id, sessions: h.sessions, ingress: ingress, replay: replay})
+		err = adapter.Start(context.WithValue(ctx, adapterCallbackKey{}, managed), &boundIngress{version: version, gateway: id, sessions: h.sessions, ingress: ingress, replay: replay})
 	}
 
 	h.mu.Lock()
@@ -137,11 +148,26 @@ func (h *Host) unregister(ctx context.Context, id externalidentity.GatewayInstan
 		h.mu.Unlock()
 		return ErrUnavailable
 	}
-	delete(h.adapters, id)
-	managed.active = false
+	if managed.active {
+		managed.active = false
+	}
 	h.mu.Unlock()
+	if callbackAdapter(ctx) == managed {
+		go h.finishUnregister(context.Background(), id, managed)
+		return nil
+	}
+	return h.finishUnregister(ctx, id, managed)
+}
+
+func (h *Host) finishUnregister(ctx context.Context, id externalidentity.GatewayInstanceID, managed *managedAdapter) error {
 	<-managed.startDone
-	return managed.stop(ctx)
+	err := managed.stop(ctx)
+	h.mu.Lock()
+	if h.adapters[id] == managed {
+		delete(h.adapters, id)
+	}
+	h.mu.Unlock()
+	return err
 }
 
 func (h *Host) DeliverSessionEvent(ctx context.Context, owner session.Owner, delivery sessionevent.Delivery) error {
@@ -165,16 +191,26 @@ func (h *Host) DeliverSessionEvent(ctx context.Context, owner session.Owner, del
 	if err != nil {
 		return sessionevent.TerminalDeliveryError(err)
 	}
-	return managed.adapter.Deliver(ctx, envelope)
+	return managed.adapter.Deliver(context.WithValue(ctx, adapterCallbackKey{}, managed), envelope)
 }
 
 func (h *Host) Shutdown(ctx context.Context) error {
 	h.mu.Lock()
 	if h.closed {
+		done := h.shutdownDone
+		reentrant := callbackAdapter(ctx) != nil
 		h.mu.Unlock()
-		return nil
+		if reentrant || done == nil {
+			return nil
+		}
+		<-done
+		h.mu.Lock()
+		err := h.shutdownErr
+		h.mu.Unlock()
+		return err
 	}
 	h.closed = true
+	h.shutdownDone = make(chan struct{})
 	managed := make([]*managedAdapter, 0, len(h.adapters))
 	for id, adapter := range h.adapters {
 		adapter.active = false
@@ -182,7 +218,18 @@ func (h *Host) Shutdown(ctx context.Context) error {
 		delete(h.adapters, id)
 	}
 	h.mu.Unlock()
+	if callbackAdapter(ctx) != nil {
+		go h.finishShutdown(context.Background(), managed)
+		return nil
+	}
+	h.finishShutdown(ctx, managed)
+	h.mu.Lock()
+	err := h.shutdownErr
+	h.mu.Unlock()
+	return err
+}
 
+func (h *Host) finishShutdown(ctx context.Context, managed []*managedAdapter) {
 	var first error
 	for _, adapter := range managed {
 		<-adapter.startDone
@@ -190,7 +237,10 @@ func (h *Host) Shutdown(ctx context.Context) error {
 			first = err
 		}
 	}
-	return first
+	h.mu.Lock()
+	h.shutdownErr = first
+	close(h.shutdownDone)
+	h.mu.Unlock()
 }
 
 var _ sessionevent.Transport = (*Host)(nil)

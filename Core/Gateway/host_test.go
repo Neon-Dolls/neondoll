@@ -22,9 +22,9 @@ type concurrencyAdapter struct {
 	deliverRelease chan struct{}
 	startErr       error
 	deliverErr     error
-	onStart        func()
-	onDeliver      func()
-	onStop         func()
+	onStart        func(context.Context)
+	onDeliver      func(context.Context)
+	onStop         func(context.Context)
 	starts         atomic.Int32
 	deliveries     atomic.Int32
 	stops          atomic.Int32
@@ -32,36 +32,36 @@ type concurrencyAdapter struct {
 
 func (a *concurrencyAdapter) InstanceID() externalidentity.GatewayInstanceID { return a.id }
 func (*concurrencyAdapter) SessionEventVersion() int                         { return StructuredSessionEventVersion }
-func (a *concurrencyAdapter) Start(context.Context, Ingress) error {
+func (a *concurrencyAdapter) Start(ctx context.Context, _ Ingress) error {
 	a.starts.Add(1)
 	if a.startEntered != nil {
 		close(a.startEntered)
 	}
 	if a.onStart != nil {
-		a.onStart()
+		a.onStart(ctx)
 	}
 	if a.startRelease != nil {
 		<-a.startRelease
 	}
 	return a.startErr
 }
-func (a *concurrencyAdapter) Deliver(context.Context, OutboundEnvelope) error {
+func (a *concurrencyAdapter) Deliver(ctx context.Context, _ OutboundEnvelope) error {
 	a.deliveries.Add(1)
 	if a.deliverEntered != nil {
 		close(a.deliverEntered)
 	}
 	if a.onDeliver != nil {
-		a.onDeliver()
+		a.onDeliver(ctx)
 	}
 	if a.deliverRelease != nil {
 		<-a.deliverRelease
 	}
 	return a.deliverErr
 }
-func (a *concurrencyAdapter) Stop(context.Context) error {
+func (a *concurrencyAdapter) Stop(ctx context.Context) error {
 	a.stops.Add(1)
 	if a.onStop != nil {
-		a.onStop()
+		a.onStop(ctx)
 	}
 	return nil
 }
@@ -91,18 +91,19 @@ func await(t *testing.T, channel <-chan struct{}, label string) {
 	}
 }
 
-func awaitRemoved(t *testing.T, host *Host, id externalidentity.GatewayInstanceID) {
+func awaitInactive(t *testing.T, host *Host, id externalidentity.GatewayInstanceID) {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
 	for {
 		host.mu.Lock()
-		_, exists := host.adapters[id]
+		managed := host.adapters[id]
+		inactive := managed == nil || !managed.active
 		host.mu.Unlock()
-		if !exists {
+		if inactive {
 			return
 		}
 		if time.Now().After(deadline) {
-			t.Fatal("timed out waiting for lifecycle exclusion")
+			t.Fatal("timed out waiting for delivery exclusion")
 		}
 		runtime.Gosched()
 	}
@@ -156,7 +157,7 @@ func TestDeliveryRacingUnregisterDrainsBeforeStop(t *testing.T) {
 	await(t, adapter.deliverEntered, "Deliver")
 	unregisterResult := make(chan error, 1)
 	go func() { unregisterResult <- host.Unregister(context.Background(), "gateway-one") }()
-	awaitRemoved(t, host, "gateway-one")
+	awaitInactive(t, host, "gateway-one")
 	if err := host.DeliverSessionEvent(context.Background(), owner, delivery); !errors.Is(err, ErrUnavailable) {
 		t.Fatalf("delivery after unregister began = %v", err)
 	}
@@ -204,7 +205,7 @@ func TestAdapterCallbacksReenterHostWithoutDeadlock(t *testing.T) {
 	secondary := &concurrencyAdapter{id: "gateway-two"}
 	callbackDone := make(chan struct{})
 	primary := &concurrencyAdapter{id: "gateway-one"}
-	primary.onDeliver = func() {
+	primary.onDeliver = func(context.Context) {
 		if err := host.Register(context.Background(), secondary); err != nil {
 			t.Errorf("reentrant Register: %v", err)
 		}
@@ -218,7 +219,7 @@ func TestAdapterCallbacksReenterHostWithoutDeadlock(t *testing.T) {
 		t.Fatal(err)
 	}
 	await(t, callbackDone, "reentrant callback")
-	primary.onStop = func() {
+	primary.onStop = func(context.Context) {
 		if err := host.DeliverSessionEvent(context.Background(), owner, delivery); !errors.Is(err, ErrUnavailable) {
 			t.Errorf("delivery during Stop error = %v", err)
 		}
@@ -244,6 +245,93 @@ func TestSlowAndFailingDeliveryDoesNotBlockHostState(t *testing.T) {
 	}
 	if adapter.stops.Load() != 1 || adapter.deliveries.Load() != 1 {
 		t.Fatalf("deliveries=%d stops=%d", adapter.deliveries.Load(), adapter.stops.Load())
+	}
+}
+
+func TestDeliverCanReentrantlyUnregister(t *testing.T) {
+	host := configuredHost(t)
+	stopped := make(chan struct{})
+	callbackResult := make(chan error, 1)
+	adapter := &concurrencyAdapter{id: "gateway-one"}
+	adapter.onDeliver = func(ctx context.Context) {
+		callbackResult <- host.Unregister(ctx, "gateway-one")
+	}
+	adapter.onStop = func(context.Context) { close(stopped) }
+	if err := host.Register(context.Background(), adapter); err != nil {
+		t.Fatal(err)
+	}
+	owner, delivery := testDelivery()
+	if err := host.DeliverSessionEvent(context.Background(), owner, delivery); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-callbackResult; err != nil {
+		t.Fatalf("reentrant Unregister: %v", err)
+	}
+	await(t, stopped, "asynchronous Stop")
+	if err := host.DeliverSessionEvent(context.Background(), owner, delivery); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("delivery after reentrant Unregister = %v", err)
+	}
+	if adapter.stops.Load() != 1 {
+		t.Fatalf("Stop calls = %d", adapter.stops.Load())
+	}
+}
+
+func TestDeliverCanReentrantlyShutdown(t *testing.T) {
+	host := configuredHost(t)
+	stopped := make(chan struct{})
+	callbackResult := make(chan error, 1)
+	adapter := &concurrencyAdapter{id: "gateway-one"}
+	adapter.onDeliver = func(ctx context.Context) { callbackResult <- host.Shutdown(ctx) }
+	adapter.onStop = func(context.Context) { close(stopped) }
+	if err := host.Register(context.Background(), adapter); err != nil {
+		t.Fatal(err)
+	}
+	owner, delivery := testDelivery()
+	if err := host.DeliverSessionEvent(context.Background(), owner, delivery); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-callbackResult; err != nil {
+		t.Fatalf("reentrant Shutdown: %v", err)
+	}
+	await(t, stopped, "shutdown Stop")
+	if adapter.stops.Load() != 1 {
+		t.Fatalf("Stop calls = %d", adapter.stops.Load())
+	}
+}
+
+func TestConcurrentExternalShutdownWaitsForReentrantShutdown(t *testing.T) {
+	host := configuredHost(t)
+	reentrantReturned := make(chan struct{})
+	releaseDelivery := make(chan struct{})
+	stopped := make(chan struct{})
+	adapter := &concurrencyAdapter{id: "gateway-one"}
+	adapter.onDeliver = func(ctx context.Context) {
+		if err := host.Shutdown(ctx); err != nil {
+			t.Errorf("reentrant Shutdown: %v", err)
+		}
+		close(reentrantReturned)
+		<-releaseDelivery
+	}
+	adapter.onStop = func(context.Context) { close(stopped) }
+	if err := host.Register(context.Background(), adapter); err != nil {
+		t.Fatal(err)
+	}
+	owner, delivery := testDelivery()
+	deliveryResult := make(chan error, 1)
+	go func() { deliveryResult <- host.DeliverSessionEvent(context.Background(), owner, delivery) }()
+	await(t, reentrantReturned, "reentrant Shutdown return")
+	externalResult := make(chan error, 1)
+	go func() { externalResult <- host.Shutdown(context.Background()) }()
+	close(releaseDelivery)
+	if err := <-deliveryResult; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-externalResult; err != nil {
+		t.Fatal(err)
+	}
+	await(t, stopped, "external shutdown Stop")
+	if adapter.stops.Load() != 1 {
+		t.Fatalf("Stop calls = %d", adapter.stops.Load())
 	}
 }
 
