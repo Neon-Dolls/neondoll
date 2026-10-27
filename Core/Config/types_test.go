@@ -51,11 +51,13 @@ func TestSaveLoad(t *testing.T) {
 	}
 }
 
-func TestLoadTelegramGatewayProductionConfiguration(t *testing.T) {
+func TestLoadGatewayExtensionProductionConfiguration(t *testing.T) {
 	cfg := Defaults()
-	cfg.Gateways.Telegram = []TelegramGatewayConfig{{
-		Enabled: true, InstanceID: "telegram-main", WASMPath: "gateways/telegram.wasm", TokenFile: "telegram-main.token",
-		APIHost: "https://api.telegram.org", AllowedUpdates: []string{"message"}, PollTimeout: 25,
+	cfg.Extensions = []ExtensionManifest{{
+		Version: 1, ExtensionID: "telegram", InstanceID: "telegram-main", Contract: "gateway",
+		ABI: 2, Enabled: true, Artifact: ExtensionArtifact{Path: "gateways/telegram.wasm", SHA256: strings.Repeat("a", 64)},
+		Requested: []string{"http"}, Granted: []string{"http"},
+		Gateway: &ExtensionGateway{Platform: "telegram", DollID: "doll", ConversationPrefix: "telegram/chat/"},
 	}}
 	path := filepath.Join(t.TempDir(), "neondoll.json")
 	if err := Save(path, &cfg); err != nil {
@@ -65,8 +67,8 @@ func TestLoadTelegramGatewayProductionConfiguration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(loaded.Gateways.Telegram) != 1 || loaded.Gateways.Telegram[0].InstanceID != "telegram-main" || loaded.Gateways.Telegram[0].TokenFile != "telegram-main.token" {
-		t.Fatalf("loaded Gateways = %#v", loaded.Gateways)
+	if len(loaded.Extensions) != 1 || loaded.Extensions[0].InstanceID != "telegram-main" {
+		t.Fatalf("loaded extensions = %#v", loaded.Extensions)
 	}
 	encoded, err := os.ReadFile(path)
 	if err != nil {
@@ -77,9 +79,9 @@ func TestLoadTelegramGatewayProductionConfiguration(t *testing.T) {
 	}
 }
 
-func TestLoadRejectsInvalidTelegramGatewayConfiguration(t *testing.T) {
+func TestLoadRejectsInvalidGatewayExtensionConfiguration(t *testing.T) {
 	cfg := Defaults()
-	cfg.Gateways.Telegram = []TelegramGatewayConfig{{Enabled: true, InstanceID: "telegram-main", WASMPath: "gateway.wasm", PollTimeout: 51}}
+	cfg.Extensions = []ExtensionManifest{{Version: 1, InstanceID: "telegram-main", Contract: "gateway"}}
 	path := filepath.Join(t.TempDir(), "neondoll.json")
 	if err := Save(path, &cfg); err != nil {
 		t.Fatal(err)

@@ -28,32 +28,39 @@ type RelayConfig struct {
 
 // Config holds the Doll's runtime configuration.
 type Config struct {
-	Core      CoreConfig      `json:"core"`
-	Console   ConsoleConfig   `json:"console"`
-	Inference InferenceConfig `json:"inference"`
-	Paths     PathConfig      `json:"paths"`
-	Link      LinkConfig      `json:"link"`
-	HTTP      HTTPConfig      `json:"http"`
-	Relay     RelayConfig     `json:"relay"`
-	Gateways  GatewayConfig   `json:"gateways,omitempty"`
+	Core       CoreConfig          `json:"core"`
+	Console    ConsoleConfig       `json:"console"`
+	Inference  InferenceConfig     `json:"inference"`
+	Paths      PathConfig          `json:"paths"`
+	Link       LinkConfig          `json:"link"`
+	HTTP       HTTPConfig          `json:"http"`
+	Relay      RelayConfig         `json:"relay"`
+	Extensions []ExtensionManifest `json:"extensions,omitempty"`
 }
 
-type GatewayConfig struct {
-	Telegram []TelegramGatewayConfig `json:"telegram,omitempty"`
+type ExtensionArtifact struct {
+	Path   string `json:"path"`
+	SHA256 string `json:"sha256"`
 }
-
-// TelegramGatewayConfig contains no credential material. TokenFile is
-// resolved under Paths.SecretsDir; the host-mediated WASM capability is the
-// only route by which the installed guest receives the token.
-type TelegramGatewayConfig struct {
-	Enabled        bool     `json:"enabled"`
-	InstanceID     string   `json:"instance_id"`
-	WASMPath       string   `json:"wasm_path"`
-	TokenFile      string   `json:"token_file"`
-	APIHost        string   `json:"api_host,omitempty"`
-	AllowedHosts   []string `json:"allowed_hosts,omitempty"`
-	PollTimeout    uint32   `json:"poll_timeout_seconds,omitempty"`
-	AllowedUpdates []string `json:"allowed_updates,omitempty"`
+type ExtensionGateway struct {
+	Platform           string `json:"platform"`
+	DollID             string `json:"doll_id"`
+	ConversationPrefix string `json:"conversation_prefix"`
+}
+type ExtensionManifest struct {
+	Version       int               `json:"version"`
+	ExtensionID   string            `json:"extension_id"`
+	InstanceID    string            `json:"instance_id"`
+	Contract      string            `json:"contract"`
+	ABI           int               `json:"abi_version"`
+	Enabled       bool              `json:"enabled"`
+	Artifact      ExtensionArtifact `json:"artifact"`
+	Configuration json.RawMessage   `json:"configuration,omitempty"`
+	Requested     []string          `json:"requested_capabilities,omitempty"`
+	Granted       []string          `json:"granted_capabilities,omitempty"`
+	HTTPAllowlist []string          `json:"http_allowlist,omitempty"`
+	Secrets       map[string]string `json:"secrets,omitempty"`
+	Gateway       *ExtensionGateway `json:"gateway,omitempty"`
 }
 
 // PulseConfig holds runtime configuration for the Pulse temporal subsystem.
@@ -196,18 +203,15 @@ func Load(path string) (*Config, error) {
 	if _, err := NewExternalIdentityResolver(cfg.Core); err != nil {
 		return nil, fmt.Errorf("config external identities: %w", err)
 	}
-	gatewayInstances := make(map[string]struct{}, len(cfg.Gateways.Telegram))
-	for index, gateway := range cfg.Gateways.Telegram {
-		if !gateway.Enabled {
-			continue
+	instances := map[string]bool{}
+	for _, manifest := range cfg.Extensions {
+		if manifest.Version != 1 || manifest.Contract != "gateway" || manifest.ABI != 2 || manifest.ExtensionID == "" || manifest.InstanceID == "" || manifest.Artifact.Path == "" || len(manifest.Artifact.SHA256) != 64 || manifest.Gateway == nil {
+			return nil, fmt.Errorf("config extensions: invalid manifest %q", manifest.InstanceID)
 		}
-		if gateway.InstanceID == "" || gateway.WASMPath == "" || gateway.TokenFile == "" || gateway.PollTimeout > 50 {
-			return nil, fmt.Errorf("config gateways: invalid telegram gateway %d", index)
+		if instances[manifest.InstanceID] {
+			return nil, fmt.Errorf("config extensions: duplicate instance %q", manifest.InstanceID)
 		}
-		if _, duplicate := gatewayInstances[gateway.InstanceID]; duplicate {
-			return nil, fmt.Errorf("config gateways: duplicate instance %q", gateway.InstanceID)
-		}
-		gatewayInstances[gateway.InstanceID] = struct{}{}
+		instances[manifest.InstanceID] = true
 	}
 	return &cfg, nil
 }
