@@ -75,19 +75,9 @@ type PlatformResponse struct {
 	Event     *events.Event `json:"event,omitempty"`
 }
 
-// SessionRoute is the transport routing information Core has authorized for
-// the Gateway instance to which an Ingress is bound. It deliberately carries
-// no participant identity or authority.
-type SessionRoute struct {
-	SessionID               session.ID `json:"session_id"`
-	ExternalConversationRef string     `json:"external_conversation_ref"`
-}
-
 // Ingress is bound by Host to one configured Gateway instance. Adapters never
 // pass their own instance ID or claim another Gateway's Session ownership.
 type Ingress interface {
-	ResolvePlatformSession(context.Context, string) (*SessionRoute, error)
-	SessionRoute(context.Context, session.ID) (*SessionRoute, error)
 	HandleLegacy(context.Context, session.ID, VerifiedSender, *events.Event) (*events.Event, error)
 	HandlePlatformMessage(context.Context, string, VerifiedSender, *events.Event) (*PlatformResponse, error)
 	HandleSessionEvent(context.Context, VerifiedSender, sessionevent.Event) (*permissionrequest.Request, error)
@@ -120,19 +110,19 @@ func (b *boundIngress) HandlePlatformMessage(ctx context.Context, conversationRe
 	if err != nil {
 		return nil, err
 	}
-	response, err := b.HandleLegacy(ctx, resolved.SessionID, sender, event)
+	response, err := b.HandleLegacy(ctx, resolved, sender, event)
 	if err != nil {
 		return nil, err
 	}
-	return &PlatformResponse{SessionID: resolved.SessionID, Event: response}, nil
+	return &PlatformResponse{SessionID: resolved, Event: response}, nil
 }
 
 // ResolvePlatformSession creates or resumes the active Session owned by this
 // authenticated Gateway instance. Adapters use it for structured inbound
 // events that must not be interpreted as model input.
-func (b *boundIngress) ResolvePlatformSession(ctx context.Context, conversationRef string) (*SessionRoute, error) {
+func (b *boundIngress) ResolvePlatformSession(ctx context.Context, conversationRef string) (session.ID, error) {
 	if b.sessions == nil || strings.TrimSpace(conversationRef) == "" {
-		return nil, ErrHostNotConfigured
+		return "", ErrHostNotConfigured
 	}
 	owner := session.Owner{Kind: session.OwnerGateway, InstanceID: string(b.gateway)}
 	resolved, err := b.sessions.Resume(ctx, session.ResumeRequest{Owner: owner, ExternalConversationRef: conversationRef})
@@ -143,26 +133,26 @@ func (b *boundIngress) ResolvePlatformSession(ctx context.Context, conversationR
 		}
 	}
 	if err != nil {
-		return nil, err
+		return "", err
 	}
-	return &SessionRoute{SessionID: resolved.ID, ExternalConversationRef: resolved.ExternalConversationRef}, nil
+	return resolved.ID, nil
 }
 
-// SessionRoute returns restart-safe transport routing only when the Session is
+// ExternalConversationRef returns restart-safe transport routing only when the Session is
 // active and still owned by this authenticated Gateway instance.
-func (b *boundIngress) SessionRoute(ctx context.Context, sessionID session.ID) (*SessionRoute, error) {
+func (b *boundIngress) ExternalConversationRef(ctx context.Context, sessionID session.ID) (string, error) {
 	if b.sessions == nil || strings.TrimSpace(string(sessionID)) == "" {
-		return nil, ErrHostNotConfigured
+		return "", ErrHostNotConfigured
 	}
 	resolved, err := b.sessions.Lookup(ctx, sessionID)
 	if err != nil {
-		return nil, err
+		return "", err
 	}
 	want := session.Owner{Kind: session.OwnerGateway, InstanceID: string(b.gateway)}
 	if resolved.Status != session.StatusActive || resolved.Owner != want || strings.TrimSpace(resolved.ExternalConversationRef) == "" {
-		return nil, ErrUnavailable
+		return "", ErrUnavailable
 	}
-	return &SessionRoute{SessionID: resolved.ID, ExternalConversationRef: resolved.ExternalConversationRef}, nil
+	return resolved.ExternalConversationRef, nil
 }
 
 func (b *boundIngress) HandleLegacy(ctx context.Context, sessionID session.ID, sender VerifiedSender, event *events.Event) (*events.Event, error) {

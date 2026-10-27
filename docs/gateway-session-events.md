@@ -49,11 +49,10 @@ PermissionBridge for the daemon lifetime. Creating a permission through
 `GatewayRuntime.CreatePermission` persists it before presentation. Approval or
 denial records the decision only and never resumes or executes an action.
 
-## Telegram follow-up boundary
+## Telegram production boundary
 
-The Telegram repository requires a separate follow-up adapter (not another
-Wazero engine) that implements `gateway.Adapter` around its existing
-`host.GatewayRuntime`:
+The Telegram repository implements `gateway.Adapter` around its existing
+`host.GatewayRuntime` (not another Wazero engine):
 
 1. `Start` starts the existing WASM runtime and retains the Core-bound
    `gateway.Ingress`.
@@ -67,3 +66,27 @@ Wazero engine) that implements `gateway.Adapter` around its existing
 
 No Telegram token, configuration projection, HTTP destination policy, or WASM
 linear-memory behavior moves into Core.
+
+`neondolld` installs configured Telegram instances into this managed host. A
+token is named by `token_file` and read from `paths.secrets_dir`; token values
+are never accepted inline. Relative WASM paths are read from `paths.data_dir`.
+
+```json
+{
+  "gateways": {
+    "telegram": [{
+      "enabled": true,
+      "instance_id": "telegram-main",
+      "wasm_path": "gateways/telegram.wasm",
+      "token_file": "telegram-main.token",
+      "api_host": "https://api.telegram.org",
+      "poll_timeout_seconds": 25,
+      "allowed_updates": ["message"]
+    }]
+  }
+}
+```
+
+The adapter obtains restart-safe conversation routing through its Core-bound
+Ingress. That lookup checks the active Session and its owning Gateway; it
+exposes neither participant authority nor an alternate Session selector.

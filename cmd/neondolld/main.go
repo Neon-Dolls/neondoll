@@ -7,10 +7,12 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -19,6 +21,7 @@ import (
 	"github.com/Neon-Dolls/neondoll/Core/Config"
 	"github.com/Neon-Dolls/neondoll/Core/DollMind"
 	"github.com/Neon-Dolls/neondoll/Core/Enrollment"
+	"github.com/Neon-Dolls/neondoll/Core/ExternalIdentity"
 	"github.com/Neon-Dolls/neondoll/Core/Inference"
 	"github.com/Neon-Dolls/neondoll/Core/Interaction"
 	"github.com/Neon-Dolls/neondoll/Core/Invitation"
@@ -34,6 +37,9 @@ import (
 	"github.com/Neon-Dolls/neondoll/DollState"
 	"github.com/Neon-Dolls/neondoll/pkg/logger"
 	"github.com/Neon-Dolls/neondoll/pkg/version"
+	telegramadapter "github.com/dividebyzero/neondoll-gateway-telegram/adapter"
+	telegramcontract "github.com/dividebyzero/neondoll-gateway-telegram/contract"
+	telegramhost "github.com/dividebyzero/neondoll-gateway-telegram/host"
 )
 
 // productionMindAPI wraps the persistence store, inference provider, and a
@@ -129,6 +135,56 @@ func loadProductionDoll(ctx context.Context, store persistence.Store, dollID str
 		return nil, err
 	}
 	return &created, nil
+}
+
+func registerConfiguredGateways(ctx context.Context, gatewayRuntime *runtime.GatewayRuntime, cfg *config.Config, dollID string) error {
+	for _, configured := range cfg.Gateways.Telegram {
+		if !configured.Enabled {
+			continue
+		}
+		wasmPath := configured.WASMPath
+		if !filepath.IsAbs(wasmPath) {
+			wasmPath = filepath.Join(cfg.Paths.DataDir, wasmPath)
+		}
+		wasm, err := os.ReadFile(wasmPath)
+		if err != nil {
+			return fmt.Errorf("telegram gateway %q WASM: %w", configured.InstanceID, err)
+		}
+		tokenPath := configured.TokenFile
+		if !filepath.IsAbs(tokenPath) {
+			tokenPath = filepath.Join(cfg.Paths.SecretsDir, tokenPath)
+		}
+		token, err := os.ReadFile(tokenPath)
+		if err != nil {
+			return fmt.Errorf("telegram gateway %q credential: %w", configured.InstanceID, err)
+		}
+		apiHost := configured.APIHost
+		if apiHost == "" {
+			apiHost = "https://api.telegram.org"
+		}
+		parsed, err := url.Parse(apiHost)
+		if err != nil || parsed.Scheme != "https" || parsed.Hostname() == "" {
+			return fmt.Errorf("telegram gateway %q: invalid API host", configured.InstanceID)
+		}
+		allowed := append([]string(nil), configured.AllowedHosts...)
+		allowed = append(allowed, parsed.Hostname())
+		guestConfig := telegramcontract.GatewayConfig{
+			Version:  telegramcontract.ConfigVersion,
+			Telegram: telegramcontract.TelegramConfig{BotToken: strings.TrimSpace(string(token)), Host: apiHost},
+			Polling:  telegramcontract.PollingConfig{TimeoutSeconds: configured.PollTimeout, AllowedUpdates: configured.AllowedUpdates},
+		}
+		guest := telegramhost.NewGatewayRuntime(allowed, telegramhost.WithConfig(guestConfig))
+		adapter, err := telegramadapter.New(telegramadapter.Config{
+			InstanceID: externalidentity.GatewayInstanceID(configured.InstanceID), DollID: dollID, WASM: wasm, Runtime: guest,
+		})
+		if err != nil {
+			return fmt.Errorf("telegram gateway %q: %w", configured.InstanceID, err)
+		}
+		if err := gatewayRuntime.Register(ctx, adapter); err != nil {
+			return fmt.Errorf("telegram gateway %q: %w", configured.InstanceID, err)
+		}
+	}
+	return nil
 }
 
 func main() {
@@ -336,6 +392,10 @@ func main() {
 		os.Exit(1)
 	}
 	defer gatewayRuntime.Shutdown(context.Background())
+	if err := registerConfiguredGateways(ctx, gatewayRuntime, cfg, dollState.Identity.DollID); err != nil {
+		log.Error("configured Gateway startup error", map[string]any{"error": err.Error()})
+		os.Exit(1)
+	}
 	log.Info("Gateway runtime ready")
 
 	// Create WebSocket transport.

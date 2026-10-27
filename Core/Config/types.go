@@ -35,6 +35,25 @@ type Config struct {
 	Link      LinkConfig      `json:"link"`
 	HTTP      HTTPConfig      `json:"http"`
 	Relay     RelayConfig     `json:"relay"`
+	Gateways  GatewayConfig   `json:"gateways,omitempty"`
+}
+
+type GatewayConfig struct {
+	Telegram []TelegramGatewayConfig `json:"telegram,omitempty"`
+}
+
+// TelegramGatewayConfig contains no credential material. TokenFile is
+// resolved under Paths.SecretsDir; the host-mediated WASM capability is the
+// only route by which the installed guest receives the token.
+type TelegramGatewayConfig struct {
+	Enabled        bool     `json:"enabled"`
+	InstanceID     string   `json:"instance_id"`
+	WASMPath       string   `json:"wasm_path"`
+	TokenFile      string   `json:"token_file"`
+	APIHost        string   `json:"api_host,omitempty"`
+	AllowedHosts   []string `json:"allowed_hosts,omitempty"`
+	PollTimeout    uint32   `json:"poll_timeout_seconds,omitempty"`
+	AllowedUpdates []string `json:"allowed_updates,omitempty"`
 }
 
 // PulseConfig holds runtime configuration for the Pulse temporal subsystem.
@@ -176,6 +195,19 @@ func Load(path string) (*Config, error) {
 	}
 	if _, err := NewExternalIdentityResolver(cfg.Core); err != nil {
 		return nil, fmt.Errorf("config external identities: %w", err)
+	}
+	gatewayInstances := make(map[string]struct{}, len(cfg.Gateways.Telegram))
+	for index, gateway := range cfg.Gateways.Telegram {
+		if !gateway.Enabled {
+			continue
+		}
+		if gateway.InstanceID == "" || gateway.WASMPath == "" || gateway.TokenFile == "" || gateway.PollTimeout > 50 {
+			return nil, fmt.Errorf("config gateways: invalid telegram gateway %d", index)
+		}
+		if _, duplicate := gatewayInstances[gateway.InstanceID]; duplicate {
+			return nil, fmt.Errorf("config gateways: duplicate instance %q", gateway.InstanceID)
+		}
+		gatewayInstances[gateway.InstanceID] = struct{}{}
 	}
 	return &cfg, nil
 }

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -47,6 +48,44 @@ func TestSaveLoad(t *testing.T) {
 	}
 	if loaded.Core.Profile != "testing" {
 		t.Errorf("expected profile 'testing', got %q", loaded.Core.Profile)
+	}
+}
+
+func TestLoadTelegramGatewayProductionConfiguration(t *testing.T) {
+	cfg := Defaults()
+	cfg.Gateways.Telegram = []TelegramGatewayConfig{{
+		Enabled: true, InstanceID: "telegram-main", WASMPath: "gateways/telegram.wasm", TokenFile: "telegram-main.token",
+		APIHost: "https://api.telegram.org", AllowedUpdates: []string{"message"}, PollTimeout: 25,
+	}}
+	path := filepath.Join(t.TempDir(), "neondoll.json")
+	if err := Save(path, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(loaded.Gateways.Telegram) != 1 || loaded.Gateways.Telegram[0].InstanceID != "telegram-main" || loaded.Gateways.Telegram[0].TokenFile != "telegram-main.token" {
+		t.Fatalf("loaded Gateways = %#v", loaded.Gateways)
+	}
+	encoded, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(encoded) == "" || strings.Contains(string(encoded), "bot_token") {
+		t.Fatalf("Gateway config exposed credential field: %s", encoded)
+	}
+}
+
+func TestLoadRejectsInvalidTelegramGatewayConfiguration(t *testing.T) {
+	cfg := Defaults()
+	cfg.Gateways.Telegram = []TelegramGatewayConfig{{Enabled: true, InstanceID: "telegram-main", WASMPath: "gateway.wasm", PollTimeout: 51}}
+	path := filepath.Join(t.TempDir(), "neondoll.json")
+	if err := Save(path, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path); err == nil {
+		t.Fatal("Load accepted invalid Telegram Gateway")
 	}
 }
 
