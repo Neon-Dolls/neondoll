@@ -290,6 +290,19 @@ func TestGuestCallOutboundIsAtomicAndRecovers(t *testing.T) {
 			t.Fatalf("successful output after %s = %+v", typ, output)
 		}
 	}
+
+	// Successful calls continue to publish exactly their own result. Leaving
+	// one undrained cannot duplicate it into the following successful call.
+	if err = runtime.HandleEvent(manifest.InstanceID, "test.success", json.RawMessage(`{}`)); err != nil {
+		t.Fatal(err)
+	}
+	if err = runtime.HandleEvent(manifest.InstanceID, "test.success", json.RawMessage(`{}`)); err != nil {
+		t.Fatal(err)
+	}
+	output := runtime.TakeOutbound(manifest.InstanceID)
+	if len(output) != 1 || string(output[0].Payload) != `{"event_type":"test.result","ok":true}` {
+		t.Fatalf("consecutive successful output = %+v", output)
+	}
 }
 
 func TestGatewayInboundPreservesMediaReferences(t *testing.T) {

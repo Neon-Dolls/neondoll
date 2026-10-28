@@ -87,6 +87,12 @@ func (r *WASMRuntime) installHost(ctx context.Context) error {
 		if i == nil {
 			return
 		}
+		i.outboundMu.Lock()
+		failed := i.outboundErr != nil
+		i.outboundMu.Unlock()
+		if failed {
+			return
+		}
 		if n == 0 || n > maxGuestEvent {
 			i.failOutbound(fmt.Errorf("extension: guest event %d bytes exceeds %d", n, maxGuestEvent))
 			return
@@ -98,6 +104,10 @@ func (r *WASMRuntime) installHost(ctx context.Context) error {
 		}
 		var payload json.RawMessage = append([]byte(nil), raw...)
 		i.outboundMu.Lock()
+		if i.outboundErr != nil {
+			i.outboundMu.Unlock()
+			return
+		}
 		if i.outboundCount >= maxGuestEventsPerCall {
 			i.outbound = nil
 			i.outboundErr = errors.New("extension: too many guest events in one call")
@@ -355,6 +365,10 @@ func (i *instanceRuntime) takeOutboundError() error {
 	i.outboundMu.Lock()
 	defer i.outboundMu.Unlock()
 	err := i.outboundErr
+	if err != nil {
+		i.outbound = nil
+		i.outboundCount = 0
+	}
 	i.outboundErr = nil
 	return err
 }

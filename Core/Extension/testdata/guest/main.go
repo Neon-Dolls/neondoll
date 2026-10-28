@@ -51,17 +51,20 @@ func handleEvent(ptr, size uint32) int32 {
 		outgoing(uint32(uintptr(unsafe.Pointer(&valid[0]))), uint32(len(valid)))
 		invalid := []byte(`{`)
 		outgoing(uint32(uintptr(unsafe.Pointer(&invalid[0]))), uint32(len(invalid)))
+		outgoing(uint32(uintptr(unsafe.Pointer(&valid[0]))), uint32(len(valid)))
 		return 0
 	}
 	if contains(data, `"type":"test.partial_oversized"`) {
 		outgoing(uint32(uintptr(unsafe.Pointer(&valid[0]))), uint32(len(valid)))
 		outgoing(uint32(uintptr(unsafe.Pointer(&buffer[0]))), uint32(len(buffer)+1))
+		outgoing(uint32(uintptr(unsafe.Pointer(&valid[0]))), uint32(len(valid)))
 		return 0
 	}
 	if contains(data, `"type":"test.partial_excessive"`) {
 		for j := 0; j < 65; j++ {
 			outgoing(uint32(uintptr(unsafe.Pointer(&valid[0]))), uint32(len(valid)))
 		}
+		outgoing(uint32(uintptr(unsafe.Pointer(&valid[0]))), uint32(len(valid)))
 		return 0
 	}
 	if contains(data, `"type":"test.success"`) {
