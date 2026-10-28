@@ -34,7 +34,7 @@ type ToolExecutor struct {
 }
 
 type PermissionResolutionNotifier interface {
-	NotifyPermissionResolution(context.Context, *permissionrequest.Request, permissionrequest.ContinuationOutcome) error
+	NotifyPermissionResolution(context.Context, string, *permissionrequest.Request, permissionrequest.ContinuationOutcome) error
 }
 
 type ToolExecutorOption func(*ToolExecutor)
@@ -205,6 +205,9 @@ func (executor *ToolExecutor) HandlePermissionResolution(ctx context.Context, re
 	}
 	claimed, err := executor.requests.ClaimContinuation(ctx, request.ID)
 	if errors.Is(err, permissionrequest.ErrContinuationClaimed) {
+		if claimed != nil && (claimed.ContinuationStatus == permissionrequest.ContinuationSucceeded || claimed.ContinuationStatus == permissionrequest.ContinuationFailed) {
+			return executor.notifyCompletedOutcome(ctx, claimed)
+		}
 		return nil
 	}
 	if err != nil {
@@ -216,10 +219,7 @@ func (executor *ToolExecutor) HandlePermissionResolution(ctx context.Context, re
 		if completeErr != nil {
 			return completeErr
 		}
-		if executor.notifier != nil {
-			return executor.notifier.NotifyPermissionResolution(ctx, completed, outcome)
-		}
-		return nil
+		return executor.notifyCompletedOutcome(ctx, completed)
 	}
 	arguments := make(map[string]any)
 	if len(claimed.Arguments) > 0 && json.Unmarshal(claimed.Arguments, &arguments) != nil {
@@ -244,13 +244,42 @@ func (executor *ToolExecutor) HandlePermissionResolution(ctx context.Context, re
 	if err != nil {
 		return err
 	}
-	if executor.notifier != nil {
-		return executor.notifier.NotifyPermissionResolution(ctx, completed, outcome)
+	return executor.notifyCompletedOutcome(ctx, completed)
+}
+
+const permissionNotificationLease = 5 * time.Minute
+
+func (executor *ToolExecutor) notifyCompletedOutcome(ctx context.Context, request *permissionrequest.Request) error {
+	if executor.notifier == nil {
+		return nil
 	}
-	return nil
+	var outcome permissionrequest.ContinuationOutcome
+	if err := json.Unmarshal(request.ContinuationResult, &outcome); err != nil {
+		return err
+	}
+	claimed, err := executor.requests.ClaimOutcomeNotification(ctx, request.ID, permissionNotificationLease)
+	if errors.Is(err, permissionrequest.ErrNotificationClaimed) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	err = executor.notifier.NotifyPermissionResolution(ctx, permissionrequest.OutcomeNotificationID(request.ID), claimed, outcome)
+	if err != nil {
+		if _, releaseErr := executor.requests.ReleaseOutcomeNotification(ctx, request.ID, err.Error()); releaseErr != nil {
+			return errors.Join(err, releaseErr)
+		}
+		return err
+	}
+	_, err = executor.requests.CompleteOutcomeNotification(ctx, request.ID)
+	return err
 }
 
 func (executor *ToolExecutor) ResumeReadyPermissions(ctx context.Context) error {
+	return executor.ReplayPermissionResolutions(ctx)
+}
+
+func (executor *ToolExecutor) ReplayPermissionResolutions(ctx context.Context) error {
 	if executor.requests == nil {
 		return permissionrequest.ErrInvalidRequest
 	}
@@ -260,6 +289,15 @@ func (executor *ToolExecutor) ResumeReadyPermissions(ctx context.Context) error 
 	}
 	for _, request := range ready {
 		if err := executor.HandlePermissionResolution(ctx, request); err != nil {
+			return err
+		}
+	}
+	pending, err := executor.requests.ListOutcomeNotifications(ctx)
+	if err != nil {
+		return err
+	}
+	for _, request := range pending {
+		if err := executor.notifyCompletedOutcome(ctx, request); err != nil {
 			return err
 		}
 	}

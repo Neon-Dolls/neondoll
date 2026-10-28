@@ -118,6 +118,75 @@ func (m *Manager) CompleteContinuation(ctx context.Context, id ID, outcome Conti
 	return clone(current), nil
 }
 
+func (m *Manager) ListOutcomeNotifications(ctx context.Context) ([]*Request, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	values, err := m.store.ListPermissionOutcomeNotifications(ctx, m.clock.Now().UTC())
+	if err != nil {
+		return nil, err
+	}
+	result := make([]*Request, len(values))
+	for index := range values {
+		result[index] = clone(values[index])
+	}
+	return result, nil
+}
+
+func (m *Manager) ClaimOutcomeNotification(ctx context.Context, id ID, lease time.Duration) (*Request, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if lease <= 0 {
+		return nil, ErrInvalidRequest
+	}
+	now := m.clock.Now().UTC()
+	changed, err := m.store.ClaimPermissionOutcomeNotification(ctx, id, now, now.Add(lease))
+	if err != nil {
+		return nil, err
+	}
+	current, loadErr := m.store.LoadPermissionRequest(ctx, id)
+	if loadErr != nil {
+		return nil, loadErr
+	}
+	if !changed {
+		return clone(current), ErrNotificationClaimed
+	}
+	return clone(current), nil
+}
+
+func (m *Manager) CompleteOutcomeNotification(ctx context.Context, id ID) (*Request, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	changed, err := m.store.CompletePermissionOutcomeNotification(ctx, id, m.clock.Now().UTC())
+	if err != nil {
+		return nil, err
+	}
+	current, loadErr := m.store.LoadPermissionRequest(ctx, id)
+	if loadErr != nil {
+		return nil, loadErr
+	}
+	if !changed && current.NotificationStatus != NotificationDelivered {
+		return nil, ErrInvalidTransition
+	}
+	return clone(current), nil
+}
+
+func (m *Manager) ReleaseOutcomeNotification(ctx context.Context, id ID, deliveryError string) (*Request, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	changed, err := m.store.ReleasePermissionOutcomeNotification(ctx, id, deliveryError, m.clock.Now().UTC())
+	if err != nil {
+		return nil, err
+	}
+	current, loadErr := m.store.LoadPermissionRequest(ctx, id)
+	if loadErr != nil {
+		return nil, loadErr
+	}
+	if !changed && current.NotificationStatus != NotificationPending {
+		return nil, ErrInvalidTransition
+	}
+	return clone(current), nil
+}
+
 func (m *Manager) Get(ctx context.Context, id ID) (*Request, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -293,6 +362,14 @@ func clone(value *Request) *Request {
 	if value.ContinuationUpdatedAt != nil {
 		updated := *value.ContinuationUpdatedAt
 		copy.ContinuationUpdatedAt = &updated
+	}
+	if value.NotificationLeaseUntil != nil {
+		lease := *value.NotificationLeaseUntil
+		copy.NotificationLeaseUntil = &lease
+	}
+	if value.NotificationDeliveredAt != nil {
+		delivered := *value.NotificationDeliveredAt
+		copy.NotificationDeliveredAt = &delivered
 	}
 	return &copy
 }

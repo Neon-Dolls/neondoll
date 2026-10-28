@@ -128,7 +128,7 @@ func TestPermissionResolutionStartsFreshBoundedCognition(t *testing.T) {
 		Capability: "test.echo", Operation: "run",
 	}
 	outcome := permissionrequest.ContinuationOutcome{Success: false, ErrorCode: "owner_denied", Error: "Owner denied the requested action"}
-	if err := scheduler.NotifyPermissionResolution(context.Background(), request, outcome); err != nil {
+	if err := scheduler.NotifyPermissionResolution(context.Background(), permissionrequest.OutcomeNotificationID(request.ID), request, outcome); err != nil {
 		t.Fatal(err)
 	}
 	if len(provider.requests) != 1 || provider.runIDs[0] == "" {

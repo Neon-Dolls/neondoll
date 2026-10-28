@@ -25,6 +25,7 @@ type GatewayRuntime struct {
 	events      *sessionevent.Service
 	permissions *permissionrequest.Manager
 	bridge      *sessionevent.PermissionBridge
+	resolution  permissionrequest.ResolutionHandler
 	replayMu    sync.Mutex
 	cancel      context.CancelFunc
 	done        chan struct{}
@@ -87,7 +88,7 @@ func NewGatewayRuntime(
 		return nil, err
 	}
 	replayCtx, cancel := context.WithCancel(context.Background())
-	runtime := &GatewayRuntime{host: host, events: events, permissions: permissions, bridge: bridge, cancel: cancel, done: make(chan struct{})}
+	runtime := &GatewayRuntime{host: host, events: events, permissions: permissions, bridge: bridge, resolution: configured.resolution, cancel: cancel, done: make(chan struct{})}
 	if err := host.Configure(func(id externalidentity.GatewayInstanceID) (*interaction.GatewayIngress, error) {
 		return services.GatewayIngress(id, router, bridge)
 	}, runtime.replay, gateway.WithSessionService(services.Sessions()), gateway.WithResponseEmitter(runtime.emitInteractionResponse)); err != nil {
@@ -95,27 +96,11 @@ func NewGatewayRuntime(
 		return nil, err
 	}
 	// Pending records are retained when no adapter is currently available.
-	_, err = events.ReplayPending(ctx)
-	if err != nil {
+	if err = runtime.replay(ctx); err != nil {
 		cancel()
 		return nil, err
 	}
 	go runtime.retryLoop(replayCtx)
-	if configured.resolution != nil {
-		ready, readyErr := permissions.ListReadyContinuations(ctx)
-		if readyErr != nil {
-			cancel()
-			<-runtime.done
-			return nil, readyErr
-		}
-		for _, request := range ready {
-			if readyErr = configured.resolution.HandlePermissionResolution(ctx, request); readyErr != nil {
-				cancel()
-				<-runtime.done
-				return nil, readyErr
-			}
-		}
-	}
 	return runtime, nil
 }
 
@@ -133,6 +118,20 @@ func (r *GatewayRuntime) replay(ctx context.Context) error {
 		delivery, presentErr := r.bridge.Present(ctx, request.ID)
 		if presentErr != nil && delivery == nil && !errors.Is(presentErr, sessionevent.ErrRecipientUnavailable) {
 			return presentErr
+		}
+	}
+	if replayer, ok := r.resolution.(permissionrequest.ResolutionReplayer); ok {
+		return replayer.ReplayPermissionResolutions(ctx)
+	}
+	if r.resolution != nil {
+		ready, err := r.permissions.ListReadyContinuations(ctx)
+		if err != nil {
+			return err
+		}
+		for _, request := range ready {
+			if err := r.resolution.HandlePermissionResolution(ctx, request); err != nil {
+				return err
+			}
 		}
 	}
 	return nil

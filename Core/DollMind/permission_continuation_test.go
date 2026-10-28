@@ -3,6 +3,7 @@ package dollmind
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -40,14 +41,75 @@ type permissionNotifier struct {
 	mu       sync.Mutex
 	requests []permissionrequest.ID
 	outcomes []permissionrequest.ContinuationOutcome
+	failures int
 }
 
-func (notifier *permissionNotifier) NotifyPermissionResolution(_ context.Context, request *permissionrequest.Request, outcome permissionrequest.ContinuationOutcome) error {
+func (notifier *permissionNotifier) NotifyPermissionResolution(_ context.Context, _ string, request *permissionrequest.Request, outcome permissionrequest.ContinuationOutcome) error {
 	notifier.mu.Lock()
 	defer notifier.mu.Unlock()
+	if notifier.failures > 0 {
+		notifier.failures--
+		return errors.New("cognition unavailable")
+	}
 	notifier.requests = append(notifier.requests, request.ID)
 	notifier.outcomes = append(notifier.outcomes, outcome)
 	return nil
+}
+
+func TestPermissionOutcomeNotificationRetriesWithoutRepeatingExecution(t *testing.T) {
+	store, err := persistence.NewStore(filepath.Join(t.TempDir(), "core.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	policy := &permissionPolicy{decision: actionpolicy.DecisionRequireApproval}
+	requests := permissionrequest.New(store.(permissionrequest.Store), policy)
+	candidate := &resolverBody{id: "once"}
+	registry := body.NewRegistry()
+	if err = registry.Register(candidate); err != nil {
+		t.Fatal(err)
+	}
+	executor := NewToolExecutor(registry, body.NewGuard(registry, &recordingAuthority{results: map[body.BodyID]body.AuthorityResult{"once": {Decision: body.AuthorityAllow}}}), policy, "doll", WithPermissionRequests(requests, "owner", time.Hour))
+	notifier := &permissionNotifier{failures: 1}
+	executor.SetPermissionResolutionNotifier(notifier)
+	result := executor.ExecuteCall(context.Background(), inference.ToolCall{ID: "call"}, echoTool(""))
+	id := permissionrequest.ID(result.Error.PermissionRequestID)
+	resolved, err := requests.Approve(context.Background(), id, "owner")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = executor.HandlePermissionResolution(context.Background(), resolved); err == nil {
+		t.Fatal("expected notification failure")
+	}
+	if candidate.executions != 1 {
+		t.Fatalf("executions=%d", candidate.executions)
+	}
+	stored, err := requests.Get(context.Background(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.ContinuationStatus != permissionrequest.ContinuationSucceeded || stored.NotificationStatus != permissionrequest.NotificationPending {
+		t.Fatalf("stored=%#v", stored)
+	}
+	if err = executor.ReplayPermissionResolutions(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if candidate.executions != 1 {
+		t.Fatalf("notification retry repeated execution: %d", candidate.executions)
+	}
+	stored, err = requests.Get(context.Background(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.NotificationStatus != permissionrequest.NotificationDelivered || len(notifier.outcomes) != 1 {
+		t.Fatalf("stored=%#v outcomes=%#v", stored, notifier.outcomes)
+	}
+	if err = executor.HandlePermissionResolution(context.Background(), resolved); err != nil {
+		t.Fatal(err)
+	}
+	if candidate.executions != 1 || len(notifier.outcomes) != 1 {
+		t.Fatalf("replay executions=%d outcomes=%d", candidate.executions, len(notifier.outcomes))
+	}
 }
 
 func TestPulseAutonomousActionCreatesDurableApprovalAndResumesAfterRestart(t *testing.T) {

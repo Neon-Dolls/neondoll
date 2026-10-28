@@ -14,17 +14,19 @@ import (
 // NotifyPermissionResolution starts a fresh ephemeral cognition run with the
 // durable decision and action outcome as evidence. The original Cognitive Run
 // is intentionally not persisted or resumed.
-func (s *Scheduler) NotifyPermissionResolution(ctx context.Context, request *permissionrequest.Request, outcome permissionrequest.ContinuationOutcome) error {
+func (s *Scheduler) NotifyPermissionResolution(ctx context.Context, notificationID string, request *permissionrequest.Request, outcome permissionrequest.ContinuationOutcome) error {
 	if request == nil {
 		return permissionrequest.ErrInvalidRequest
 	}
 	encoded, err := json.Marshal(struct {
-		RequestID  permissionrequest.ID                  `json:"request_id"`
-		Decision   permissionrequest.Status              `json:"decision"`
-		Capability string                                `json:"capability"`
-		Operation  string                                `json:"operation"`
-		Outcome    permissionrequest.ContinuationOutcome `json:"outcome"`
-	}{request.ID, request.Status, request.Capability, request.Operation, outcome})
+		NotificationID string                                `json:"notification_id"`
+		RequestID      permissionrequest.ID                  `json:"request_id"`
+		Decision       permissionrequest.Status              `json:"decision"`
+		Capability     string                                `json:"capability"`
+		Operation      string                                `json:"operation"`
+		Correlation    permissionrequest.Correlation         `json:"correlation"`
+		Outcome        permissionrequest.ContinuationOutcome `json:"outcome"`
+	}{notificationID, request.ID, request.Status, request.Capability, request.Operation, request.Correlation, outcome})
 	if err != nil {
 		return err
 	}

@@ -381,7 +381,12 @@ func createSchema(db *sql.DB) error {
 			correlation_json TEXT NOT NULL DEFAULT '{}',
 			continuation_status TEXT NOT NULL DEFAULT '',
 			continuation_result_json TEXT NOT NULL DEFAULT '',
-			continuation_updated_at TEXT
+			continuation_updated_at TEXT,
+			notification_status TEXT NOT NULL DEFAULT '',
+			notification_lease_until TEXT,
+			notification_delivered_at TEXT,
+			notification_attempts INTEGER NOT NULL DEFAULT 0,
+			notification_error TEXT NOT NULL DEFAULT ''
 		);
 		CREATE INDEX IF NOT EXISTS permission_requests_pending
 			ON permission_requests(status, created_at, request_id);
@@ -396,6 +401,11 @@ func createSchema(db *sql.DB) error {
 		{"continuation_status", "ALTER TABLE permission_requests ADD COLUMN continuation_status TEXT NOT NULL DEFAULT ''"},
 		{"continuation_result_json", "ALTER TABLE permission_requests ADD COLUMN continuation_result_json TEXT NOT NULL DEFAULT ''"},
 		{"continuation_updated_at", "ALTER TABLE permission_requests ADD COLUMN continuation_updated_at TEXT"},
+		{"notification_status", "ALTER TABLE permission_requests ADD COLUMN notification_status TEXT NOT NULL DEFAULT ''"},
+		{"notification_lease_until", "ALTER TABLE permission_requests ADD COLUMN notification_lease_until TEXT"},
+		{"notification_delivered_at", "ALTER TABLE permission_requests ADD COLUMN notification_delivered_at TEXT"},
+		{"notification_attempts", "ALTER TABLE permission_requests ADD COLUMN notification_attempts INTEGER NOT NULL DEFAULT 0"},
+		{"notification_error", "ALTER TABLE permission_requests ADD COLUMN notification_error TEXT NOT NULL DEFAULT ''"},
 	}
 	for _, column := range permissionColumns {
 		exists, inspectErr := columnExists(db, "permission_requests", column.name)
