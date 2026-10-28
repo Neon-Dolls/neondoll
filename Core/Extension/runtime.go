@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -20,8 +21,13 @@ import (
 	"github.com/tetratelabs/wazero/imports/wasi_snapshot_preview1"
 )
 
-const maxGuestEvent = 4096
-const maxHTTPResponse = 4 << 20
+const (
+	minGuestEventBuffer   = 4 << 10
+	maxGuestEvent         = 64 << 10
+	maxGuestEventsPerCall = 64
+	maxExtensionState     = 4 << 20
+	maxHTTPResponse       = 4 << 20
+)
 
 type GuestMessage struct {
 	Version uint32          `json:"v"`
@@ -30,15 +36,18 @@ type GuestMessage struct {
 }
 
 type instanceRuntime struct {
-	manifest   Manifest
-	module     api.Module
-	ctx        context.Context
-	cancel     context.CancelFunc
-	eventPtr   uint32
-	callMu     sync.Mutex
-	outboundMu sync.Mutex
-	outbound   []GuestMessage
-	secrets    map[string][]byte
+	manifest      Manifest
+	module        api.Module
+	ctx           context.Context
+	cancel        context.CancelFunc
+	eventPtr      uint32
+	eventSize     uint32
+	callMu        sync.Mutex
+	outboundMu    sync.Mutex
+	outbound      []GuestMessage
+	outboundErr   error
+	outboundCount int
+	secrets       map[string][]byte
 }
 
 type WASMRuntime struct {
@@ -78,13 +87,35 @@ func (r *WASMRuntime) installHost(ctx context.Context) error {
 		if i == nil {
 			return
 		}
+		i.outboundMu.Lock()
+		failed := i.outboundErr != nil
+		i.outboundMu.Unlock()
+		if failed {
+			return
+		}
+		if n == 0 || n > maxGuestEvent {
+			i.failOutbound(fmt.Errorf("extension: guest event %d bytes exceeds %d", n, maxGuestEvent))
+			return
+		}
 		raw, ok := m.Memory().Read(p, n)
-		if !ok {
+		if !ok || !json.Valid(raw) {
+			i.failOutbound(errors.New("extension: malformed guest event"))
 			return
 		}
 		var payload json.RawMessage = append([]byte(nil), raw...)
 		i.outboundMu.Lock()
+		if i.outboundErr != nil {
+			i.outboundMu.Unlock()
+			return
+		}
+		if i.outboundCount >= maxGuestEventsPerCall {
+			i.outbound = nil
+			i.outboundErr = errors.New("extension: too many guest events in one call")
+			i.outboundMu.Unlock()
+			return
+		}
 		i.outbound = append(i.outbound, GuestMessage{Version: 0, Type: "outgoing", Payload: payload})
+		i.outboundCount++
 		i.outboundMu.Unlock()
 	}).Export("outgoing")
 	b.NewFunctionBuilder().WithFunc(func(_ context.Context, m api.Module, p, max uint32) int32 {
@@ -192,11 +223,12 @@ func (r *WASMRuntime) Load(ctx context.Context, manifest Manifest, dataRoot stri
 	}
 	bp, e := buf.Call(ictx)
 	bs, se := size.Call(ictx)
-	if e != nil || se != nil || len(bp) == 0 || len(bs) == 0 || bs[0] < maxGuestEvent {
+	if e != nil || se != nil || len(bp) == 0 || len(bs) == 0 || bs[0] < minGuestEventBuffer {
 		_ = r.Unload(context.Background(), manifest.InstanceID)
 		return ErrUnsupportedABI
 	}
 	inst.eventPtr = uint32(bp[0])
+	inst.eventSize = uint32(bs[0])
 	_, err = init.Call(ictx)
 	if err != nil {
 		_ = r.Unload(context.Background(), manifest.InstanceID)
@@ -246,33 +278,49 @@ func (r *WASMRuntime) Poll(id string) error {
 	}
 	i.callMu.Lock()
 	defer i.callMu.Unlock()
+	i.beginOutboundCall()
 	fn := i.module.ExportedFunction("gateway_poll")
 	if fn == nil {
+		i.discardOutboundCall()
 		return ErrUnsupportedABI
 	}
 	_, err := fn.Call(i.ctx)
-	return err
+	if err != nil {
+		i.discardOutboundCall()
+		return err
+	}
+	return i.takeOutboundError()
 }
 func (r *WASMRuntime) HandleEvent(id, typ string, payload []byte) error {
 	i := r.get(id)
 	if i == nil {
 		return ErrInvalidManifest
 	}
-	event, _ := json.Marshal(GuestMessage{Version: 0, Type: typ, Payload: payload})
-	if len(event) > maxGuestEvent {
-		return ErrInvalidManifest
+	event, err := json.Marshal(GuestMessage{Version: 0, Type: typ, Payload: payload})
+	if err != nil {
+		return fmt.Errorf("extension: malformed host event: %w", err)
+	}
+	if len(event) > maxGuestEvent || uint32(len(event)) > i.eventSize {
+		return fmt.Errorf("extension: host event %d bytes exceeds guest buffer %d", len(event), min(uint32(maxGuestEvent), i.eventSize))
 	}
 	i.callMu.Lock()
 	defer i.callMu.Unlock()
+	i.beginOutboundCall()
 	if !i.module.Memory().Write(i.eventPtr, event) {
+		i.discardOutboundCall()
 		return ErrInvalidManifest
 	}
 	fn := i.module.ExportedFunction("gateway_handle_event")
 	if fn == nil {
+		i.discardOutboundCall()
 		return ErrUnsupportedABI
 	}
-	_, err := fn.Call(i.ctx, uint64(i.eventPtr), uint64(len(event)))
-	return err
+	_, err = fn.Call(i.ctx, uint64(i.eventPtr), uint64(len(event)))
+	if err != nil {
+		i.discardOutboundCall()
+		return err
+	}
+	return i.takeOutboundError()
 }
 func (r *WASMRuntime) TakeOutbound(id string) []GuestMessage {
 	i := r.get(id)
@@ -284,6 +332,45 @@ func (r *WASMRuntime) TakeOutbound(id string) []GuestMessage {
 	out := append([]GuestMessage(nil), i.outbound...)
 	i.outbound = nil
 	return out
+}
+
+func (i *instanceRuntime) failOutbound(err error) {
+	i.outboundMu.Lock()
+	i.outbound = nil
+	if i.outboundErr == nil {
+		i.outboundErr = err
+	}
+	i.outboundMu.Unlock()
+}
+
+// beginOutboundCall makes guest emissions transactional. Undrained output from
+// an earlier call cannot be observed after a later invocation starts.
+func (i *instanceRuntime) beginOutboundCall() {
+	i.outboundMu.Lock()
+	i.outbound = nil
+	i.outboundErr = nil
+	i.outboundCount = 0
+	i.outboundMu.Unlock()
+}
+
+func (i *instanceRuntime) discardOutboundCall() {
+	i.outboundMu.Lock()
+	i.outbound = nil
+	i.outboundErr = nil
+	i.outboundCount = 0
+	i.outboundMu.Unlock()
+}
+
+func (i *instanceRuntime) takeOutboundError() error {
+	i.outboundMu.Lock()
+	defer i.outboundMu.Unlock()
+	err := i.outboundErr
+	if err != nil {
+		i.outbound = nil
+		i.outboundCount = 0
+	}
+	i.outboundErr = nil
+	return err
 }
 func (r *WASMRuntime) get(id string) *instanceRuntime {
 	r.mu.Lock()
@@ -393,7 +480,7 @@ func (r *WASMRuntime) stateGet(ctx context.Context, m api.Module, kp, kn, vp, vm
 }
 func (r *WASMRuntime) statePut(ctx context.Context, m api.Module, kp, kn, vp, vn uint32) int32 {
 	i := r.instance(m)
-	if i == nil || !i.manifest.GrantedCapability(CapabilityState) {
+	if i == nil || !i.manifest.GrantedCapability(CapabilityState) || vn > maxExtensionState {
 		return -1
 	}
 	key, ok := m.Memory().Read(kp, kn)

@@ -32,6 +32,24 @@ type MessagePayload struct {
 	ChannelID string `json:"channel_id,omitempty"`
 	UserID    string `json:"user_id,omitempty"`
 	UserName  string `json:"user_name,omitempty"`
+	// Media contains small provider references only. Binary content remains
+	// outside the Gateway event envelope and requires a separately authorized
+	// retrieval capability.
+	Media []MediaReference `json:"media,omitempty"`
+}
+
+// MediaReference describes provider-hosted media without embedding it in the
+// interaction event. MediaID is provider-scoped and is not Core authority.
+type MediaReference struct {
+	Type           string `json:"type"`
+	MediaID        string `json:"media_id"`
+	UniqueID       string `json:"unique_id,omitempty"`
+	Filename       string `json:"filename,omitempty"`
+	MIMEType       string `json:"mime_type,omitempty"`
+	SizeBytes      int64  `json:"size_bytes,omitempty"`
+	Caption        string `json:"caption,omitempty"`
+	MessageID      string `json:"message_id,omitempty"`
+	ConversationID string `json:"conversation_id,omitempty"`
 }
 
 // CommandPayload for slash commands and directives.
