@@ -258,6 +258,40 @@ func TestRuntimeSupportsBoundedStructuredEventsBeyondLegacyBuffer(t *testing.T) 
 	}
 }
 
+func TestGuestCallOutboundIsAtomicAndRecovers(t *testing.T) {
+	ctx := context.Background()
+	runtime, err := NewWASMRuntime(ctx, NewFileStateStore(t.TempDir()), t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close(ctx)
+	manifest := testManifest(t, "atomic-output")
+	if err = runtime.Load(ctx, manifest, findRepoRoot(t)); err != nil {
+		t.Fatal(err)
+	}
+
+	// Leave one successful result undrained. The failed call must discard both
+	// that stale result and its own partial output.
+	if err = runtime.HandleEvent(manifest.InstanceID, "test.success", json.RawMessage(`{}`)); err != nil {
+		t.Fatal(err)
+	}
+	for _, typ := range []string{"test.partial_invalid", "test.partial_oversized", "test.partial_excessive"} {
+		if err = runtime.HandleEvent(manifest.InstanceID, typ, json.RawMessage(`{}`)); err == nil {
+			t.Fatalf("%s succeeded", typ)
+		}
+		if output := runtime.TakeOutbound(manifest.InstanceID); len(output) != 0 {
+			t.Fatalf("%s leaked %d partial or stale events", typ, len(output))
+		}
+		if err = runtime.HandleEvent(manifest.InstanceID, "test.success", json.RawMessage(`{}`)); err != nil {
+			t.Fatalf("successful call after %s: %v", typ, err)
+		}
+		output := runtime.TakeOutbound(manifest.InstanceID)
+		if len(output) != 1 || string(output[0].Payload) != `{"event_type":"test.result","ok":true}` {
+			t.Fatalf("successful output after %s = %+v", typ, output)
+		}
+	}
+}
+
 func TestGatewayInboundPreservesMediaReferences(t *testing.T) {
 	ingress := &testIngress{}
 	manifest := testManifest(t, "media")

@@ -268,13 +268,15 @@ func (r *WASMRuntime) Poll(id string) error {
 	}
 	i.callMu.Lock()
 	defer i.callMu.Unlock()
-	i.clearOutboundError()
+	i.beginOutboundCall()
 	fn := i.module.ExportedFunction("gateway_poll")
 	if fn == nil {
+		i.discardOutboundCall()
 		return ErrUnsupportedABI
 	}
 	_, err := fn.Call(i.ctx)
 	if err != nil {
+		i.discardOutboundCall()
 		return err
 	}
 	return i.takeOutboundError()
@@ -293,16 +295,19 @@ func (r *WASMRuntime) HandleEvent(id, typ string, payload []byte) error {
 	}
 	i.callMu.Lock()
 	defer i.callMu.Unlock()
-	i.clearOutboundError()
+	i.beginOutboundCall()
 	if !i.module.Memory().Write(i.eventPtr, event) {
+		i.discardOutboundCall()
 		return ErrInvalidManifest
 	}
 	fn := i.module.ExportedFunction("gateway_handle_event")
 	if fn == nil {
+		i.discardOutboundCall()
 		return ErrUnsupportedABI
 	}
 	_, err = fn.Call(i.ctx, uint64(i.eventPtr), uint64(len(event)))
 	if err != nil {
+		i.discardOutboundCall()
 		return err
 	}
 	return i.takeOutboundError()
@@ -328,8 +333,19 @@ func (i *instanceRuntime) failOutbound(err error) {
 	i.outboundMu.Unlock()
 }
 
-func (i *instanceRuntime) clearOutboundError() {
+// beginOutboundCall makes guest emissions transactional. Undrained output from
+// an earlier call cannot be observed after a later invocation starts.
+func (i *instanceRuntime) beginOutboundCall() {
 	i.outboundMu.Lock()
+	i.outbound = nil
+	i.outboundErr = nil
+	i.outboundCount = 0
+	i.outboundMu.Unlock()
+}
+
+func (i *instanceRuntime) discardOutboundCall() {
+	i.outboundMu.Lock()
+	i.outbound = nil
 	i.outboundErr = nil
 	i.outboundCount = 0
 	i.outboundMu.Unlock()

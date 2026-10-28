@@ -90,7 +90,9 @@ supports envelopes up to 64 KiB when the guest advertises sufficient space.
 Guest-to-host events are likewise limited to 64 KiB and 64 events per guest
 call. Extension state values are limited to 4 MiB and mediated HTTP responses
 to 4 MiB. These byte limits are checked before copying; events are rejected in
-full and are never truncated.
+full and are never truncated. Each guest call owns one atomic outbound result
+set: starting a call clears undrained prior output, and any malformed,
+oversized, excessive, or trapped emission discards every result from that call.
 
 `telegram_token` is an ABI compatibility name for the installation-scoped
 secret of that name, not Telegram-specific authority in Core. `session.route`
