@@ -7,6 +7,7 @@ import (
 	"github.com/Neon-Dolls/neondoll/Core/CognitiveExecution"
 	"github.com/Neon-Dolls/neondoll/Core/Config"
 	"github.com/Neon-Dolls/neondoll/Core/Inference"
+	"github.com/Neon-Dolls/neondoll/Core/Session"
 )
 
 type scriptedProvider struct {
@@ -21,7 +22,14 @@ func (provider *scriptedProvider) Infer(_ context.Context, request inference.Req
 }
 
 type recordingTools struct {
-	calls []inference.ToolCall
+	calls        []inference.ToolCall
+	correlations []cognitiveexecution.ToolCorrelation
+}
+
+func (tools *recordingTools) ExecuteCorrelatedCall(_ context.Context, correlation cognitiveexecution.ToolCorrelation, call inference.ToolCall, _ *inference.Tool) inference.ToolResult {
+	tools.correlations = append(tools.correlations, correlation)
+	tools.calls = append(tools.calls, call)
+	return inference.ToolResult{ToolCallID: call.ID, ExecutionID: "exec_" + call.ID, Status: inference.ToolResultSuccess}
 }
 
 func (tools *recordingTools) Tools() []inference.Tool {
@@ -47,7 +55,7 @@ func TestExecuteRebuildsContextAndPinsModelAcrossToolIterations(t *testing.T) {
 	var builds []cognitiveexecution.ContextState
 	result, err := cognitiveexecution.Execute(context.Background(), cognitiveexecution.Request{
 		Provider: provider, ModelConfiguration: model, Purpose: inference.PurposePlan,
-		Temperature: 0.3, ToolExecutor: tools,
+		Temperature: 0.3, ToolExecutor: tools, SessionID: "session-1", TurnID: "turn-1", CognitiveRunID: "run-1",
 		BuildContext: func(_ context.Context, state cognitiveexecution.ContextState) ([]inference.Message, error) {
 			builds = append(builds, state)
 			return []inference.Message{{Role: "system", Content: "bounded context"}}, nil
@@ -75,5 +83,9 @@ func TestExecuteRebuildsContextAndPinsModelAcrossToolIterations(t *testing.T) {
 	}
 	if tools.calls[0].ID != "call-one" || tools.calls[1].ID != "call-two" {
 		t.Fatalf("tool correlation = %+v", tools.calls)
+	}
+	wantCorrelation := cognitiveexecution.ToolCorrelation{SessionID: session.ID("session-1"), TurnID: session.TurnID("turn-1"), CognitiveRunID: "run-1"}
+	if len(tools.correlations) != 2 || tools.correlations[0] != wantCorrelation || tools.correlations[1] != wantCorrelation {
+		t.Fatalf("execution correlations=%+v", tools.correlations)
 	}
 }

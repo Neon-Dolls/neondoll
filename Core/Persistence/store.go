@@ -360,8 +360,8 @@ func createSchema(db *sql.DB) error {
 		return fmt.Errorf("interaction_session_event_deliveries table: %v", err)
 	}
 
-	// Core 5 permission requests are Core-owned durable decisions. Approval is
-	// deliberately separate from action execution.
+	// Core 5 permission requests are Core-owned durable decisions. Continuation
+	// state is stored on the same record; it is not a second action registry.
 	_, err = db.Exec(`
 		CREATE TABLE IF NOT EXISTS permission_requests (
 			request_id TEXT PRIMARY KEY,
@@ -378,13 +378,45 @@ func createSchema(db *sql.DB) error {
 			expires_at TEXT NOT NULL,
 			resolved_at TEXT,
 			resolving_authority TEXT NOT NULL DEFAULT '',
-			correlation_json TEXT NOT NULL DEFAULT '{}'
+			correlation_json TEXT NOT NULL DEFAULT '{}',
+			continuation_status TEXT NOT NULL DEFAULT '',
+			continuation_result_json TEXT NOT NULL DEFAULT '',
+			continuation_updated_at TEXT,
+			notification_status TEXT NOT NULL DEFAULT '',
+			notification_lease_until TEXT,
+			notification_delivered_at TEXT,
+			notification_attempts INTEGER NOT NULL DEFAULT 0,
+			notification_error TEXT NOT NULL DEFAULT ''
 		);
 		CREATE INDEX IF NOT EXISTS permission_requests_pending
 			ON permission_requests(status, created_at, request_id);
 	`)
 	if err != nil {
 		return fmt.Errorf("permission_requests table: %v", err)
+	}
+	permissionColumns := []struct {
+		name string
+		sql  string
+	}{
+		{"continuation_status", "ALTER TABLE permission_requests ADD COLUMN continuation_status TEXT NOT NULL DEFAULT ''"},
+		{"continuation_result_json", "ALTER TABLE permission_requests ADD COLUMN continuation_result_json TEXT NOT NULL DEFAULT ''"},
+		{"continuation_updated_at", "ALTER TABLE permission_requests ADD COLUMN continuation_updated_at TEXT"},
+		{"notification_status", "ALTER TABLE permission_requests ADD COLUMN notification_status TEXT NOT NULL DEFAULT ''"},
+		{"notification_lease_until", "ALTER TABLE permission_requests ADD COLUMN notification_lease_until TEXT"},
+		{"notification_delivered_at", "ALTER TABLE permission_requests ADD COLUMN notification_delivered_at TEXT"},
+		{"notification_attempts", "ALTER TABLE permission_requests ADD COLUMN notification_attempts INTEGER NOT NULL DEFAULT 0"},
+		{"notification_error", "ALTER TABLE permission_requests ADD COLUMN notification_error TEXT NOT NULL DEFAULT ''"},
+	}
+	for _, column := range permissionColumns {
+		exists, inspectErr := columnExists(db, "permission_requests", column.name)
+		if inspectErr != nil {
+			return inspectErr
+		}
+		if !exists {
+			if _, alterErr := db.Exec(column.sql); alterErr != nil {
+				return fmt.Errorf("permission_requests migration %s: %v", column.name, alterErr)
+			}
+		}
 	}
 	_, err = db.Exec(`
 		CREATE TABLE IF NOT EXISTS permission_request_presentations (

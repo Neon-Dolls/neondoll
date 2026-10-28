@@ -118,6 +118,11 @@ type ToolError struct {
 
 	// Message is a human-readable description of the error.
 	Message string `json:"message"`
+
+	// PermissionRequestID correlates an approval-required failure with the
+	// durable Core permission lifecycle. Providers must not treat it as proof
+	// of approval.
+	PermissionRequestID string `json:"permission_request_id,omitempty"`
 }
 
 // ── Request and Response ─────────────────────────────────────────────────

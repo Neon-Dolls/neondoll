@@ -25,9 +25,25 @@ type GatewayRuntime struct {
 	events      *sessionevent.Service
 	permissions *permissionrequest.Manager
 	bridge      *sessionevent.PermissionBridge
+	resolution  permissionrequest.ResolutionHandler
 	replayMu    sync.Mutex
 	cancel      context.CancelFunc
 	done        chan struct{}
+}
+
+type GatewayRuntimeOption func(*gatewayRuntimeOptions)
+
+type gatewayRuntimeOptions struct {
+	permissions *permissionrequest.Manager
+	resolution  permissionrequest.ResolutionHandler
+}
+
+func WithPermissionManager(manager *permissionrequest.Manager) GatewayRuntimeOption {
+	return func(options *gatewayRuntimeOptions) { options.permissions = manager }
+}
+
+func WithPermissionResolutionHandler(handler permissionrequest.ResolutionHandler) GatewayRuntimeOption {
+	return func(options *gatewayRuntimeOptions) { options.resolution = handler }
 }
 
 func NewGatewayRuntime(
@@ -38,6 +54,7 @@ func NewGatewayRuntime(
 	principals externalidentity.PrincipalResolver,
 	router interaction.SessionRouter,
 	policy actionpolicy.Policy,
+	options ...GatewayRuntimeOption,
 ) (*GatewayRuntime, error) {
 	if services == nil || eventStore == nil || permissionStore == nil || principals == nil || router == nil || policy == nil {
 		return nil, errors.New("runtime: invalid Gateway dependencies")
@@ -51,13 +68,27 @@ func NewGatewayRuntime(
 	if err != nil {
 		return nil, err
 	}
-	permissions := permissionrequest.New(permissionStore, policy)
-	bridge, err := sessionevent.NewPermissionBridge(permissions, principals, services.Sessions(), participants, events)
+	configured := gatewayRuntimeOptions{}
+	for _, option := range options {
+		if option != nil {
+			option(&configured)
+		}
+	}
+	permissions := configured.permissions
+	if permissions == nil {
+		permissions = permissionrequest.New(permissionStore, policy)
+	}
+	var bridge *sessionevent.PermissionBridge
+	if configured.resolution != nil {
+		bridge, err = sessionevent.NewPermissionBridge(permissions, principals, services.Sessions(), participants, events, configured.resolution)
+	} else {
+		bridge, err = sessionevent.NewPermissionBridge(permissions, principals, services.Sessions(), participants, events)
+	}
 	if err != nil {
 		return nil, err
 	}
 	replayCtx, cancel := context.WithCancel(context.Background())
-	runtime := &GatewayRuntime{host: host, events: events, permissions: permissions, bridge: bridge, cancel: cancel, done: make(chan struct{})}
+	runtime := &GatewayRuntime{host: host, events: events, permissions: permissions, bridge: bridge, resolution: configured.resolution, cancel: cancel, done: make(chan struct{})}
 	if err := host.Configure(func(id externalidentity.GatewayInstanceID) (*interaction.GatewayIngress, error) {
 		return services.GatewayIngress(id, router, bridge)
 	}, runtime.replay, gateway.WithSessionService(services.Sessions()), gateway.WithResponseEmitter(runtime.emitInteractionResponse)); err != nil {
@@ -65,8 +96,7 @@ func NewGatewayRuntime(
 		return nil, err
 	}
 	// Pending records are retained when no adapter is currently available.
-	_, err = events.ReplayPending(ctx)
-	if err != nil {
+	if err = runtime.replay(ctx); err != nil {
 		cancel()
 		return nil, err
 	}
@@ -88,6 +118,20 @@ func (r *GatewayRuntime) replay(ctx context.Context) error {
 		delivery, presentErr := r.bridge.Present(ctx, request.ID)
 		if presentErr != nil && delivery == nil && !errors.Is(presentErr, sessionevent.ErrRecipientUnavailable) {
 			return presentErr
+		}
+	}
+	if replayer, ok := r.resolution.(permissionrequest.ResolutionReplayer); ok {
+		return replayer.ReplayPermissionResolutions(ctx)
+	}
+	if r.resolution != nil {
+		ready, err := r.permissions.ListReadyContinuations(ctx)
+		if err != nil {
+			return err
+		}
+		for _, request := range ready {
+			if err := r.resolution.HandlePermissionResolution(ctx, request); err != nil {
+				return err
+			}
 		}
 	}
 	return nil

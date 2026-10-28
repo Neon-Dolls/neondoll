@@ -45,7 +45,7 @@ func (candidate *resolverBody) Execute(request body.ExecutionRequest) (*body.Exe
 	if candidate.executionError != nil {
 		return nil, candidate.executionError
 	}
-	return &body.ExecutionResult{Status: body.StatusSuccess, Output: string(candidate.id)}, nil
+	return &body.ExecutionResult{ExecutionID: request.ExecutionID, Status: body.StatusSuccess, Output: string(candidate.id)}, nil
 }
 
 type recordingAuthority struct {

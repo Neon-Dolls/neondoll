@@ -43,6 +43,18 @@ type ToolExecutor interface {
 	ExecuteCall(context.Context, inference.ToolCall, *inference.Tool) inference.ToolResult
 }
 
+type ToolCorrelation struct {
+	SessionID      session.ID
+	TurnID         session.TurnID
+	CognitiveRunID string
+}
+
+// CorrelatedToolExecutor receives explicit Core lifecycle identities. The
+// base ToolExecutor remains supported for non-Core/legacy callers.
+type CorrelatedToolExecutor interface {
+	ExecuteCorrelatedCall(context.Context, ToolCorrelation, inference.ToolCall, *inference.Tool) inference.ToolResult
+}
+
 // Request fixes all execution-wide choices before the first provider call.
 type Request struct {
 	Provider           inference.Provider
@@ -50,6 +62,8 @@ type Request struct {
 	Purpose            inference.Purpose
 	Temperature        float64
 	TurnID             session.TurnID
+	SessionID          session.ID
+	CognitiveRunID     string
 	BuildContext       ContextBuilder
 	ToolExecutor       ToolExecutor
 	MaxToolCalls       int
@@ -140,7 +154,14 @@ func Execute(ctx context.Context, request Request) (*Result, error) {
 			if callCount > limit {
 				return nil, fmt.Errorf("cognitive execution: tool call limit (%d) exceeded", limit)
 			}
-			result := request.ToolExecutor.ExecuteCall(ctx, call, toolMap[call.Name])
+			var result inference.ToolResult
+			if correlated, ok := request.ToolExecutor.(CorrelatedToolExecutor); ok {
+				result = correlated.ExecuteCorrelatedCall(ctx, ToolCorrelation{
+					SessionID: request.SessionID, TurnID: request.TurnID, CognitiveRunID: request.CognitiveRunID,
+				}, call, toolMap[call.Name])
+			} else {
+				result = request.ToolExecutor.ExecuteCall(ctx, call, toolMap[call.Name])
+			}
 			exchanges = append(exchanges, ToolExchange{Call: call, Result: result, Required: true})
 		}
 	}

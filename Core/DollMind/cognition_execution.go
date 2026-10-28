@@ -2,12 +2,37 @@ package dollmind
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 
 	"github.com/Neon-Dolls/neondoll/Core/CognitiveExecution"
 	contextbuilder "github.com/Neon-Dolls/neondoll/Core/ContextBuilder"
 	"github.com/Neon-Dolls/neondoll/Core/Inference"
+	"github.com/Neon-Dolls/neondoll/Core/PermissionRequest"
 )
+
+// NotifyPermissionResolution starts a fresh ephemeral cognition run with the
+// durable decision and action outcome as evidence. The original Cognitive Run
+// is intentionally not persisted or resumed.
+func (s *Scheduler) NotifyPermissionResolution(ctx context.Context, notificationID string, request *permissionrequest.Request, outcome permissionrequest.ContinuationOutcome) error {
+	if request == nil {
+		return permissionrequest.ErrInvalidRequest
+	}
+	encoded, err := json.Marshal(struct {
+		NotificationID string                                `json:"notification_id"`
+		RequestID      permissionrequest.ID                  `json:"request_id"`
+		Decision       permissionrequest.Status              `json:"decision"`
+		Capability     string                                `json:"capability"`
+		Operation      string                                `json:"operation"`
+		Correlation    permissionrequest.Correlation         `json:"correlation"`
+		Outcome        permissionrequest.ContinuationOutcome `json:"outcome"`
+	}{notificationID, request.ID, request.Status, request.Capability, request.Operation, request.Correlation, outcome})
+	if err != nil {
+		return err
+	}
+	_, err = s.Run(ctx, LevelPlan, "Owner permission resolution and action outcome:\n"+string(encoded)+"\nReconsider the plan using this authoritative result.")
+	return err
+}
 
 // executeCognition adapts one ephemeral Cognitive Run to Core's shared
 // multi-step execution engine. The selected task model remains fixed, while
@@ -24,6 +49,7 @@ func (s *Scheduler) executeCognition(ctx context.Context, run *cognitionRunExecu
 		ModelConfiguration: selected.configuration,
 		Purpose:            purpose,
 		Temperature:        temperature,
+		CognitiveRunID:     run.id,
 		ToolExecutor:       toolExecutor,
 		MaxToolCalls:       ToolCallLimit,
 		BuildContext: func(ctx context.Context, state cognitiveexecution.ContextState) ([]inference.Message, error) {

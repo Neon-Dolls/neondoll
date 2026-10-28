@@ -2,13 +2,19 @@ package dollmind
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"sort"
+	"strings"
+	"time"
 
 	"github.com/Neon-Dolls/neondoll/Core/ActionPolicy"
 	"github.com/Neon-Dolls/neondoll/Core/Body"
 	"github.com/Neon-Dolls/neondoll/Core/BodyResolver"
+	"github.com/Neon-Dolls/neondoll/Core/CognitiveExecution"
 	"github.com/Neon-Dolls/neondoll/Core/Inference"
+	"github.com/Neon-Dolls/neondoll/Core/PermissionRequest"
+	"github.com/Neon-Dolls/neondoll/Core/Session"
 )
 
 // ToolExecutor is the single cognitive tool execution path. It performs the
@@ -21,6 +27,14 @@ type ToolExecutor struct {
 	dollID       string
 	preferences  map[body.BodyID]int
 	ownerPolicy  bodyresolver.OwnerPolicy
+	requests     *permissionrequest.Manager
+	ownerID      string
+	approvalTTL  time.Duration
+	notifier     PermissionResolutionNotifier
+}
+
+type PermissionResolutionNotifier interface {
+	NotifyPermissionResolution(context.Context, string, *permissionrequest.Request, permissionrequest.ContinuationOutcome) error
 }
 
 type ToolExecutorOption func(*ToolExecutor)
@@ -36,6 +50,18 @@ func WithBodyPreferences(preferences map[body.BodyID]int) ToolExecutorOption {
 
 func WithBodyOwnerPolicy(policy bodyresolver.OwnerPolicy) ToolExecutorOption {
 	return func(executor *ToolExecutor) { executor.ownerPolicy = policy }
+}
+
+func WithPermissionRequests(requests *permissionrequest.Manager, ownerID string, ttl time.Duration) ToolExecutorOption {
+	return func(executor *ToolExecutor) {
+		executor.requests = requests
+		executor.ownerID = strings.TrimSpace(ownerID)
+		executor.approvalTTL = ttl
+	}
+}
+
+func (executor *ToolExecutor) SetPermissionResolutionNotifier(notifier PermissionResolutionNotifier) {
+	executor.notifier = notifier
 }
 
 // NewToolExecutor composes existing Core authority, Registry, resolver, and
@@ -78,6 +104,14 @@ func (executor *ToolExecutor) Tools() []inference.Tool {
 // ExecuteCall authorizes an action before discovery, resolves candidates from
 // trusted Registry state, then executes resolver ordering through Guard.
 func (executor *ToolExecutor) ExecuteCall(ctx context.Context, call inference.ToolCall, tool *inference.Tool) inference.ToolResult {
+	return executor.executeCall(ctx, cognitiveexecution.ToolCorrelation{}, call, tool, false)
+}
+
+func (executor *ToolExecutor) ExecuteCorrelatedCall(ctx context.Context, correlation cognitiveexecution.ToolCorrelation, call inference.ToolCall, tool *inference.Tool) inference.ToolResult {
+	return executor.executeCall(ctx, correlation, call, tool, false)
+}
+
+func (executor *ToolExecutor) executeCall(ctx context.Context, correlation cognitiveexecution.ToolCorrelation, call inference.ToolCall, tool *inference.Tool, approved bool) inference.ToolResult {
 	if tool == nil {
 		return failureResult(call.ID, "unknown_tool", "tool definition not found")
 	}
@@ -99,7 +133,9 @@ func (executor *ToolExecutor) ExecuteCall(ctx context.Context, call inference.To
 	case actionpolicy.DecisionDeny:
 		return failureResult(call.ID, "action_denied", decision.Message)
 	case actionpolicy.DecisionRequireApproval:
-		return failureResult(call.ID, "approval_required", decision.Message)
+		if !approved {
+			return executor.requestApproval(ctx, correlation, call, tool, decision)
+		}
 	default:
 		return failureResult(call.ID, "invalid_configuration", "action policy returned an invalid decision")
 	}
@@ -125,6 +161,147 @@ func (executor *ToolExecutor) ExecuteCall(ctx context.Context, call inference.To
 		Arguments:   call.Arguments,
 	})
 	return toolOutcome(call.ID, outcome, rejections, executionErr)
+}
+
+func (executor *ToolExecutor) requestApproval(ctx context.Context, correlation cognitiveexecution.ToolCorrelation, call inference.ToolCall, tool *inference.Tool, decision actionpolicy.Result) inference.ToolResult {
+	if executor.requests == nil || executor.ownerID == "" {
+		return failureResult(call.ID, "approval_required", decision.Message)
+	}
+	arguments, err := json.Marshal(call.Arguments)
+	if err != nil {
+		return failureResult(call.ID, "invalid_arguments", "tool arguments cannot be recorded for approval")
+	}
+	ttl := executor.approvalTTL
+	if ttl <= 0 {
+		ttl = 15 * time.Minute
+	}
+	question := strings.TrimSpace(decision.Message)
+	if question == "" {
+		question = "May I execute " + tool.CapabilityID + "/" + tool.OperationID + "?"
+	}
+	request, err := executor.requests.Create(ctx, permissionrequest.CreateRequest{
+		DollID: executor.dollID, OwnerID: executor.ownerID, Origin: permissionrequest.OriginPolicyRequired,
+		Action: tool.Name, Question: question, Capability: tool.CapabilityID, Operation: tool.OperationID,
+		Arguments: arguments, ExpiresAt: time.Now().Add(ttl),
+		Correlation: permissionrequest.Correlation{CognitiveRunID: correlation.CognitiveRunID, SessionID: string(correlation.SessionID), TurnID: string(correlation.TurnID), ToolCallID: call.ID},
+	})
+	if err != nil {
+		return failureResult(call.ID, "approval_request_failed", err.Error())
+	}
+	result := failureResult(call.ID, "approval_required", question)
+	result.Error.PermissionRequestID = string(request.ID)
+	return result
+}
+
+// HandlePermissionResolution is the durable continuation boundary invoked by
+// authenticated Owner decisions. The claim is persisted before dispatch, so
+// replayed decisions and restarts cannot execute the action twice.
+func (executor *ToolExecutor) HandlePermissionResolution(ctx context.Context, request *permissionrequest.Request) error {
+	if request == nil || executor.requests == nil {
+		return permissionrequest.ErrInvalidRequest
+	}
+	if request.Status != permissionrequest.StatusApproved && request.Status != permissionrequest.StatusDenied {
+		return permissionrequest.ErrInvalidTransition
+	}
+	claimed, err := executor.requests.ClaimContinuation(ctx, request.ID)
+	if errors.Is(err, permissionrequest.ErrContinuationClaimed) {
+		if claimed != nil && (claimed.ContinuationStatus == permissionrequest.ContinuationSucceeded || claimed.ContinuationStatus == permissionrequest.ContinuationFailed) {
+			return executor.notifyCompletedOutcome(ctx, claimed)
+		}
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if claimed.Status == permissionrequest.StatusDenied {
+		outcome := permissionrequest.ContinuationOutcome{Success: false, ErrorCode: "owner_denied", Error: "Owner denied the requested action"}
+		completed, completeErr := executor.requests.CompleteContinuation(ctx, claimed.ID, outcome)
+		if completeErr != nil {
+			return completeErr
+		}
+		return executor.notifyCompletedOutcome(ctx, completed)
+	}
+	arguments := make(map[string]any)
+	if len(claimed.Arguments) > 0 && json.Unmarshal(claimed.Arguments, &arguments) != nil {
+		arguments = nil
+	}
+	callID := claimed.Correlation.ToolCallID
+	if callID == "" {
+		callID = "permission_" + string(claimed.ID)
+	}
+	tool := &inference.Tool{Name: claimed.Action, CapabilityID: claimed.Capability, OperationID: claimed.Operation}
+	result := executor.executeCall(ctx, cognitiveexecution.ToolCorrelation{
+		SessionID: session.ID(claimed.Correlation.SessionID), TurnID: session.TurnID(claimed.Correlation.TurnID), CognitiveRunID: claimed.Correlation.CognitiveRunID,
+	}, inference.ToolCall{ID: callID, Name: tool.Name, Arguments: arguments}, tool, true)
+	outcome := permissionrequest.ContinuationOutcome{Success: result.Status == inference.ToolResultSuccess, ExecutionID: result.ExecutionID}
+	if result.Result != nil {
+		outcome.Output, _ = json.Marshal(result.Result)
+	}
+	if result.Error != nil {
+		outcome.ErrorCode, outcome.Error = result.Error.Code, result.Error.Message
+	}
+	completed, err := executor.requests.CompleteContinuation(ctx, claimed.ID, outcome)
+	if err != nil {
+		return err
+	}
+	return executor.notifyCompletedOutcome(ctx, completed)
+}
+
+const permissionNotificationLease = 5 * time.Minute
+
+func (executor *ToolExecutor) notifyCompletedOutcome(ctx context.Context, request *permissionrequest.Request) error {
+	if executor.notifier == nil {
+		return nil
+	}
+	var outcome permissionrequest.ContinuationOutcome
+	if err := json.Unmarshal(request.ContinuationResult, &outcome); err != nil {
+		return err
+	}
+	claimed, err := executor.requests.ClaimOutcomeNotification(ctx, request.ID, permissionNotificationLease)
+	if errors.Is(err, permissionrequest.ErrNotificationClaimed) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	err = executor.notifier.NotifyPermissionResolution(ctx, permissionrequest.OutcomeNotificationID(request.ID), claimed, outcome)
+	if err != nil {
+		if _, releaseErr := executor.requests.ReleaseOutcomeNotification(ctx, request.ID, err.Error()); releaseErr != nil {
+			return errors.Join(err, releaseErr)
+		}
+		return err
+	}
+	_, err = executor.requests.CompleteOutcomeNotification(ctx, request.ID)
+	return err
+}
+
+func (executor *ToolExecutor) ResumeReadyPermissions(ctx context.Context) error {
+	return executor.ReplayPermissionResolutions(ctx)
+}
+
+func (executor *ToolExecutor) ReplayPermissionResolutions(ctx context.Context) error {
+	if executor.requests == nil {
+		return permissionrequest.ErrInvalidRequest
+	}
+	ready, err := executor.requests.ListReadyContinuations(ctx)
+	if err != nil {
+		return err
+	}
+	for _, request := range ready {
+		if err := executor.HandlePermissionResolution(ctx, request); err != nil {
+			return err
+		}
+	}
+	pending, err := executor.requests.ListOutcomeNotifications(ctx)
+	if err != nil {
+		return err
+	}
+	for _, request := range pending {
+		if err := executor.notifyCompletedOutcome(ctx, request); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (executor *ToolExecutor) registryCandidates() []bodyresolver.Candidate {
