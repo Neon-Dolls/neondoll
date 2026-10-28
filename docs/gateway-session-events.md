@@ -89,23 +89,37 @@ secret of that name, not Telegram-specific authority in Core. `session.route`
 also includes the existing `chat_id` alias alongside the generic conversation
 reference.
 
-The current Telegram PR #5 artifact loads and initializes unchanged. Reproduce
-that compatibility check after independently building the Telegram guest:
+The Telegram PR #5 guest source at `5924bfc` builds against ABI v2. The
+compatibility test sends `session.route` plus `session.event` through that
+actual guest and verifies that its `delivery.result` repeats the stable
+delivery ID. Reproduce that behavioral check by independently building the
+Telegram guest and passing the resulting artifact to Core:
 
 ```sh
-NEONDOLL_TELEGRAM_WASM=/path/to/neondoll-gateway-telegram/wasm/build/gateway.wasm \
+docker run --rm -v "$TELEGRAM_REPO:/src" -w /src tinygo/tinygo:0.39.0 \
+  tinygo build -target=wasi -opt=z -no-debug \
+  -o /src/wasm/build/gateway-current.wasm /src/wasm/gateway/main.go
+NEONDOLL_TELEGRAM_WASM="$TELEGRAM_REPO/wasm/build/gateway-current.wasm" \
   go test ./Core/Extension \
   -run TestTelegramABICompatibilityWhenArtifactAvailable -count=1 -v
 ```
 
+At review time, PR #5's checked-in `wasm/build/gateway.wasm` does not compile in
+Wazero (`invalid data segment prefix`), while the artifact rebuilt from the
+same PR head with the command above initializes and passes the behavioral
+test. Telegram must publish the reproducibly built artifact; Core does not
+special-case invalid WASM binaries.
+
 Core durably stages each emitted `message.incoming` before invoking trusted
 ingress, retries ingress failures without polling past the event, and replies
 with `inbound.accepted` containing the stable event ID only after acceptance.
-The current Telegram PR #5 guest still advances its in-memory polling cursor
-when it emits the event. To close the remaining guest-side crash window, it
-must advance and persist that cursor through `state_get`/`state_put` only after
-the matching `inbound.accepted`. Core already supplies these ABI v2 capabilities
-and no Core rebuild or ABI change is required.
+The current Telegram PR #5 guest does not handle `inbound.accepted` and still
+advances its in-memory polling cursor when it emits the event. To close the
+remaining guest-side crash window, it must handle that event, match its
+`event_id`, and advance and persist the corresponding cursor through
+`state_get`/`state_put` only after acceptance. Core already supplies these ABI
+v2 capabilities and no Core rebuild or ABI change is required. Delivery-result
+correlation requires no Telegram-side change.
 
 ## Security and lifecycle
 

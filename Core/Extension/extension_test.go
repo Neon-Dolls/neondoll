@@ -410,6 +410,48 @@ func TestConcurrentShutdownWaitsForLifecycleCompletion(t *testing.T) {
 	}
 }
 
+func TestEnableCannotRegisterAfterShutdownBegins(t *testing.T) {
+	ctx, root := context.Background(), findRepoRoot(t)
+	runtime, _ := NewWASMRuntime(ctx, NewFileStateStore(filepath.Join(t.TempDir(), "state")), t.TempDir())
+	host := &testHost{ingress: &testIngress{}}
+	manager, err := NewManager(runtime, host, root, []Manifest{testManifest(t, "activation-race")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry := manager.entries["activation-race"]
+	entry.opMu.Lock()
+	enabled := make(chan error, 1)
+	go func() { enabled <- manager.Enable(ctx, "activation-race") }()
+	shutdown := make(chan error, 1)
+	go func() { shutdown <- manager.Shutdown(ctx) }()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		manager.mu.Lock()
+		closing := manager.closing
+		manager.mu.Unlock()
+		if closing {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("shutdown did not establish activation boundary")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	entry.opMu.Unlock()
+	if err = <-enabled; !errors.Is(err, ErrInvalidManifest) {
+		t.Fatalf("Enable error=%v", err)
+	}
+	if err = <-shutdown; err != nil {
+		t.Fatal(err)
+	}
+	host.mu.Lock()
+	registers := host.registers
+	host.mu.Unlock()
+	if registers != 0 {
+		t.Fatalf("registrations after shutdown=%d", registers)
+	}
+}
+
 func TestInstallStagesArtifactAndReconstructsManifest(t *testing.T) {
 	ctx, dataRoot := context.Background(), t.TempDir()
 	runtime, _ := NewWASMRuntime(ctx, NewFileStateStore(filepath.Join(dataRoot, "state")), t.TempDir())
@@ -456,6 +498,143 @@ func TestConfiguredArtifactCannotEscapeDataRoot(t *testing.T) {
 	}
 }
 
+func TestArtifactAndSecretSymlinkEscapesAreRejected(t *testing.T) {
+	ctx := context.Background()
+	outside := t.TempDir()
+	wasm, err := os.ReadFile(filepath.Join(findRepoRoot(t), "Core/Extension/testdata/gateway.wasm"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	outsideArtifact := filepath.Join(outside, "gateway.wasm")
+	if err = os.WriteFile(outsideArtifact, wasm, 0600); err != nil {
+		t.Fatal(err)
+	}
+	dataRoot := t.TempDir()
+	if err = os.Symlink(outsideArtifact, filepath.Join(dataRoot, "gateway.wasm")); err != nil {
+		t.Fatal(err)
+	}
+	runtime, err := NewWASMRuntime(ctx, NewFileStateStore(filepath.Join(t.TempDir(), "state")), t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest := testManifest(t, "artifact-link")
+	manifest.Artifact.Path = "gateway.wasm"
+	if err = runtime.Load(ctx, manifest, dataRoot); !errors.Is(err, ErrInvalidManifest) {
+		t.Fatalf("artifact symlink escape error=%v", err)
+	}
+	_ = runtime.Close(ctx)
+
+	dataRoot = t.TempDir()
+	if err = os.WriteFile(filepath.Join(dataRoot, "gateway.wasm"), wasm, 0600); err != nil {
+		t.Fatal(err)
+	}
+	secretOutside := filepath.Join(outside, "token")
+	if err = os.WriteFile(secretOutside, []byte("secret"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	secretsRoot := t.TempDir()
+	if err = os.Symlink(secretOutside, filepath.Join(secretsRoot, "token")); err != nil {
+		t.Fatal(err)
+	}
+	runtime, err = NewWASMRuntime(ctx, NewFileStateStore(filepath.Join(t.TempDir(), "state")), secretsRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close(ctx)
+	manifest = testManifest(t, "secret-link", CapabilitySecrets)
+	manifest.Artifact.Path = "gateway.wasm"
+	manifest.Secrets = map[string]string{"telegram_token": "token"}
+	if err = runtime.Load(ctx, manifest, dataRoot); !errors.Is(err, ErrInvalidManifest) {
+		t.Fatalf("secret symlink escape error=%v", err)
+	}
+}
+
+func TestSecretTraversalAndAbsolutePathsAreRejected(t *testing.T) {
+	ctx, parent := context.Background(), t.TempDir()
+	dataRoot, secretsRoot := filepath.Join(parent, "data"), filepath.Join(parent, "secrets")
+	if err := os.MkdirAll(dataRoot, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(secretsRoot, 0700); err != nil {
+		t.Fatal(err)
+	}
+	wasm, err := os.ReadFile(filepath.Join(findRepoRoot(t), "Core/Extension/testdata/gateway.wasm"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(filepath.Join(dataRoot, "gateway.wasm"), wasm, 0600); err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(parent, "outside-token")
+	if err = os.WriteFile(outside, []byte("secret"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	for name, secretPath := range map[string]string{"traversal": "../outside-token", "absolute": outside} {
+		t.Run(name, func(t *testing.T) {
+			runtime, err := NewWASMRuntime(ctx, NewFileStateStore(filepath.Join(t.TempDir(), "state")), secretsRoot)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer runtime.Close(ctx)
+			manifest := testManifest(t, "secret-"+name, CapabilitySecrets)
+			manifest.Artifact.Path = "gateway.wasm"
+			manifest.Secrets = map[string]string{"telegram_token": secretPath}
+			if err = runtime.Load(ctx, manifest, dataRoot); !errors.Is(err, ErrInvalidManifest) {
+				t.Fatalf("secret path error=%v", err)
+			}
+		})
+	}
+}
+
+func TestAcceptedInboundIsNotReplayedAcrossPersistenceBoundaries(t *testing.T) {
+	for _, pendingRetained := range []bool{true, false} {
+		t.Run(fmt.Sprintf("pending-retained-%t", pendingRetained), func(t *testing.T) {
+			ctx, root, stateRoot := context.Background(), findRepoRoot(t), filepath.Join(t.TempDir(), "state")
+			state := NewFileStateStore(stateRoot)
+			if err := state.Put(ctx, "accepted", "gateway/inbound-accepted/1", []byte("accepted")); err != nil {
+				t.Fatal(err)
+			}
+			payload := json.RawMessage(`{"event_version":1,"event_type":"message.incoming","source":"synthetic","update_id":1,"chat_id":7,"sender_id":9,"text":"hello"}`)
+			message := GuestMessage{Version: 0, Type: "outgoing", Payload: payload}
+			if pendingRetained {
+				data, err := json.Marshal([]GuestMessage{message})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err = state.Put(ctx, "accepted", pendingInboundKey, data); err != nil {
+					t.Fatal(err)
+				}
+			}
+			runtime, err := NewWASMRuntime(ctx, state, t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer runtime.Close(ctx)
+			manifest := testManifest(t, "accepted")
+			if err = runtime.Load(ctx, manifest, root); err != nil {
+				t.Fatal(err)
+			}
+			ingress := &testIngress{}
+			adapter := NewGatewayAdapter(manifest, runtime)
+			adapter.ingress, adapter.routes = ingress, ingress
+			if err = adapter.restorePending(ctx); err != nil {
+				t.Fatal(err)
+			}
+			if pendingRetained {
+				adapter.retryInbound(ctx)
+			} else {
+				adapter.dispatch(ctx, []GuestMessage{message}, nil)
+			}
+			ingress.mu.Lock()
+			attempts := ingress.attempts
+			ingress.mu.Unlock()
+			if attempts != 0 {
+				t.Fatalf("accepted event replayed into Core %d times", attempts)
+			}
+		})
+	}
+}
+
 func TestTelegramABICompatibilityWhenArtifactAvailable(t *testing.T) {
 	artifact := os.Getenv("NEONDOLL_TELEGRAM_WASM")
 	if artifact == "" {
@@ -482,6 +661,33 @@ func TestTelegramABICompatibilityWhenArtifactAvailable(t *testing.T) {
 	defer runtime.Close(context.Background())
 	if err := runtime.Load(context.Background(), manifest, dataRoot); err != nil {
 		t.Fatalf("Telegram ABI v2 load: %v", err)
+	}
+	if err := runtime.HandleEvent("telegram-compat", "session.route", []byte(`{"chat_id":7,"delivery_id":"compat-delivery"}`)); err != nil {
+		t.Fatal(err)
+	}
+	payload := []byte(`{"delivery_id":"compat-delivery","event":{"type":"message","payload":{"parts":[{"type":"text","text":"hello"}]}}}`)
+	if err := runtime.HandleEvent("telegram-compat", "session.event", payload); err != nil {
+		t.Fatal(err)
+	}
+	messages := runtime.TakeOutbound("telegram-compat")
+	found := false
+	for _, message := range messages {
+		var result deliveryResult
+		if json.Unmarshal(message.Payload, &result) == nil && result.EventType == "delivery.result" {
+			found = true
+			if result.DeliveryID != "compat-delivery" {
+				t.Fatalf("Telegram delivery correlation=%q", result.DeliveryID)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("Telegram guest emitted no delivery.result")
+	}
+	if err := runtime.HandleEvent("telegram-compat", "inbound.accepted", []byte(`{"event_id":"42"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if messages = runtime.TakeOutbound("telegram-compat"); len(messages) != 0 {
+		t.Fatalf("current Telegram guest unexpectedly handled inbound.accepted: %#v", messages)
 	}
 }
 

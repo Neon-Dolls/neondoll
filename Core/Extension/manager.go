@@ -34,6 +34,7 @@ type installation struct {
 }
 type Manager struct {
 	mu                     sync.Mutex
+	activationMu           sync.Mutex
 	runtime                *WASMRuntime
 	host                   GatewayHost
 	dataRoot, installsRoot string
@@ -208,6 +209,12 @@ func (m *Manager) Enable(ctx context.Context, id string) error {
 	}
 	entry.opMu.Lock()
 	defer entry.opMu.Unlock()
+	m.mu.Lock()
+	closing := m.closing
+	m.mu.Unlock()
+	if closing {
+		return ErrInvalidManifest
+	}
 	entry.mu.Lock()
 	if entry.running {
 		entry.mu.Unlock()
@@ -222,13 +229,27 @@ func (m *Manager) Enable(ctx context.Context, id string) error {
 		return err
 	}
 	adapter := NewGatewayAdapter(manifest, m.runtime)
+	// Activation is the linearization boundary shared with Shutdown. Once
+	// Shutdown marks the manager closing, no later Host registration is
+	// possible, including an Enable that was waiting on this installation.
+	m.activationMu.Lock()
+	m.mu.Lock()
+	closing = m.closing
+	m.mu.Unlock()
+	if closing {
+		m.activationMu.Unlock()
+		_ = m.runtime.Unload(ctx, id)
+		return ErrInvalidManifest
+	}
 	if err = m.host.Register(ctx, adapter); err != nil {
+		m.activationMu.Unlock()
 		_ = m.runtime.Unload(ctx, id)
 		entry.mu.Lock()
 		entry.failure = err
 		entry.mu.Unlock()
 		return err
 	}
+	m.activationMu.Unlock()
 	entry.mu.Lock()
 	entry.adapter, entry.running, entry.failure = adapter, true, nil
 	entry.mu.Unlock()
@@ -284,10 +305,12 @@ func (m *Manager) Statuses() []Status {
 	return out
 }
 func (m *Manager) Shutdown(ctx context.Context) error {
+	m.activationMu.Lock()
 	m.mu.Lock()
 	if m.closing {
 		done := m.shutdownDone
 		m.mu.Unlock()
+		m.activationMu.Unlock()
 		select {
 		case <-done:
 			m.mu.Lock()
@@ -305,6 +328,7 @@ func (m *Manager) Shutdown(ctx context.Context) error {
 		ids = append(ids, id)
 	}
 	m.mu.Unlock()
+	m.activationMu.Unlock()
 	sort.Strings(ids)
 	var first error
 	for _, id := range ids {

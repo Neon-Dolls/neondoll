@@ -70,15 +70,27 @@ func (a *GatewayAdapter) Start(_ context.Context, ingress gateway.Ingress) error
 		return gateway.ErrHostNotConfigured
 	}
 	a.ingress, a.routes = ingress, routes
-	if data, err := a.runtime.state.Get(context.Background(), a.manifest.InstanceID, pendingInboundKey); err == nil && len(data) > 0 {
-		if json.Unmarshal(data, &a.pending) != nil {
-			return ErrInvalidManifest
-		}
+	if err := a.restorePending(context.Background()); err != nil {
+		return err
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	a.cancel = cancel
 	a.done = make(chan struct{})
 	go a.run(ctx)
+	return nil
+}
+
+func (a *GatewayAdapter) restorePending(ctx context.Context) error {
+	data, err := a.runtime.state.Get(ctx, a.manifest.InstanceID, pendingInboundKey)
+	if errors.Is(err, ErrStateNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if len(data) > 0 && json.Unmarshal(data, &a.pending) != nil {
+		return ErrInvalidManifest
+	}
 	return nil
 }
 func (a *GatewayAdapter) LastError() error   { a.mu.Lock(); defer a.mu.Unlock(); return a.lastError }

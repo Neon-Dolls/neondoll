@@ -147,8 +147,9 @@ func (r *WASMRuntime) Load(ctx context.Context, manifest Manifest, dataRoot stri
 	secrets := map[string][]byte{}
 	if manifest.GrantedCapability(CapabilitySecrets) {
 		for name, path := range manifest.Secrets {
-			if !filepath.IsAbs(path) {
-				path = filepath.Join(r.secretsRoot, path)
+			path, err = resolveWithin(r.secretsRoot, path)
+			if err != nil {
+				return err
 			}
 			v, e := os.ReadFile(path)
 			if e != nil {
@@ -211,7 +212,19 @@ func resolveWithin(root, path string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	root, err = filepath.EvalSymlinks(root)
+	if err != nil {
+		return "", err
+	}
 	resolved, err := filepath.Abs(filepath.Join(root, filepath.Clean(path)))
+	if err != nil {
+		return "", err
+	}
+	lexical, err := filepath.Rel(root, resolved)
+	if err != nil || lexical == ".." || strings.HasPrefix(lexical, ".."+string(filepath.Separator)) {
+		return "", ErrInvalidManifest
+	}
+	resolved, err = filepath.EvalSymlinks(resolved)
 	if err != nil {
 		return "", err
 	}
