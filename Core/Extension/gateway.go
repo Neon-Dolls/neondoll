@@ -24,6 +24,10 @@ type routingIngress interface {
 	ResolvePlatformSession(context.Context, string) (session.ID, error)
 	ExternalConversationRef(context.Context, session.ID) (string, error)
 }
+type responseIngress interface {
+	EmitInteractionResponse(context.Context, session.ID, *events.Event) error
+}
+type adapterDispatchKey struct{}
 type deliveryCommand struct {
 	ctx      context.Context
 	envelope gateway.OutboundEnvelope
@@ -227,6 +231,7 @@ func (a *GatewayAdapter) inboundID(in gatewayIncoming) string {
 }
 
 func (a *GatewayAdapter) handleInbound(ctx context.Context, in gatewayIncoming) error {
+	ctx = context.WithValue(ctx, adapterDispatchKey{}, a)
 	conversation := a.manifest.Gateway.ConversationPrefix + strconv.FormatInt(in.ChatID, 10)
 	sender := gateway.VerifiedSender{Platform: a.manifest.Gateway.Platform, SubjectID: strconv.FormatInt(in.SenderID, 10)}
 	fields := strings.Fields(in.Text)
@@ -254,11 +259,24 @@ func (a *GatewayAdapter) handleInbound(ctx context.Context, in gatewayIncoming) 
 		DollID:    a.manifest.Gateway.DollID,
 		Payload:   events.MessagePayload{Text: in.Text, Media: append([]events.MediaReference(nil), in.Media...)},
 	}
-	_, err := a.ingress.HandlePlatformMessage(ctx, conversation, sender, &event)
-	return err
+	response, err := a.ingress.HandlePlatformMessage(ctx, conversation, sender, &event)
+	if err != nil {
+		return err
+	}
+	if response == nil || response.Event == nil {
+		return nil
+	}
+	emitter, ok := a.ingress.(responseIngress)
+	if !ok {
+		return gateway.ErrHostNotConfigured
+	}
+	return emitter.EmitInteractionResponse(ctx, response.SessionID, response.Event)
 }
 
 func (a *GatewayAdapter) Deliver(ctx context.Context, envelope gateway.OutboundEnvelope) error {
+	if current, _ := ctx.Value(adapterDispatchKey{}).(*GatewayAdapter); current == a {
+		return a.executeDelivery(ctx, envelope)
+	}
 	command := deliveryCommand{ctx: ctx, envelope: envelope, result: make(chan error, 1)}
 	select {
 	case <-ctx.Done():

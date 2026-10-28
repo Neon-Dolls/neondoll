@@ -85,6 +85,11 @@ func (a *hostedAdapter) delivered() []gateway.OutboundEnvelope {
 	defer a.mu.Unlock()
 	return append([]gateway.OutboundEnvelope(nil), a.events...)
 }
+func (a *hostedAdapter) setDeliveryError(err error) {
+	a.mu.Lock()
+	a.deliver = err
+	a.mu.Unlock()
+}
 
 type gatewayInteractionHandler struct {
 	mu        sync.Mutex
@@ -246,6 +251,64 @@ func TestTelegramPR4InboundEnvelopeUsesCoreOwnedSessionResolution(t *testing.T) 
 	resolved, err := f.services.Sessions().Lookup(context.Background(), first.SessionID)
 	if err != nil || resolved.Owner.InstanceID != "gateway-main" || resolved.ExternalConversationRef != "telegram/chat/9001" {
 		t.Fatalf("Core Session=%#v error=%v", resolved, err)
+	}
+}
+
+func TestPlatformInteractionResponseUsesDurableSessionDelivery(t *testing.T) {
+	f := newGatewayFixture(t)
+	adapter := f.register(t, gateway.StructuredSessionEventVersion)
+	event := events.NewDollMessage("telegram:response", "doll-1", "hello")
+	response, err := adapter.endpoint().HandlePlatformMessage(context.Background(), "telegram/chat/9001",
+		gateway.VerifiedSender{Platform: "telegram", SubjectID: "12345"}, &event)
+	if err != nil || response == nil || response.Event == nil {
+		t.Fatalf("response=%#v error=%v", response, err)
+	}
+	emitter, ok := adapter.endpoint().(interface {
+		EmitInteractionResponse(context.Context, session.ID, *events.Event) error
+	})
+	if !ok {
+		t.Fatal("bound ingress lacks durable response emission")
+	}
+	if err = emitter.EmitInteractionResponse(context.Background(), response.SessionID, response.Event); err != nil {
+		t.Fatal(err)
+	}
+	delivered := adapter.delivered()
+	if len(delivered) != 1 {
+		t.Fatalf("deliveries=%d", len(delivered))
+	}
+	decoded, err := delivered[0].DecodeDelivery()
+	if err != nil || decoded.Event.SessionID != response.SessionID || decoded.Event.Type != sessionevent.TypeMessage || decoded.Event.Correlation.CausationEventID != event.ID {
+		t.Fatalf("delivery=%#v error=%v", decoded, err)
+	}
+	var payload sessionevent.MessagePayload
+	if json.Unmarshal(decoded.Event.Payload, &payload) != nil || len(payload.Parts) != 1 || payload.Parts[0].Text != "legacy-ok" {
+		t.Fatalf("payload=%s", decoded.Event.Payload)
+	}
+}
+
+func TestDurableInteractionResponseRetriesTransientGatewayFailure(t *testing.T) {
+	f := newGatewayFixture(t)
+	adapter := f.register(t, gateway.StructuredSessionEventVersion)
+	adapter.setDeliveryError(errors.New("temporary Telegram failure"))
+	event := events.NewDollMessage("telegram:retry", "doll-1", "hello")
+	response, err := adapter.endpoint().HandlePlatformMessage(context.Background(), "telegram/chat/9002",
+		gateway.VerifiedSender{Platform: "telegram", SubjectID: "12345"}, &event)
+	if err != nil || response == nil {
+		t.Fatalf("response=%#v error=%v", response, err)
+	}
+	emitter := adapter.endpoint().(interface {
+		EmitInteractionResponse(context.Context, session.ID, *events.Event) error
+	})
+	if err = emitter.EmitInteractionResponse(context.Background(), response.SessionID, response.Event); err != nil {
+		t.Fatalf("durably staged response: %v", err)
+	}
+	adapter.setDeliveryError(nil)
+	deadline := time.Now().Add(3 * time.Second)
+	for len(adapter.delivered()) == 0 && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if len(adapter.delivered()) != 1 {
+		t.Fatalf("retry deliveries=%d", len(adapter.delivered()))
 	}
 }
 

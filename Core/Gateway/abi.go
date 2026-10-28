@@ -95,11 +95,25 @@ type Adapter interface {
 }
 
 type boundIngress struct {
-	version  int
-	gateway  externalidentity.GatewayInstanceID
-	sessions session.Service
-	ingress  *interaction.GatewayIngress
-	replay   ReplayFunc
+	version         int
+	gateway         externalidentity.GatewayInstanceID
+	sessions        session.Service
+	ingress         *interaction.GatewayIngress
+	replay          ReplayFunc
+	responseEmitter ResponseEmitter
+}
+
+// EmitInteractionResponse stages a Core response through the durable Session
+// event transport. The Session was selected by Core for this bound Gateway;
+// adapters cannot supply a trusted Gateway identity through the payload.
+func (b *boundIngress) EmitInteractionResponse(ctx context.Context, sessionID session.ID, response *events.Event) error {
+	if b.responseEmitter == nil || response == nil {
+		return ErrHostNotConfigured
+	}
+	if _, err := b.ExternalConversationRef(ctx, sessionID); err != nil {
+		return err
+	}
+	return b.responseEmitter(ctx, sessionID, response)
 }
 
 func (b *boundIngress) HandlePlatformMessage(ctx context.Context, conversationRef string, sender VerifiedSender, event *events.Event) (*PlatformResponse, error) {

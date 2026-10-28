@@ -9,14 +9,20 @@ import (
 	"github.com/Neon-Dolls/neondoll/Core/Interaction"
 	"github.com/Neon-Dolls/neondoll/Core/Session"
 	"github.com/Neon-Dolls/neondoll/Core/SessionEvent"
+	"github.com/Neon-Dolls/neondoll/DollLink/Events"
 )
 
 type IngressFactory func(externalidentity.GatewayInstanceID) (*interaction.GatewayIngress, error)
 type ReplayFunc func(context.Context) error
+type ResponseEmitter func(context.Context, session.ID, *events.Event) error
 type HostOption func(*Host)
 
 func WithSessionService(sessions session.Service) HostOption {
 	return func(host *Host) { host.sessions = sessions }
+}
+
+func WithResponseEmitter(emitter ResponseEmitter) HostOption {
+	return func(host *Host) { host.responseEmitter = emitter }
 }
 
 type managedAdapter struct {
@@ -52,14 +58,15 @@ func (m *managedAdapter) stop(ctx context.Context) error {
 // transport. Host.mu is never held across adapter code or waits. Delivery Add
 // and lifecycle exclusion are serialized under Host.mu before Wait begins.
 type Host struct {
-	mu           sync.Mutex
-	adapters     map[externalidentity.GatewayInstanceID]*managedAdapter
-	ingress      IngressFactory
-	replay       ReplayFunc
-	sessions     session.Service
-	closed       bool
-	shutdownDone chan struct{}
-	shutdownErr  error
+	mu              sync.Mutex
+	adapters        map[externalidentity.GatewayInstanceID]*managedAdapter
+	ingress         IngressFactory
+	replay          ReplayFunc
+	sessions        session.Service
+	responseEmitter ResponseEmitter
+	closed          bool
+	shutdownDone    chan struct{}
+	shutdownErr     error
 }
 
 func NewHost() *Host {
@@ -110,7 +117,7 @@ func (h *Host) Register(ctx context.Context, adapter Adapter) error {
 
 	ingress, err := factory(id)
 	if err == nil {
-		err = adapter.Start(context.WithValue(ctx, adapterCallbackKey{}, managed), &boundIngress{version: version, gateway: id, sessions: h.sessions, ingress: ingress, replay: replay})
+		err = adapter.Start(context.WithValue(ctx, adapterCallbackKey{}, managed), &boundIngress{version: version, gateway: id, sessions: h.sessions, ingress: ingress, replay: replay, responseEmitter: h.responseEmitter})
 	}
 
 	h.mu.Lock()

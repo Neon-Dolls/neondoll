@@ -25,6 +25,7 @@ type testIngress struct {
 	mu            sync.Mutex
 	messages      []gateway.VerifiedSender
 	events        []*events.Event
+	responses     []*events.Event
 	failures      int
 	attempts      int
 	handleEntered chan struct{}
@@ -36,6 +37,12 @@ func (*testIngress) ResolvePlatformSession(context.Context, string) (session.ID,
 }
 func (*testIngress) ExternalConversationRef(context.Context, session.ID) (string, error) {
 	return "synthetic/chat/7", nil
+}
+func (i *testIngress) EmitInteractionResponse(_ context.Context, _ session.ID, response *events.Event) error {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.responses = append(i.responses, response)
+	return nil
 }
 func (i *testIngress) HandleLegacy(_ context.Context, _ session.ID, s gateway.VerifiedSender, event *events.Event) (*events.Event, error) {
 	i.mu.Lock()
@@ -67,7 +74,11 @@ func (i *testIngress) HandleLegacy(_ context.Context, _ session.ID, s gateway.Ve
 }
 func (i *testIngress) HandlePlatformMessage(ctx context.Context, _ string, s gateway.VerifiedSender, e *events.Event) (*gateway.PlatformResponse, error) {
 	_, err := i.HandleLegacy(ctx, "session-1", s, e)
-	return &gateway.PlatformResponse{SessionID: "session-1"}, err
+	if err != nil {
+		return nil, err
+	}
+	response := events.NewResponse(e.ID, e.DollID, "ok")
+	return &gateway.PlatformResponse{SessionID: "session-1", Event: &response}, nil
 }
 func (*testIngress) HandleSessionEvent(context.Context, gateway.VerifiedSender, sessionevent.Event) (*permissionrequest.Request, error) {
 	return nil, nil
@@ -321,6 +332,9 @@ func TestGatewayInboundPreservesMediaReferences(t *testing.T) {
 	defer ingress.mu.Unlock()
 	if len(ingress.events) != 1 {
 		t.Fatalf("events=%d", len(ingress.events))
+	}
+	if len(ingress.responses) != 1 || ingress.responses[0].CorrelationID != "media:7" {
+		t.Fatalf("responses=%#v", ingress.responses)
 	}
 	payload, ok := ingress.events[0].Payload.(events.MessagePayload)
 	if !ok || payload.Text != "caption" || len(payload.Media) != 1 || payload.Media[0].MediaID != "provider-file" {
