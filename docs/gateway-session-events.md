@@ -84,16 +84,24 @@ The shared runtime preserves the independently built Telegram guest ABI v2:
   remain available subject to grants;
 - granted `state_get` and `state_put` provide durable per-instance state.
 
+ABI v2 negotiates the host-to-guest event buffer through
+`gateway_event_buf_size`. Existing 4 KiB guests remain loadable, while Core
+supports envelopes up to 64 KiB when the guest advertises sufficient space.
+Guest-to-host events are likewise limited to 64 KiB and 64 events per guest
+call. Extension state values are limited to 4 MiB and mediated HTTP responses
+to 4 MiB. These byte limits are checked before copying; events are rejected in
+full and are never truncated.
+
 `telegram_token` is an ABI compatibility name for the installation-scoped
 secret of that name, not Telegram-specific authority in Core. `session.route`
 also includes the existing `chat_id` alias alongside the generic conversation
 reference.
 
-The Telegram PR #5 guest source at `5924bfc` builds against ABI v2. The
-compatibility test sends `session.route` plus `session.event` through that
-actual guest and verifies that its `delivery.result` repeats the stable
-delivery ID. Reproduce that behavioral check by independently building the
-Telegram guest and passing the resulting artifact to Core:
+The Telegram PR #5 guest builds independently against ABI v2. The compatibility
+test sends `session.route` plus `session.event` through that actual guest and
+verifies that its `delivery.result` repeats the stable delivery ID. Reproduce
+that behavioral check by independently building the Telegram guest and passing
+the resulting artifact to Core:
 
 ```sh
 docker run --rm -v "$TELEGRAM_REPO:/src" -w /src tinygo/tinygo:0.39.0 \
@@ -104,22 +112,19 @@ NEONDOLL_TELEGRAM_WASM="$TELEGRAM_REPO/wasm/build/gateway-current.wasm" \
   -run TestTelegramABICompatibilityWhenArtifactAvailable -count=1 -v
 ```
 
-At review time, PR #5's checked-in `wasm/build/gateway.wasm` does not compile in
-Wazero (`invalid data segment prefix`), while the artifact rebuilt from the
-same PR head with the command above initializes and passes the behavioral
-test. Telegram must publish the reproducibly built artifact; Core does not
-special-case invalid WASM binaries.
-
 Core durably stages each emitted `message.incoming` before invoking trusted
 ingress, retries ingress failures without polling past the event, and replies
 with `inbound.accepted` containing the stable event ID only after acceptance.
-The current Telegram PR #5 guest does not handle `inbound.accepted` and still
-advances its in-memory polling cursor when it emits the event. To close the
-remaining guest-side crash window, it must handle that event, match its
-`event_id`, and advance and persist the corresponding cursor through
-`state_get`/`state_put` only after acceptance. Core already supplies these ABI
-v2 capabilities and no Core rebuild or ABI change is required. Delivery-result
-correlation requires no Telegram-side change.
+The Telegram guest matches that event ID and durably advances only the accepted
+cursor prefix through `state_get`/`state_put`.
+
+Gateway message payloads may carry small `media` references containing a media
+type, provider-scoped media and unique IDs, filename, MIME type, declared size,
+caption, and provider message/conversation identifiers. Binary media is never
+embedded in the Gateway envelope or extension state. A future separately
+authorized capability may use the provider reference to retrieve content; the
+reference itself grants no authority and Core's generic runtime contains no
+provider-specific download behavior.
 
 ## Security and lifecycle
 

@@ -36,12 +36,13 @@ type deliveryResult struct {
 	Error      string `json:"error"`
 }
 type gatewayIncoming struct {
-	EventType string `json:"event_type"`
-	Source    string `json:"source"`
-	UpdateID  int64  `json:"update_id"`
-	ChatID    int64  `json:"chat_id"`
-	SenderID  int64  `json:"sender_id"`
-	Text      string `json:"text"`
+	EventType string                  `json:"event_type"`
+	Source    string                  `json:"source"`
+	UpdateID  int64                   `json:"update_id"`
+	ChatID    int64                   `json:"chat_id"`
+	SenderID  int64                   `json:"sender_id"`
+	Text      string                  `json:"text"`
+	Media     []events.MediaReference `json:"media,omitempty"`
 }
 
 type GatewayAdapter struct {
@@ -245,7 +246,14 @@ func (a *GatewayAdapter) handleInbound(ctx context.Context, in gatewayIncoming) 
 		_, err = a.ingress.HandleSessionEvent(ctx, sender, event)
 		return err
 	}
-	event := events.NewDollMessage(a.manifest.InstanceID+":"+a.inboundID(in), a.manifest.Gateway.DollID, in.Text)
+	event := events.Event{
+		ID:        a.manifest.InstanceID + ":" + a.inboundID(in),
+		Type:      events.TypeMessage,
+		Timestamp: time.Now().UTC(),
+		Source:    "client",
+		DollID:    a.manifest.Gateway.DollID,
+		Payload:   events.MessagePayload{Text: in.Text, Media: append([]events.MediaReference(nil), in.Media...)},
+	}
 	_, err := a.ingress.HandlePlatformMessage(ctx, conversation, sender, &event)
 	return err
 }

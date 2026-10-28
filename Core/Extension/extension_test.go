@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -23,6 +24,7 @@ import (
 type testIngress struct {
 	mu            sync.Mutex
 	messages      []gateway.VerifiedSender
+	events        []*events.Event
 	failures      int
 	attempts      int
 	handleEntered chan struct{}
@@ -35,7 +37,7 @@ func (*testIngress) ResolvePlatformSession(context.Context, string) (session.ID,
 func (*testIngress) ExternalConversationRef(context.Context, session.ID) (string, error) {
 	return "synthetic/chat/7", nil
 }
-func (i *testIngress) HandleLegacy(_ context.Context, _ session.ID, s gateway.VerifiedSender, _ *events.Event) (*events.Event, error) {
+func (i *testIngress) HandleLegacy(_ context.Context, _ session.ID, s gateway.VerifiedSender, event *events.Event) (*events.Event, error) {
 	i.mu.Lock()
 	i.attempts++
 	if i.failures > 0 {
@@ -56,6 +58,10 @@ func (i *testIngress) HandleLegacy(_ context.Context, _ session.ID, s gateway.Ve
 	}
 	i.mu.Lock()
 	i.messages = append(i.messages, s)
+	if event != nil {
+		copy := *event
+		i.events = append(i.events, &copy)
+	}
 	i.mu.Unlock()
 	return nil, nil
 }
@@ -225,6 +231,53 @@ func TestManifestValidationAndDurableStateRestart(t *testing.T) {
 	bad.Artifact.SHA256 = fmt.Sprintf("%064d", 0)
 	if err := runtime.Load(context.Background(), bad, findRepoRoot(t)); !errors.Is(err, ErrInvalidManifest) {
 		t.Fatalf("integrity error = %v", err)
+	}
+}
+
+func TestRuntimeSupportsBoundedStructuredEventsBeyondLegacyBuffer(t *testing.T) {
+	ctx := context.Background()
+	runtime, err := NewWASMRuntime(ctx, NewFileStateStore(t.TempDir()), t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close(ctx)
+	manifest := testManifest(t, "large-event")
+	if err = runtime.Load(ctx, manifest, findRepoRoot(t)); err != nil {
+		t.Fatal(err)
+	}
+	payload, _ := json.Marshal(map[string]string{"text": strings.Repeat("界", 4096)})
+	if len(payload) <= minGuestEventBuffer {
+		t.Fatalf("test payload bytes=%d", len(payload))
+	}
+	if err = runtime.HandleEvent(manifest.InstanceID, "session.event", payload); err != nil {
+		t.Fatalf("valid structured event: %v", err)
+	}
+	tooLarge, _ := json.Marshal(map[string]string{"text": strings.Repeat("x", maxGuestEvent)})
+	if err = runtime.HandleEvent(manifest.InstanceID, "session.event", tooLarge); err == nil {
+		t.Fatal("oversized structured event accepted")
+	}
+}
+
+func TestGatewayInboundPreservesMediaReferences(t *testing.T) {
+	ingress := &testIngress{}
+	manifest := testManifest(t, "media")
+	adapter := NewGatewayAdapter(manifest, nil)
+	adapter.ingress, adapter.routes = ingress, ingress
+	in := gatewayIncoming{
+		UpdateID: 7, ChatID: 77, SenderID: 9, Text: "caption",
+		Media: []events.MediaReference{{Type: "image", MediaID: "provider-file", UniqueID: "stable-file", SizeBytes: 42, Caption: "caption", MessageID: "70", ConversationID: "77"}},
+	}
+	if err := adapter.handleInbound(context.Background(), in); err != nil {
+		t.Fatal(err)
+	}
+	ingress.mu.Lock()
+	defer ingress.mu.Unlock()
+	if len(ingress.events) != 1 {
+		t.Fatalf("events=%d", len(ingress.events))
+	}
+	payload, ok := ingress.events[0].Payload.(events.MessagePayload)
+	if !ok || payload.Text != "caption" || len(payload.Media) != 1 || payload.Media[0].MediaID != "provider-file" {
+		t.Fatalf("payload=%#v", ingress.events[0].Payload)
 	}
 }
 
