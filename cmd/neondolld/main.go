@@ -19,6 +19,7 @@ import (
 	"github.com/Neon-Dolls/neondoll/Core/Config"
 	"github.com/Neon-Dolls/neondoll/Core/DollMind"
 	"github.com/Neon-Dolls/neondoll/Core/Enrollment"
+	"github.com/Neon-Dolls/neondoll/Core/Extension"
 	"github.com/Neon-Dolls/neondoll/Core/Inference"
 	"github.com/Neon-Dolls/neondoll/Core/Interaction"
 	"github.com/Neon-Dolls/neondoll/Core/Invitation"
@@ -336,6 +337,30 @@ func main() {
 		os.Exit(1)
 	}
 	defer gatewayRuntime.Shutdown(context.Background())
+	extensionState := extension.NewFileStateStore(filepath.Join(cfg.Paths.DataDir, "extensions", "state"))
+	extensionRuntime, err := extension.NewWASMRuntime(ctx, extensionState, cfg.Paths.SecretsDir)
+	if err != nil {
+		log.Error("extension runtime setup error", map[string]any{"error": err.Error()})
+		os.Exit(1)
+	}
+	manifestJSON, err := json.Marshal(cfg.Extensions)
+	var extensionManifests []extension.Manifest
+	if err == nil {
+		err = json.Unmarshal(manifestJSON, &extensionManifests)
+	}
+	if err != nil {
+		log.Error("extension manifest setup error", map[string]any{"error": err.Error()})
+		os.Exit(1)
+	}
+	extensionManager, err := extension.NewManager(extensionRuntime, gatewayRuntime, cfg.Paths.DataDir, extensionManifests)
+	if err == nil {
+		err = extensionManager.LoadEnabled(ctx)
+	}
+	if err != nil {
+		log.Error("extension manager startup error", map[string]any{"error": fmt.Sprint(err)})
+		os.Exit(1)
+	}
+	defer extensionManager.Shutdown(context.Background())
 	log.Info("Gateway runtime ready")
 
 	// Create WebSocket transport.

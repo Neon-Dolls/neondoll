@@ -46,6 +46,11 @@ type hostedAdapter struct {
 	deliver error
 }
 
+type gatewayRoutingIngress interface {
+	ResolvePlatformSession(context.Context, string) (session.ID, error)
+	ExternalConversationRef(context.Context, session.ID) (string, error)
+}
+
 func (a *hostedAdapter) InstanceID() externalidentity.GatewayInstanceID { return a.id }
 func (a *hostedAdapter) SessionEventVersion() int                       { return a.version }
 func (a *hostedAdapter) Start(_ context.Context, ingress gateway.Ingress) error {
@@ -241,6 +246,43 @@ func TestTelegramPR4InboundEnvelopeUsesCoreOwnedSessionResolution(t *testing.T) 
 	resolved, err := f.services.Sessions().Lookup(context.Background(), first.SessionID)
 	if err != nil || resolved.Owner.InstanceID != "gateway-main" || resolved.ExternalConversationRef != "telegram/chat/9001" {
 		t.Fatalf("Core Session=%#v error=%v", resolved, err)
+	}
+}
+
+func TestGatewayIngressResolvesAndAuthorizesTransportRoutes(t *testing.T) {
+	f := newGatewayFixture(t)
+	adapter := f.register(t, gateway.StructuredSessionEventVersion)
+	routes, ok := adapter.endpoint().(gatewayRoutingIngress)
+	if !ok {
+		t.Fatal("bound Gateway ingress lacks routing extension")
+	}
+
+	created, err := routes.ResolvePlatformSession(context.Background(), "telegram/chat/9001")
+	if err != nil {
+		t.Fatal(err)
+	}
+	route, err := routes.ExternalConversationRef(context.Background(), created)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if route != "telegram/chat/9001" {
+		t.Fatalf("route = %#v", route)
+	}
+
+	foreign, err := f.services.Sessions().Create(context.Background(), session.CreateRequest{
+		Owner: session.Owner{Kind: session.OwnerGateway, InstanceID: "gateway-other"}, ExternalConversationRef: "telegram/chat/42",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := routes.ExternalConversationRef(context.Background(), foreign.ID); !errors.Is(err, gateway.ErrUnavailable) {
+		t.Fatalf("foreign route error = %v", err)
+	}
+	if _, err := f.services.Sessions().Close(context.Background(), created); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := routes.ExternalConversationRef(context.Background(), created); !errors.Is(err, gateway.ErrUnavailable) {
+		t.Fatalf("closed route error = %v", err)
 	}
 }
 

@@ -103,8 +103,26 @@ type boundIngress struct {
 }
 
 func (b *boundIngress) HandlePlatformMessage(ctx context.Context, conversationRef string, sender VerifiedSender, event *events.Event) (*PlatformResponse, error) {
-	if b.sessions == nil || strings.TrimSpace(conversationRef) == "" || event == nil {
+	if event == nil {
 		return nil, ErrHostNotConfigured
+	}
+	resolved, err := b.ResolvePlatformSession(ctx, conversationRef)
+	if err != nil {
+		return nil, err
+	}
+	response, err := b.HandleLegacy(ctx, resolved, sender, event)
+	if err != nil {
+		return nil, err
+	}
+	return &PlatformResponse{SessionID: resolved, Event: response}, nil
+}
+
+// ResolvePlatformSession creates or resumes the active Session owned by this
+// authenticated Gateway instance. Adapters use it for structured inbound
+// events that must not be interpreted as model input.
+func (b *boundIngress) ResolvePlatformSession(ctx context.Context, conversationRef string) (session.ID, error) {
+	if b.sessions == nil || strings.TrimSpace(conversationRef) == "" {
+		return "", ErrHostNotConfigured
 	}
 	owner := session.Owner{Kind: session.OwnerGateway, InstanceID: string(b.gateway)}
 	resolved, err := b.sessions.Resume(ctx, session.ResumeRequest{Owner: owner, ExternalConversationRef: conversationRef})
@@ -115,13 +133,26 @@ func (b *boundIngress) HandlePlatformMessage(ctx context.Context, conversationRe
 		}
 	}
 	if err != nil {
-		return nil, err
+		return "", err
 	}
-	response, err := b.HandleLegacy(ctx, resolved.ID, sender, event)
+	return resolved.ID, nil
+}
+
+// ExternalConversationRef returns restart-safe transport routing only when the Session is
+// active and still owned by this authenticated Gateway instance.
+func (b *boundIngress) ExternalConversationRef(ctx context.Context, sessionID session.ID) (string, error) {
+	if b.sessions == nil || strings.TrimSpace(string(sessionID)) == "" {
+		return "", ErrHostNotConfigured
+	}
+	resolved, err := b.sessions.Lookup(ctx, sessionID)
 	if err != nil {
-		return nil, err
+		return "", err
 	}
-	return &PlatformResponse{SessionID: resolved.ID, Event: response}, nil
+	want := session.Owner{Kind: session.OwnerGateway, InstanceID: string(b.gateway)}
+	if resolved.Status != session.StatusActive || resolved.Owner != want || strings.TrimSpace(resolved.ExternalConversationRef) == "" {
+		return "", ErrUnavailable
+	}
+	return resolved.ExternalConversationRef, nil
 }
 
 func (b *boundIngress) HandleLegacy(ctx context.Context, sessionID session.ID, sender VerifiedSender, event *events.Event) (*events.Event, error) {

@@ -28,13 +28,40 @@ type RelayConfig struct {
 
 // Config holds the Doll's runtime configuration.
 type Config struct {
-	Core      CoreConfig      `json:"core"`
-	Console   ConsoleConfig   `json:"console"`
-	Inference InferenceConfig `json:"inference"`
-	Paths     PathConfig      `json:"paths"`
-	Link      LinkConfig      `json:"link"`
-	HTTP      HTTPConfig      `json:"http"`
-	Relay     RelayConfig     `json:"relay"`
+	Core       CoreConfig          `json:"core"`
+	Console    ConsoleConfig       `json:"console"`
+	Inference  InferenceConfig     `json:"inference"`
+	Paths      PathConfig          `json:"paths"`
+	Link       LinkConfig          `json:"link"`
+	HTTP       HTTPConfig          `json:"http"`
+	Relay      RelayConfig         `json:"relay"`
+	Extensions []ExtensionManifest `json:"extensions,omitempty"`
+}
+
+type ExtensionArtifact struct {
+	Path   string `json:"path"`
+	SHA256 string `json:"sha256"`
+}
+type ExtensionGateway struct {
+	Platform           string `json:"platform"`
+	DollID             string `json:"doll_id"`
+	ConversationPrefix string `json:"conversation_prefix"`
+}
+type ExtensionManifest struct {
+	Version       int               `json:"version"`
+	ExtensionID   string            `json:"extension_id"`
+	InstanceID    string            `json:"instance_id"`
+	Contract      string            `json:"contract"`
+	ABI           int               `json:"abi_version"`
+	Enabled       bool              `json:"enabled"`
+	ManagedBy     string            `json:"managed_by,omitempty"`
+	Artifact      ExtensionArtifact `json:"artifact"`
+	Configuration json.RawMessage   `json:"configuration,omitempty"`
+	Requested     []string          `json:"requested_capabilities,omitempty"`
+	Granted       []string          `json:"granted_capabilities,omitempty"`
+	HTTPAllowlist []string          `json:"http_allowlist,omitempty"`
+	Secrets       map[string]string `json:"secrets,omitempty"`
+	Gateway       *ExtensionGateway `json:"gateway,omitempty"`
 }
 
 // PulseConfig holds runtime configuration for the Pulse temporal subsystem.

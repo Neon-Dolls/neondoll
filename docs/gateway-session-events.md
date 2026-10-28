@@ -1,69 +1,138 @@
-# Gateway structured Session event ABI
+# Core 5 extension runtime and Gateway contract
 
-Core owns Gateway instance identity and lifecycle. A managed Gateway is
-registered with `Core/Gateway.Host` under its configured instance ID; incoming
-payloads cannot select or override that identity.
+Core owns extension installation identity, lifecycle, capability grants,
+Interaction Sessions, participant resolution, permissions, and durable Session
+event delivery. Guest-supplied identity or authority fields are never trusted.
 
-The Core adapter contract has two integer versions:
+## Package structure
 
-- version `0` preserves legacy request/response text interactions through
-  `Ingress.HandleLegacy`;
-- version `1` adds `Ingress.HandleSessionEvent` and outbound
-  `OutboundEnvelope` delivery.
+- `Core/Extension`: manifest v1, Extension Manager, shared Wazero runtime,
+  namespaced durable state, and the Gateway contract adapter.
+- `Core/Gateway`: the authenticated in-process Gateway Host from PR #113.
+- `Core/Runtime.GatewayRuntime`: durable Session events, permission requests,
+  replay, and production Gateway registration.
 
-This version is distinct from Telegram's Wazero guest ABI version (`2`). Core
-does not execute guest memory, project configuration, credentials, HTTPS, or
-platform polling. Those remain owned by the existing Telegram Wazero host.
+The runtime supports Gateway contract `gateway` with guest ABI version `2`.
+The identifiers `capability` and `package_source` are reserved and rejected as
+unsupported; they are not partially implemented.
 
-`OutboundEnvelope` deliberately matches Telegram's existing host/guest
-`GatewayMessage` event shape: `{"v":0,"type":"session.event","payload":...}`.
-The payload is the canonical `SessionEvent.Delivery`, including its stable
-delivery ID and targeted principal. A Telegram-side adapter can therefore call
-its existing `GatewayRuntime.HandleEvent(contract.Version0, envelope.Type,
-string(envelope.Payload))` without another wire protocol. Delivery IDs must be
-used for adapter deduplication. Media remains represented by references in
-SessionEvent parts; the ABI does not define another file-transfer mechanism.
+## Manifest and grants
 
-The Core-bound `Ingress` supplies the Gateway identity out of band. Adapters
-supply only platform-verified sender metadata (platform and external subject
-ID). Core resolves that tuple through its configured ExternalIdentity resolver,
-then independently checks Session ownership, participant binding, and Owner
-authority. Payload claims do not grant authority.
+Each installation declares an extension ID, Core-assigned instance ID,
+contract, ABI, artifact path and SHA-256, redacted guest configuration,
+requested capabilities, separately granted capabilities, HTTPS allowlist,
+scoped secret-file names, and Gateway routing configuration. A request has no
+effect unless trusted Core configuration grants it.
 
-Telegram PR #4 emits `GatewayEventEnvelope` values with verified platform
-`chat_id` and `sender_id` metadata. Its adapter maps `chat_id` to an opaque
-external conversation reference and calls `Ingress.HandlePlatformMessage`.
-Core resolves or creates the Session under the adapter's bound Gateway identity
-and resolves `sender_id` through trusted ExternalIdentity configuration. A
-Telegram ID is never a Core Session ID or an Owner claim.
+Relative artifacts resolve under `paths.data_dir`; absolute paths and paths
+which escape that directory are rejected. Relative secrets resolve under
+`paths.secrets_dir`; contents never enter the configuration projection. State
+lives beneath `paths.data_dir/extensions/state`, namespaced per instance.
 
-Structured delivery to a disconnected Gateway stays pending. Registering an
-instance replays durable pending deliveries with their original IDs. An
-adapter can mark a failure terminal with `SessionEvent.TerminalDeliveryError`;
-ordinary adapter errors remain retryable. Version 0 adapters reject structured
-delivery terminally while legacy text continues to work.
+There are two explicit installation sources:
 
-`Runtime.GatewayRuntime` is the production composition boundary. It owns the
-Gateway host, durable SessionEvent service, PermissionRequest manager, and
-PermissionBridge for the daemon lifetime. Creating a permission through
-`GatewayRuntime.CreatePermission` persists it before presentation. Approval or
-denial records the decision only and never resumes or executes an action.
+- configuration-managed installations are declared in the Core configuration
+  and reference an integrity-pinned artifact already located beneath
+  `paths.data_dir`;
+- locally installed artifacts are integrity-checked at the trusted local source,
+  copied to `paths.data_dir/extensions/installed/<instance>/module.wasm`, and
+  reconstructed from the persisted staged manifest after restart.
 
-## Telegram follow-up boundary
+Gateway events cannot install extensions or modify either source.
 
-The Telegram repository requires a separate follow-up adapter (not another
-Wazero engine) that implements `gateway.Adapter` around its existing
-`host.GatewayRuntime`:
+```json
+{
+  "extensions": [{
+    "version": 1,
+    "extension_id": "telegram",
+    "instance_id": "telegram-main",
+    "contract": "gateway",
+    "abi_version": 2,
+    "enabled": true,
+    "artifact": {
+      "path": "extensions/telegram/gateway.wasm",
+      "sha256": "<64 lowercase hex characters>"
+    },
+    "configuration": {
+      "version": 1,
+      "telegram": {"host": "https://api.telegram.org"},
+      "polling": {"timeout_seconds": 25, "allowed_updates": ["message"]}
+    },
+    "requested_capabilities": ["http", "secrets", "state", "log"],
+    "granted_capabilities": ["http", "secrets", "state", "log"],
+    "http_allowlist": ["api.telegram.org"],
+    "secrets": {"telegram_token": "telegram-main.token"},
+    "gateway": {
+      "platform": "telegram",
+      "doll_id": "default",
+      "conversation_prefix": "telegram/chat/"
+    }
+  }]
+}
+```
 
-1. `Start` starts the existing WASM runtime and retains the Core-bound
-   `gateway.Ingress`.
-2. Its existing poll loop converts `message.incoming` envelopes into
-   `HandlePlatformMessage` calls using verified `sender_id` and `chat_id`.
-3. `Deliver` decodes the Core `OutboundEnvelope` and calls the existing
-   `HandleEvent` export path. The guest must add handling for `session.event`
-   and Telegram rendering/sending; credentials, redacted configuration, HTTPS
-   allowlisting, guest memory, and polling remain unchanged.
-4. `Stop` delegates to the existing runtime shutdown.
+## ABI compatibility
 
-No Telegram token, configuration projection, HTTP destination policy, or WASM
-linear-memory behavior moves into Core.
+The shared runtime preserves the independently built Telegram guest ABI v2:
+
+- imports use module `gateway_host`;
+- exports are `gateway_abi_version`, `gateway_event_buf`,
+  `gateway_event_buf_size`, `gateway_init`, `gateway_poll`,
+  `gateway_handle_event`, and optional `gateway_shutdown`;
+- envelope v0 remains `{ "v": 0, "type": ..., "payload": ... }`;
+- `log`, `outgoing`, `http_get`, `config_projection`, and `telegram_token`
+  remain available subject to grants;
+- granted `state_get` and `state_put` provide durable per-instance state.
+
+`telegram_token` is an ABI compatibility name for the installation-scoped
+secret of that name, not Telegram-specific authority in Core. `session.route`
+also includes the existing `chat_id` alias alongside the generic conversation
+reference.
+
+The Telegram PR #5 guest source at `5924bfc` builds against ABI v2. The
+compatibility test sends `session.route` plus `session.event` through that
+actual guest and verifies that its `delivery.result` repeats the stable
+delivery ID. Reproduce that behavioral check by independently building the
+Telegram guest and passing the resulting artifact to Core:
+
+```sh
+docker run --rm -v "$TELEGRAM_REPO:/src" -w /src tinygo/tinygo:0.39.0 \
+  tinygo build -target=wasi -opt=z -no-debug \
+  -o /src/wasm/build/gateway-current.wasm /src/wasm/gateway/main.go
+NEONDOLL_TELEGRAM_WASM="$TELEGRAM_REPO/wasm/build/gateway-current.wasm" \
+  go test ./Core/Extension \
+  -run TestTelegramABICompatibilityWhenArtifactAvailable -count=1 -v
+```
+
+At review time, PR #5's checked-in `wasm/build/gateway.wasm` does not compile in
+Wazero (`invalid data segment prefix`), while the artifact rebuilt from the
+same PR head with the command above initializes and passes the behavioral
+test. Telegram must publish the reproducibly built artifact; Core does not
+special-case invalid WASM binaries.
+
+Core durably stages each emitted `message.incoming` before invoking trusted
+ingress, retries ingress failures without polling past the event, and replies
+with `inbound.accepted` containing the stable event ID only after acceptance.
+The current Telegram PR #5 guest does not handle `inbound.accepted` and still
+advances its in-memory polling cursor when it emits the event. To close the
+remaining guest-side crash window, it must handle that event, match its
+`event_id`, and advance and persist the corresponding cursor through
+`state_get`/`state_put` only after acceptance. Core already supplies these ABI
+v2 capabilities and no Core rebuild or ABI change is required. Delivery-result
+correlation requires no Telegram-side change.
+
+## Security and lifecycle
+
+Guests receive no preopened filesystem, unrestricted sockets, or process
+capability. HTTPS is mediated with TLS, hostname allowlists, deadlines,
+redirect validation, and response limits. Wazero memory is bounded and calls
+inherit cancellation. Disable and shutdown use the existing Gateway Host
+lifecycle before stopping and releasing the module.
+
+Configuration reconstructs enabled installations after daemon restart.
+Gateway Sessions and pending deliveries remain Core-owned and replay through
+stable delivery IDs. A single per-installation dispatcher classifies inbound
+events and correlated `delivery.result` envelopes, so polling and delivery can
+never consume one another's output. Durable extension state isolates inbound
+pending records, cursors, and deduplication data by Core-assigned installation
+identity.

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -47,6 +48,46 @@ func TestSaveLoad(t *testing.T) {
 	}
 	if loaded.Core.Profile != "testing" {
 		t.Errorf("expected profile 'testing', got %q", loaded.Core.Profile)
+	}
+}
+
+func TestLoadGatewayExtensionProductionConfiguration(t *testing.T) {
+	cfg := Defaults()
+	cfg.Extensions = []ExtensionManifest{{
+		Version: 1, ExtensionID: "telegram", InstanceID: "telegram-main", Contract: "gateway",
+		ABI: 2, Enabled: true, Artifact: ExtensionArtifact{Path: "gateways/telegram.wasm", SHA256: strings.Repeat("a", 64)},
+		Requested: []string{"http"}, Granted: []string{"http"},
+		Gateway: &ExtensionGateway{Platform: "telegram", DollID: "doll", ConversationPrefix: "telegram/chat/"},
+	}}
+	path := filepath.Join(t.TempDir(), "neondoll.json")
+	if err := Save(path, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(loaded.Extensions) != 1 || loaded.Extensions[0].InstanceID != "telegram-main" {
+		t.Fatalf("loaded extensions = %#v", loaded.Extensions)
+	}
+	encoded, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(encoded) == "" || strings.Contains(string(encoded), "bot_token") {
+		t.Fatalf("Gateway config exposed credential field: %s", encoded)
+	}
+}
+
+func TestLoadDefersExtensionValidationToExtensionManager(t *testing.T) {
+	cfg := Defaults()
+	cfg.Extensions = []ExtensionManifest{{Version: 1, InstanceID: "telegram-main", Contract: "gateway"}}
+	path := filepath.Join(t.TempDir(), "neondoll.json")
+	if err := Save(path, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path); err != nil {
+		t.Fatalf("generic config loader duplicated extension validation: %v", err)
 	}
 }
 
