@@ -69,6 +69,18 @@ func (echoHandler) HandleInteraction(_ context.Context, _ *session.InteractionSe
 	return &response, nil
 }
 
+type resolutionHandler struct {
+	mu       sync.Mutex
+	requests []permissionrequest.ID
+}
+
+func (handler *resolutionHandler) HandlePermissionResolution(_ context.Context, request *permissionrequest.Request) error {
+	handler.mu.Lock()
+	defer handler.mu.Unlock()
+	handler.requests = append(handler.requests, request.ID)
+	return nil
+}
+
 type participantView struct {
 	delegate *session.Manager
 	include  bool
@@ -104,6 +116,10 @@ type eventFixture struct {
 }
 
 func newEventFixture(t *testing.T) *eventFixture {
+	return newEventFixtureWithResolution(t, nil)
+}
+
+func newEventFixtureWithResolution(t *testing.T, resolution permissionrequest.ResolutionHandler) *eventFixture {
 	t.Helper()
 	databasePath := filepath.Join(t.TempDir(), "core.db")
 	store, err := persistence.NewStore(databasePath)
@@ -133,7 +149,12 @@ func newEventFixture(t *testing.T) *eventFixture {
 	}
 	clock := &testClock{now: time.Now().UTC()}
 	requests := permissionrequest.NewWithClock(store.(permissionrequest.Store), actionpolicy.Default(), clock)
-	bridge, err := sessionevent.NewPermissionBridge(requests, resolver, sessions, sessions, delivery)
+	var bridge *sessionevent.PermissionBridge
+	if resolution != nil {
+		bridge, err = sessionevent.NewPermissionBridge(requests, resolver, sessions, sessions, delivery, resolution)
+	} else {
+		bridge, err = sessionevent.NewPermissionBridge(requests, resolver, sessions, sessions, delivery)
+	}
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -147,6 +168,34 @@ func newEventFixture(t *testing.T) *eventFixture {
 	}
 	return &eventFixture{store: store, sessions: sessions, resolver: resolver, requests: requests, delivery: delivery,
 		bridge: bridge, ingress: ingress, transport: transport, clock: clock, session: created, databasePath: databasePath}
+}
+
+func TestAuthenticatedDecisionInvokesContinuationHandler(t *testing.T) {
+	handler := &resolutionHandler{}
+	f := newEventFixtureWithResolution(t, handler)
+	f.admitOwner(t)
+	request, err := f.requests.Create(context.Background(), permissionrequest.CreateRequest{
+		DollID: "doll-1", OwnerID: "owner-zero", Origin: permissionrequest.OriginVoluntary,
+		Action: "read", Question: "May I read?", Capability: "runtime.info", Operation: "read",
+		ExpiresAt: f.clock.Now().Add(time.Hour), Correlation: permissionrequest.Correlation{SessionID: string(f.session.ID)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = f.bridge.Present(context.Background(), request.ID); err != nil {
+		t.Fatal(err)
+	}
+	decision, _ := sessionevent.NewEvent(f.session.ID, sessionevent.TypePermissionDecided,
+		sessionevent.PermissionDecidedPayload{RequestID: string(request.ID), Decision: permissionrequest.DecisionApprove},
+		sessionevent.Correlation{RequestID: string(request.ID)}, time.Now())
+	if _, err = f.ingress.HandleSessionEvent(context.Background(), interaction.VerifiedExternalSender{Platform: "telegram", SubjectID: "owner-42"}, decision); err != nil {
+		t.Fatal(err)
+	}
+	handler.mu.Lock()
+	defer handler.mu.Unlock()
+	if len(handler.requests) != 1 || handler.requests[0] != request.ID {
+		t.Fatalf("resolution callbacks=%v", handler.requests)
+	}
 }
 
 func (f *eventFixture) admitOwner(t *testing.T) {

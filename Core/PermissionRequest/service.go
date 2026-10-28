@@ -49,10 +49,73 @@ func (m *Manager) Create(ctx context.Context, input CreateRequest) (*Request, er
 		Arguments: append(json.RawMessage(nil), input.Arguments...), Status: StatusPending,
 		CreatedAt: now, ExpiresAt: input.ExpiresAt.UTC(), Correlation: input.Correlation,
 	}
+	if hasExecutableAction(input) {
+		value.ContinuationStatus = ContinuationWaiting
+	}
 	if err := m.store.CreatePermissionRequest(ctx, value); err != nil {
 		return nil, err
 	}
 	return clone(value), nil
+}
+
+func hasExecutableAction(input CreateRequest) bool {
+	return strings.TrimSpace(input.Action) != "" && strings.TrimSpace(input.Capability) != "" && strings.TrimSpace(input.Operation) != ""
+}
+
+func (m *Manager) ListReadyContinuations(ctx context.Context) ([]*Request, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	values, err := m.store.ListReadyPermissionContinuations(ctx)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]*Request, len(values))
+	for index := range values {
+		result[index] = clone(values[index])
+	}
+	return result, nil
+}
+
+func (m *Manager) ClaimContinuation(ctx context.Context, id ID) (*Request, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	changed, err := m.store.ClaimPermissionContinuation(ctx, id, m.clock.Now().UTC())
+	if err != nil {
+		return nil, err
+	}
+	current, loadErr := m.store.LoadPermissionRequest(ctx, id)
+	if loadErr != nil {
+		return nil, loadErr
+	}
+	if !changed {
+		return clone(current), ErrContinuationClaimed
+	}
+	return clone(current), nil
+}
+
+func (m *Manager) CompleteContinuation(ctx context.Context, id ID, outcome ContinuationOutcome) (*Request, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	encoded, err := json.Marshal(outcome)
+	if err != nil {
+		return nil, err
+	}
+	target := ContinuationFailed
+	if outcome.Success {
+		target = ContinuationSucceeded
+	}
+	changed, err := m.store.CompletePermissionContinuation(ctx, id, target, encoded, m.clock.Now().UTC())
+	if err != nil {
+		return nil, err
+	}
+	current, loadErr := m.store.LoadPermissionRequest(ctx, id)
+	if loadErr != nil {
+		return nil, loadErr
+	}
+	if !changed && current.ContinuationStatus != target {
+		return nil, ErrInvalidTransition
+	}
+	return clone(current), nil
 }
 
 func (m *Manager) Get(ctx context.Context, id ID) (*Request, error) {
@@ -222,9 +285,14 @@ func clone(value *Request) *Request {
 	}
 	copy := *value
 	copy.Arguments = append(json.RawMessage(nil), value.Arguments...)
+	copy.ContinuationResult = append(json.RawMessage(nil), value.ContinuationResult...)
 	if value.ResolvedAt != nil {
 		resolved := *value.ResolvedAt
 		copy.ResolvedAt = &resolved
+	}
+	if value.ContinuationUpdatedAt != nil {
+		updated := *value.ContinuationUpdatedAt
+		copy.ContinuationUpdatedAt = &updated
 	}
 	return &copy
 }

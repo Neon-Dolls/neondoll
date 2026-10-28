@@ -17,13 +17,21 @@ type PermissionBridge struct {
 	sessions     session.Service
 	participants session.ParticipantService
 	delivery     *Service
+	resolution   permissionrequest.ResolutionHandler
 }
 
-func NewPermissionBridge(requests *permissionrequest.Manager, principals externalidentity.PrincipalResolver, sessions session.Service, participants session.ParticipantService, delivery *Service) (*PermissionBridge, error) {
+func NewPermissionBridge(requests *permissionrequest.Manager, principals externalidentity.PrincipalResolver, sessions session.Service, participants session.ParticipantService, delivery *Service, resolution ...permissionrequest.ResolutionHandler) (*PermissionBridge, error) {
 	if requests == nil || principals == nil || sessions == nil || participants == nil || delivery == nil {
 		return nil, ErrInvalidEvent
 	}
-	return &PermissionBridge{requests: requests, principals: principals, sessions: sessions, participants: participants, delivery: delivery}, nil
+	if len(resolution) > 1 {
+		return nil, ErrInvalidEvent
+	}
+	bridge := &PermissionBridge{requests: requests, principals: principals, sessions: sessions, participants: participants, delivery: delivery}
+	if len(resolution) == 1 {
+		bridge.resolution = resolution[0]
+	}
+	return bridge, nil
 }
 
 // Present emits a structured permission request to one active Session in
@@ -127,9 +135,17 @@ func (b *PermissionBridge) Decide(ctx context.Context, sessionID session.ID, act
 	}
 	switch payload.Decision {
 	case permissionrequest.DecisionApprove:
-		return b.requests.Approve(ctx, request.ID, string(acting.ID))
+		resolved, resolveErr := b.requests.Approve(ctx, request.ID, string(acting.ID))
+		if resolveErr == nil && b.resolution != nil {
+			resolveErr = b.resolution.HandlePermissionResolution(ctx, resolved)
+		}
+		return resolved, resolveErr
 	case permissionrequest.DecisionDeny:
-		return b.requests.Deny(ctx, request.ID, string(acting.ID))
+		resolved, resolveErr := b.requests.Deny(ctx, request.ID, string(acting.ID))
+		if resolveErr == nil && b.resolution != nil {
+			resolveErr = b.resolution.HandlePermissionResolution(ctx, resolved)
+		}
+		return resolved, resolveErr
 	default:
 		return nil, permissionrequest.ErrInvalidRequest
 	}

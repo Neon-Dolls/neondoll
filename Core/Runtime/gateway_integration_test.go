@@ -96,6 +96,18 @@ type gatewayInteractionHandler struct {
 	principal externalidentity.Principal
 }
 
+type permissionResolutionRecorder struct {
+	mu       sync.Mutex
+	requests []permissionrequest.ID
+}
+
+func (recorder *permissionResolutionRecorder) HandlePermissionResolution(_ context.Context, request *permissionrequest.Request) error {
+	recorder.mu.Lock()
+	defer recorder.mu.Unlock()
+	recorder.requests = append(recorder.requests, request.ID)
+	return nil
+}
+
 func (h *gatewayInteractionHandler) HandleInteraction(ctx context.Context, _ *session.InteractionSession, event *events.Event) (*events.Event, error) {
 	h.mu.Lock()
 	h.principal, _ = interaction.ResolvedPrincipal(ctx)
@@ -395,6 +407,38 @@ func TestGatewayUnavailabilityAndRestartReplayDurableDelivery(t *testing.T) {
 	stored, err := restarted.Events().GetDelivery(context.Background(), pending.ID)
 	if err != nil || stored.Status != sessionevent.DeliveryAccepted {
 		t.Fatalf("stored delivery=%#v error=%v", stored, err)
+	}
+}
+
+func TestGatewayRuntimeResumesReadyPermissionContinuationOnRestart(t *testing.T) {
+	f := newGatewayFixture(t)
+	if err := f.runtime.Shutdown(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	manager := f.runtime.PermissionRequests()
+	request, err := manager.Create(context.Background(), permissionrequest.CreateRequest{
+		DollID: "doll-1", OwnerID: "owner-core", Origin: permissionrequest.OriginVoluntary,
+		Action: "read", Question: "May I read?", Capability: "runtime.info", Operation: "read",
+		ExpiresAt: time.Now().Add(time.Hour),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = manager.Approve(context.Background(), request.ID, "owner-core"); err != nil {
+		t.Fatal(err)
+	}
+	recorder := &permissionResolutionRecorder{}
+	restarted, err := runtime.NewGatewayRuntime(context.Background(), f.services, f.store.(sessionevent.Store),
+		f.store.(permissionrequest.Store), f.resolver, f.router, actionpolicy.Default(),
+		runtime.WithPermissionManager(manager), runtime.WithPermissionResolutionHandler(recorder))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer restarted.Shutdown(context.Background())
+	recorder.mu.Lock()
+	defer recorder.mu.Unlock()
+	if len(recorder.requests) != 1 || recorder.requests[0] != request.ID {
+		t.Fatalf("resumed requests=%v", recorder.requests)
 	}
 }
 

@@ -11,6 +11,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -66,7 +67,7 @@ func resolveTaskProvider(resolver *config.ModelResolver, task config.InferenceTa
 	return model, provider, nil
 }
 
-func newProductionToolExecutor(registry *body.Registry, dollID string, actionRules []actionpolicy.Rule, configuredRules []config.BodyAuthorizationRule, configuredPreferences map[string]int) (*dollmind.ToolExecutor, error) {
+func newProductionToolExecutor(registry *body.Registry, dollID string, actionRules []actionpolicy.Rule, configuredRules []config.BodyAuthorizationRule, configuredPreferences map[string]int, options ...dollmind.ToolExecutorOption) (*dollmind.ToolExecutor, error) {
 	if dollID == "" {
 		return nil, fmt.Errorf("production tool executor: Doll identity unavailable")
 	}
@@ -86,8 +87,8 @@ func newProductionToolExecutor(registry *body.Registry, dollID string, actionRul
 	for bodyID, preference := range configuredPreferences {
 		preferences[body.BodyID(bodyID)] = preference
 	}
-	return dollmind.NewToolExecutor(registry, body.NewGuard(registry, bodyAuthority), actionPolicy, dollID,
-		dollmind.WithBodyPreferences(preferences)), nil
+	options = append(options, dollmind.WithBodyPreferences(preferences))
+	return dollmind.NewToolExecutor(registry, body.NewGuard(registry, bodyAuthority), actionPolicy, dollID, options...), nil
 }
 
 func productionBodyAuthorityRules(dollID string, configured []config.BodyAuthorizationRule) ([]body.AuthorityRule, error) {
@@ -288,7 +289,25 @@ func main() {
 		log.Error("production Doll state setup error", map[string]any{"doll_id": dollID, "error": err.Error()})
 		os.Exit(1)
 	}
-	cognitionToolExecutor, err := newProductionToolExecutor(bodyRegistry, dollState.Identity.DollID, cfg.Core.ActionPolicy, cfg.Core.BodyAuthorization, cfg.Core.BodyPreferences)
+	actionPolicy, err := actionpolicy.New(cfg.Core.ActionPolicy)
+	if err != nil {
+		log.Error("Gateway permission policy setup error", map[string]any{"error": err.Error()})
+		os.Exit(1)
+	}
+	permissionStore, ok := store.(permissionrequest.Store)
+	if !ok {
+		log.Error("store does not implement Permission Request Store")
+		os.Exit(1)
+	}
+	permissionManager := permissionrequest.New(permissionStore, actionPolicy)
+	for _, rule := range cfg.Core.ActionPolicy {
+		if rule.Decision == actionpolicy.DecisionRequireApproval && strings.TrimSpace(dollState.Owner.OwnerID) == "" {
+			log.Error("approval-required action policy has no configured Doll Owner", map[string]any{"doll_id": dollState.Identity.DollID})
+			os.Exit(1)
+		}
+	}
+	cognitionToolExecutor, err := newProductionToolExecutor(bodyRegistry, dollState.Identity.DollID, cfg.Core.ActionPolicy, cfg.Core.BodyAuthorization, cfg.Core.BodyPreferences,
+		dollmind.WithPermissionRequests(permissionManager, dollState.Owner.OwnerID, 15*time.Minute))
 	if err != nil {
 		log.Error("cognition tool executor setup error", map[string]any{"error": err.Error()})
 		os.Exit(1)
@@ -299,6 +318,16 @@ func main() {
 		os.Exit(1)
 	}
 	defer acceptanceControl()
+	directCognitionProvider := inference.NewToolEnabledProvider(directProvider)
+	orientCognitionProvider := inference.NewToolEnabledProvider(orientProvider)
+	mindAPI := &productionMindAPI{state: dollState, store: store, provider: directCognitionProvider}
+	scheduler := dollmind.New(directCognitionProvider, log, mindAPI,
+		dollmind.WithModelConfiguration(directModel),
+		dollmind.WithTaskModelConfiguration(config.InferenceTaskOrient, orientCognitionProvider, orientModel),
+		dollmind.WithTaskModelConfiguration(config.InferenceTaskPlan, inference.NewToolEnabledProvider(planProvider), planModel),
+		dollmind.WithToolExecutor(cognitionToolExecutor),
+	)
+	cognitionToolExecutor.SetPermissionResolutionNotifier(scheduler)
 
 	// Create the Interaction service (Doll Link ↔ Persistence bridge).
 	interactionSvc := interaction.New(store, inference.NewToolEnabledProvider(interactionProvider), log,
@@ -315,23 +344,14 @@ func main() {
 		log.Error("authenticated Body interaction ingress setup error", map[string]any{"error": err.Error()})
 		os.Exit(1)
 	}
-	actionPolicy, err := actionpolicy.New(cfg.Core.ActionPolicy)
-	if err != nil {
-		log.Error("Gateway permission policy setup error", map[string]any{"error": err.Error()})
-		os.Exit(1)
-	}
 	eventStore, ok := store.(sessionevent.Store)
 	if !ok {
 		log.Error("store does not implement Session Event Store")
 		os.Exit(1)
 	}
-	permissionStore, ok := store.(permissionrequest.Store)
-	if !ok {
-		log.Error("store does not implement Permission Request Store")
-		os.Exit(1)
-	}
 	gatewayRuntime, err := runtime.NewGatewayRuntime(ctx, coreServices, eventStore, permissionStore,
-		externalIdentityResolver, interactionRouter, actionPolicy)
+		externalIdentityResolver, interactionRouter, actionPolicy,
+		runtime.WithPermissionManager(permissionManager), runtime.WithPermissionResolutionHandler(cognitionToolExecutor))
 	if err != nil {
 		log.Error("Gateway runtime setup error", map[string]any{"error": err.Error()})
 		os.Exit(1)
@@ -444,19 +464,6 @@ func main() {
 	// Pulse opportunities can actually enter cognition.
 	var pulseRunner *pulse.Runner
 	if cfg.Core.Pulse.Enabled {
-		// Create the MindAPI and Scheduler with the real provider
-		// and persist-backed API.
-		directCognitionProvider := inference.NewToolEnabledProvider(directProvider)
-		orientCognitionProvider := inference.NewToolEnabledProvider(orientProvider)
-		mindAPI := &productionMindAPI{state: dollState, store: store, provider: directCognitionProvider}
-		// Create the Scheduler with the real provider and persist-backed API.
-		scheduler := dollmind.New(directCognitionProvider, log, mindAPI,
-			dollmind.WithModelConfiguration(directModel),
-			dollmind.WithTaskModelConfiguration(config.InferenceTaskOrient, orientCognitionProvider, orientModel),
-			dollmind.WithTaskModelConfiguration(config.InferenceTaskPlan, inference.NewToolEnabledProvider(planProvider), planModel),
-			dollmind.WithToolExecutor(cognitionToolExecutor),
-		)
-
 		// Wire the Scheduler as Pulse's MindEntrance.
 		pulseRunner = pulse.NewRunner(cfg.Core.Pulse, pulse.NewRealClock(), pulse.NewProductionRNG(), log, scheduler)
 

@@ -125,6 +125,7 @@ func (s *Service) handleInteraction(ctx context.Context, sessionID session.ID, t
 		Purpose:            inference.PurposeRespond,
 		Temperature:        0.7,
 		TurnID:             turnID,
+		SessionID:          sessionID,
 		ToolExecutor:       s.toolExecutor,
 		MaxToolCalls:       cognitiveexecution.DefaultToolCallLimit,
 		BuildContext: func(ctx context.Context, execution cognitiveexecution.ContextState) ([]inference.Message, error) {

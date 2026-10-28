@@ -12,6 +12,7 @@ import (
 	"github.com/Neon-Dolls/neondoll/Core/Config"
 	contextbuilder "github.com/Neon-Dolls/neondoll/Core/ContextBuilder"
 	"github.com/Neon-Dolls/neondoll/Core/Inference"
+	"github.com/Neon-Dolls/neondoll/Core/PermissionRequest"
 	"github.com/Neon-Dolls/neondoll/Core/Pulse"
 	"github.com/Neon-Dolls/neondoll/DollLink/Events"
 	"github.com/Neon-Dolls/neondoll/DollState"
@@ -117,6 +118,28 @@ func TestDirectCognitionUsesUnifiedMultiStepExecution(t *testing.T) {
 		t.Fatalf("Run result=%+v err=%v", result, err)
 	}
 	assertUnifiedToolIterations(t, provider, "direct-tools", 300, 1648, "direct_A", "direct_B")
+}
+
+func TestPermissionResolutionStartsFreshBoundedCognition(t *testing.T) {
+	provider := &toolContextProvider{responses: []*inference.Response{{Content: "reconsidered"}}}
+	scheduler := newPulseToolScheduler(provider, nil)
+	request := &permissionrequest.Request{
+		ID: "permission-1", Status: permissionrequest.StatusDenied,
+		Capability: "test.echo", Operation: "run",
+	}
+	outcome := permissionrequest.ContinuationOutcome{Success: false, ErrorCode: "owner_denied", Error: "Owner denied the requested action"}
+	if err := scheduler.NotifyPermissionResolution(context.Background(), request, outcome); err != nil {
+		t.Fatal(err)
+	}
+	if len(provider.requests) != 1 || provider.runIDs[0] == "" {
+		t.Fatalf("requests=%#v run IDs=%v", provider.requests, provider.runIDs)
+	}
+	content := joinedInferenceContent(provider.requests[0].Messages)
+	for _, expected := range []string{"permission-1", "owner_denied", "test.echo"} {
+		if !strings.Contains(content, expected) {
+			t.Fatalf("permission resolution context missing %q: %s", expected, content)
+		}
+	}
 }
 
 func assertUnifiedToolIterations(t *testing.T, provider *toolContextProvider, model string, outputBudget, inputBudget int, firstCall, secondCall string) {

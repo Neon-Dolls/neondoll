@@ -30,6 +30,21 @@ type GatewayRuntime struct {
 	done        chan struct{}
 }
 
+type GatewayRuntimeOption func(*gatewayRuntimeOptions)
+
+type gatewayRuntimeOptions struct {
+	permissions *permissionrequest.Manager
+	resolution  permissionrequest.ResolutionHandler
+}
+
+func WithPermissionManager(manager *permissionrequest.Manager) GatewayRuntimeOption {
+	return func(options *gatewayRuntimeOptions) { options.permissions = manager }
+}
+
+func WithPermissionResolutionHandler(handler permissionrequest.ResolutionHandler) GatewayRuntimeOption {
+	return func(options *gatewayRuntimeOptions) { options.resolution = handler }
+}
+
 func NewGatewayRuntime(
 	ctx context.Context,
 	services *Services,
@@ -38,6 +53,7 @@ func NewGatewayRuntime(
 	principals externalidentity.PrincipalResolver,
 	router interaction.SessionRouter,
 	policy actionpolicy.Policy,
+	options ...GatewayRuntimeOption,
 ) (*GatewayRuntime, error) {
 	if services == nil || eventStore == nil || permissionStore == nil || principals == nil || router == nil || policy == nil {
 		return nil, errors.New("runtime: invalid Gateway dependencies")
@@ -51,8 +67,22 @@ func NewGatewayRuntime(
 	if err != nil {
 		return nil, err
 	}
-	permissions := permissionrequest.New(permissionStore, policy)
-	bridge, err := sessionevent.NewPermissionBridge(permissions, principals, services.Sessions(), participants, events)
+	configured := gatewayRuntimeOptions{}
+	for _, option := range options {
+		if option != nil {
+			option(&configured)
+		}
+	}
+	permissions := configured.permissions
+	if permissions == nil {
+		permissions = permissionrequest.New(permissionStore, policy)
+	}
+	var bridge *sessionevent.PermissionBridge
+	if configured.resolution != nil {
+		bridge, err = sessionevent.NewPermissionBridge(permissions, principals, services.Sessions(), participants, events, configured.resolution)
+	} else {
+		bridge, err = sessionevent.NewPermissionBridge(permissions, principals, services.Sessions(), participants, events)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -71,6 +101,21 @@ func NewGatewayRuntime(
 		return nil, err
 	}
 	go runtime.retryLoop(replayCtx)
+	if configured.resolution != nil {
+		ready, readyErr := permissions.ListReadyContinuations(ctx)
+		if readyErr != nil {
+			cancel()
+			<-runtime.done
+			return nil, readyErr
+		}
+		for _, request := range ready {
+			if readyErr = configured.resolution.HandlePermissionResolution(ctx, request); readyErr != nil {
+				cancel()
+				<-runtime.done
+				return nil, readyErr
+			}
+		}
+	}
 	return runtime, nil
 }
 
