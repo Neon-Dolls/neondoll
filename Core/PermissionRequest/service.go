@@ -76,6 +76,19 @@ func (m *Manager) ListReadyContinuations(ctx context.Context) ([]*Request, error
 	return result, nil
 }
 
+// HasUnresolvedIntention reports whether an intention is waiting on an Owner
+// decision, continuation execution, or durable outcome handoff. It derives the
+// wait state from the permission lifecycle rather than adding another
+// authoritative state to the intention.
+func (m *Manager) HasUnresolvedIntention(ctx context.Context, intentionID string, exclude ID) (bool, error) {
+	if strings.TrimSpace(intentionID) == "" {
+		return false, nil
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.store.HasUnresolvedPermissionForIntention(ctx, intentionID, exclude)
+}
+
 func (m *Manager) ClaimContinuation(ctx context.Context, id ID) (*Request, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

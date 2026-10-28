@@ -319,7 +319,15 @@ func (s *Scheduler) EnterWake(ctx context.Context, payload events.IntentionWakeP
 
 	// 4. Preserve unfinished business only when the plan explicitly asks for a
 	//    later wake. Otherwise the reconsideration obligation is fulfilled.
-	if result.Plan != nil && result.Plan.RequestFutureCognition {
+	waiting, waitErr := s.toolExecutor.intentionAwaitingPermission(ctx, payload.IntentionID, permissionResolutionFromContext(ctx))
+	if waitErr != nil {
+		return nil, fmt.Errorf("enter wake: permission state: %w", waitErr)
+	}
+	if waiting {
+		// The durable permission lifecycle now owns progress. Keep the same
+		// due intention pending, but DueIntentions suppresses it until the
+		// resolution outcome has been handed back to cognition.
+	} else if result.Plan != nil && result.Plan.RequestFutureCognition {
 		if err := s.rescheduleIntention(payload.IntentionID, result.Plan); err != nil {
 			return nil, fmt.Errorf("enter wake: reschedule intention: %w", err)
 		}

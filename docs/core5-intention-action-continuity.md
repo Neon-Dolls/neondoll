@@ -18,7 +18,18 @@ Tool and permission correlations carry the originating intention ID alongside
 the independent Cognitive Run, Session, Turn, and tool-call identities. An
 approved action still resumes through the existing durable PermissionRequest
 continuation; its outcome starts fresh bounded cognition and includes the
-intention correlation. The original Cognitive Run remains ephemeral.
+intention correlation. While that permission lifecycle is unresolved, the
+originating intention remains pending but is excluded from due-wake discovery,
+so Pulse cannot dispatch the protected action repeatedly. This wait condition
+is derived from the durable permission record; it is not another intention
+state.
+
+After approval or denial, durable outcome notification re-enters the same
+intention through a fresh bounded internal-wake cognition run. The completed
+action is not repeated, and denial does not itself dispatch an action. The Doll
+can complete the intention, explicitly reschedule that same identity, or choose
+a different action through the ordinary Plan/tool path. The original Cognitive
+Run remains ephemeral.
 
 Progress evidence is durable only when the Doll selects it through the
 existing `retain_experience` mechanism. This increment does not add a task

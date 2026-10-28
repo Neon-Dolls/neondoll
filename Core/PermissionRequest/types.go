@@ -129,6 +129,7 @@ type Store interface {
 	ClaimPermissionOutcomeNotification(context.Context, ID, time.Time, time.Time) (bool, error)
 	CompletePermissionOutcomeNotification(context.Context, ID, time.Time) (bool, error)
 	ReleasePermissionOutcomeNotification(context.Context, ID, string, time.Time) (bool, error)
+	HasUnresolvedPermissionForIntention(context.Context, string, ID) (bool, error)
 }
 
 // ResolutionHandler continues a durable decision after the authenticated

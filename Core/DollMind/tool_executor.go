@@ -64,6 +64,13 @@ func (executor *ToolExecutor) SetPermissionResolutionNotifier(notifier Permissio
 	executor.notifier = notifier
 }
 
+func (executor *ToolExecutor) intentionAwaitingPermission(ctx context.Context, intentionID string, exclude permissionrequest.ID) (bool, error) {
+	if executor == nil || executor.requests == nil {
+		return false, nil
+	}
+	return executor.requests.HasUnresolvedIntention(ctx, intentionID, exclude)
+}
+
 // NewToolExecutor composes existing Core authority, Registry, resolver, and
 // Guard boundaries. actionPolicy evaluates the Body-independent action;
 // Guard independently authorizes every selected Body execution.
