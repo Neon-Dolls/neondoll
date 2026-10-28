@@ -312,9 +312,20 @@ func (s *Scheduler) Plan(ctx context.Context, eventType events.Type, input strin
 			"request_future":  plan.RequestFutureCognition,
 		})
 
-	dirty, err := s.materialiseIntention(plan)
-	if err != nil {
-		return nil, false, fmt.Errorf("plan intention: %w", err)
+	var dirty bool
+	// A due intention keeps its Core-owned identity when the Doll decides
+	// there is unfinished work. EnterWake applies that transition after the
+	// complete cognition result is available; creating a second intention here
+	// would lose continuity and leave the original falsely completed.
+	if eventType != events.TypeInternalWake {
+		dirty, err = s.materialiseIntention(plan)
+		if err != nil {
+			return nil, false, fmt.Errorf("plan intention: %w", err)
+		}
+	} else if plan.RequestFutureCognition {
+		if _, err = s.validateFutureCognition(plan); err != nil {
+			return nil, false, fmt.Errorf("plan intention: %w", err)
+		}
 	}
 	obsDirty := s.materialiseExperience(plan)
 	dirty = dirty || obsDirty
@@ -354,19 +365,8 @@ func (s *Scheduler) materialiseIntention(plan *Plan) (bool, error) {
 	if !plan.RequestFutureCognition {
 		return false, nil
 	}
-
-	// Validate subject
-	if plan.FutureSubject == "" {
-		return false, fmt.Errorf("intention rejected: future_subject is empty")
-	}
-
-	// Validate wake time
-	wakeTime, err := time.Parse(time.RFC3339, plan.FutureWakeTime)
-	if err != nil {
-		return false, fmt.Errorf("intention rejected: invalid future_wake_time %q: %w", plan.FutureWakeTime, err)
-	}
-	if !wakeTime.After(s.timeProvider()) {
-		return false, fmt.Errorf("intention rejected: future_wake_time %q is not in the future", plan.FutureWakeTime)
+	if _, err := s.validateFutureCognition(plan); err != nil {
+		return false, err
 	}
 
 	// Create and store the canonical IntentionItem
@@ -394,6 +394,20 @@ func (s *Scheduler) materialiseIntention(plan *Plan) (bool, error) {
 	}
 
 	return true, nil
+}
+
+func (s *Scheduler) validateFutureCognition(plan *Plan) (time.Time, error) {
+	if plan.FutureSubject == "" {
+		return time.Time{}, fmt.Errorf("intention rejected: future_subject is empty")
+	}
+	wakeTime, err := time.Parse(time.RFC3339, plan.FutureWakeTime)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("intention rejected: invalid future_wake_time %q: %w", plan.FutureWakeTime, err)
+	}
+	if !wakeTime.After(s.timeProvider()) {
+		return time.Time{}, fmt.Errorf("intention rejected: future_wake_time %q is not in the future", plan.FutureWakeTime)
+	}
+	return wakeTime, nil
 }
 
 // materialiseExperience converts a Plan's explicitly retained experience

@@ -50,6 +50,7 @@ func (s *Scheduler) executeCognition(ctx context.Context, run *cognitionRunExecu
 		Purpose:            purpose,
 		Temperature:        temperature,
 		CognitiveRunID:     run.id,
+		IntentionID:        run.intention(),
 		ToolExecutor:       toolExecutor,
 		MaxToolCalls:       ToolCallLimit,
 		BuildContext: func(ctx context.Context, state cognitiveexecution.ContextState) ([]inference.Message, error) {

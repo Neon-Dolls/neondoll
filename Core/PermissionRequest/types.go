@@ -57,6 +57,7 @@ type Correlation struct {
 	SessionID      string `json:"session_id,omitempty"`
 	TurnID         string `json:"turn_id,omitempty"`
 	ToolCallID     string `json:"tool_call_id,omitempty"`
+	IntentionID    string `json:"intention_id,omitempty"`
 }
 
 type Request struct {

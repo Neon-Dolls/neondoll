@@ -20,9 +20,10 @@ type cognitionRunExecution struct {
 	resolver *contextbuilder.CognitionRunResolver
 	builder  contextbuilder.SourceBuilder
 
-	mu      sync.Mutex
-	working []contextbuilder.CognitionWorkingRecord
-	tools   []cognitiveexecution.ToolExchange
+	mu          sync.Mutex
+	working     []contextbuilder.CognitionWorkingRecord
+	tools       []cognitiveexecution.ToolExchange
+	intentionID string
 }
 
 func newCognitionRunExecution(id, objective, wakeEvidence string, mind MindAPI) (*cognitionRunExecution, error) {
@@ -113,6 +114,18 @@ func (run *cognitionRunExecution) appendToolExchanges(exchanges []cognitiveexecu
 	run.mu.Lock()
 	defer run.mu.Unlock()
 	run.tools = append(run.tools, exchanges...)
+}
+
+func (run *cognitionRunExecution) setIntentionID(id string) {
+	run.mu.Lock()
+	run.intentionID = id
+	run.mu.Unlock()
+}
+
+func (run *cognitionRunExecution) intention() string {
+	run.mu.Lock()
+	defer run.mu.Unlock()
+	return run.intentionID
 }
 
 func (run *cognitionRunExecution) messages(ctx context.Context, tokenBudget int, instructions ...string) ([]inference.Message, error) {
