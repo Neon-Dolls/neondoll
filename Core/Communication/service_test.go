@@ -109,7 +109,7 @@ func TestRevokedIdentityCannotRemainOutboundTarget(t *testing.T) {
 	if _, err = service.SendText(context.Background(), communication.SendTextRequest{RecipientPrincipalID: "owner", Text: "before revocation"}); err != nil {
 		t.Fatal(err)
 	}
-	if err = sessions.ReconcileParticipantSources(context.Background(), nil, nil); err != nil {
+	if err = sessions.ReconcileParticipantSources(context.Background(), nil); err != nil {
 		t.Fatal(err)
 	}
 	if _, err = service.SendText(context.Background(), communication.SendTextRequest{RecipientPrincipalID: "owner", Text: "after revocation"}); !errors.Is(err, communication.ErrUnknownRecipient) {

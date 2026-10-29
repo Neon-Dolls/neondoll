@@ -227,16 +227,10 @@ func main() {
 		os.Exit(1)
 	}
 	configuredSources := make([]session.ParticipantSource, 0, len(cfg.Core.ExternalIdentities))
-	configuredPrincipals := make([]string, 0, len(cfg.Core.ExternalIdentities))
-	seenPrincipals := make(map[string]struct{})
 	for _, mapping := range cfg.Core.ExternalIdentities {
 		configuredSources = append(configuredSources, session.ParticipantSource{GatewayInstanceID: string(mapping.Identity.GatewayInstanceID), Platform: mapping.Identity.Platform, SubjectID: mapping.Identity.SubjectID, PrincipalID: string(mapping.Principal.ID)})
-		if _, exists := seenPrincipals[string(mapping.Principal.ID)]; !exists {
-			configuredPrincipals = append(configuredPrincipals, string(mapping.Principal.ID))
-			seenPrincipals[string(mapping.Principal.ID)] = struct{}{}
-		}
 	}
-	if err = trustedParticipants.ReconcileParticipantSources(ctx, configuredSources, configuredPrincipals); err != nil {
+	if err = trustedParticipants.ReconcileParticipantSources(ctx, configuredSources); err != nil {
 		log.Error("external identity reconciliation error", map[string]any{"error": err.Error()})
 		os.Exit(1)
 	}

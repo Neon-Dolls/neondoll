@@ -95,7 +95,7 @@ type ParticipantSource struct {
 type TrustedParticipantService interface {
 	ParticipantService
 	BindResolvedParticipant(context.Context, ID, ParticipantSource) (*ParticipantBinding, error)
-	ReconcileParticipantSources(context.Context, []ParticipantSource, []string) error
+	ReconcileParticipantSources(context.Context, []ParticipantSource) error
 }
 
 // ParticipantService is the durable participant-membership boundary used by
@@ -129,5 +129,5 @@ type Store interface {
 	ListSessionParticipants(context.Context, ID) ([]*ParticipantBinding, error)
 	ListPrincipalSessions(context.Context, string) ([]*ParticipantBinding, error)
 	BindResolvedSessionParticipant(context.Context, ID, ParticipantSource, time.Time) (*ParticipantBinding, error)
-	ReconcileSessionParticipantSources(context.Context, []ParticipantSource, []string) error
+	ReconcileSessionParticipantSources(context.Context, []ParticipantSource) error
 }

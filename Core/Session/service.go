@@ -151,10 +151,10 @@ func (m *Manager) BindResolvedParticipant(ctx context.Context, sessionID ID, sou
 	return m.store.BindResolvedSessionParticipant(ctx, sessionID, source, m.clock.Now().UTC())
 }
 
-func (m *Manager) ReconcileParticipantSources(ctx context.Context, sources []ParticipantSource, principals []string) error {
+func (m *Manager) ReconcileParticipantSources(ctx context.Context, sources []ParticipantSource) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.store.ReconcileSessionParticipantSources(ctx, sources, principals)
+	return m.store.ReconcileSessionParticipantSources(ctx, sources)
 }
 
 func (m *Manager) ListParticipants(ctx context.Context, sessionID ID) ([]*ParticipantBinding, error) {

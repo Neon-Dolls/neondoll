@@ -62,14 +62,14 @@ func TestIdentityRevocationPreservesOtherSourceForSamePrincipal(t *testing.T) {
 	if _, err = manager.BindResolvedParticipant(ctx, created.ID, second); err != nil {
 		t.Fatal(err)
 	}
-	if err = manager.ReconcileParticipantSources(ctx, []session.ParticipantSource{{GatewayInstanceID: "gateway", Platform: "telegram", SubjectID: "two", PrincipalID: "owner"}}, []string{"owner"}); err != nil {
+	if err = manager.ReconcileParticipantSources(ctx, []session.ParticipantSource{{GatewayInstanceID: "gateway", Platform: "telegram", SubjectID: "two", PrincipalID: "owner"}}); err != nil {
 		t.Fatal(err)
 	}
 	bindings, err := manager.ListParticipants(ctx, created.ID)
 	if err != nil || len(bindings) != 1 || bindings[0].PrincipalID != "owner" {
 		t.Fatalf("bindings=%#v err=%v", bindings, err)
 	}
-	if err = manager.ReconcileParticipantSources(ctx, nil, nil); err != nil {
+	if err = manager.ReconcileParticipantSources(ctx, nil); err != nil {
 		t.Fatal(err)
 	}
 	bindings, err = manager.ListParticipants(ctx, created.ID)

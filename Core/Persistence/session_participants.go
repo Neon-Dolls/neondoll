@@ -63,14 +63,10 @@ func (s *store) BindResolvedSessionParticipant(ctx context.Context, sessionID se
 	return scanParticipant(s.db.QueryRowContext(ctx, `SELECT `+participantColumns+` FROM interaction_session_participants WHERE session_id=? AND principal_id=?`, sessionID, source.PrincipalID))
 }
 
-func (s *store) ReconcileSessionParticipantSources(ctx context.Context, configured []session.ParticipantSource, principals []string) error {
+func (s *store) ReconcileSessionParticipantSources(ctx context.Context, configured []session.ParticipantSource) error {
 	allowed := make(map[string]string, len(configured))
 	for _, source := range configured {
 		allowed[source.GatewayInstanceID+"\x00"+source.Platform+"\x00"+source.SubjectID] = source.PrincipalID
-	}
-	known := make(map[string]struct{}, len(principals))
-	for _, principal := range principals {
-		known[principal] = struct{}{}
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -111,22 +107,20 @@ func (s *store) ReconcileSessionParticipantSources(ctx context.Context, configur
 		session   session.ID
 		principal string
 	}
-	var unknown []pair
+	var bindings []pair
 	for participantRows.Next() {
 		var value pair
 		if err = participantRows.Scan(&value.session, &value.principal); err != nil {
 			participantRows.Close()
 			return err
 		}
-		if _, ok := known[value.principal]; !ok {
-			unknown = append(unknown, value)
-		}
+		bindings = append(bindings, value)
 	}
 	if err = participantRows.Close(); err != nil {
 		return err
 	}
-	for _, value := range unknown {
-		if _, err = tx.ExecContext(ctx, `DELETE FROM interaction_session_participants WHERE session_id=? AND principal_id=?`, value.session, value.principal); err != nil {
+	for _, value := range bindings {
+		if err = removeUnreferencedParticipant(ctx, tx, value.session, value.principal); err != nil {
 			return err
 		}
 	}
