@@ -51,6 +51,7 @@ type Correlation struct {
 	RequestID        string `json:"request_id,omitempty"`
 	ToolCallID       string `json:"tool_call_id,omitempty"`
 	CognitiveRunID   string `json:"cognitive_run_id,omitempty"`
+	IntentionID      string `json:"intention_id,omitempty"`
 }
 
 type Event struct {

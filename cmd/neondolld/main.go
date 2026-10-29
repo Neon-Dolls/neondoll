@@ -17,6 +17,7 @@ import (
 
 	"github.com/Neon-Dolls/neondoll/Core/ActionPolicy"
 	"github.com/Neon-Dolls/neondoll/Core/Body"
+	"github.com/Neon-Dolls/neondoll/Core/Communication"
 	"github.com/Neon-Dolls/neondoll/Core/Config"
 	"github.com/Neon-Dolls/neondoll/Core/DollMind"
 	"github.com/Neon-Dolls/neondoll/Core/Enrollment"
@@ -220,6 +221,19 @@ func main() {
 		log.Error("Core runtime services setup error", map[string]any{"error": err.Error()})
 		os.Exit(1)
 	}
+	trustedParticipants, ok := coreServices.Sessions().(session.TrustedParticipantService)
+	if !ok {
+		log.Error("external identity reconciliation error", map[string]any{"error": "trusted participant service unavailable"})
+		os.Exit(1)
+	}
+	configuredSources := make([]session.ParticipantSource, 0, len(cfg.Core.ExternalIdentities))
+	for _, mapping := range cfg.Core.ExternalIdentities {
+		configuredSources = append(configuredSources, session.ParticipantSource{GatewayInstanceID: string(mapping.Identity.GatewayInstanceID), Platform: mapping.Identity.Platform, SubjectID: mapping.Identity.SubjectID, PrincipalID: string(mapping.Principal.ID)})
+	}
+	if err = trustedParticipants.ReconcileParticipantSources(ctx, configuredSources); err != nil {
+		log.Error("external identity reconciliation error", map[string]any{"error": err.Error()})
+		os.Exit(1)
+	}
 	activeSessions, err := coreServices.Sessions().ListActive(ctx, nil)
 	if err != nil {
 		log.Error("Interaction Session reconstruction error", map[string]any{"error": err.Error()})
@@ -357,6 +371,17 @@ func main() {
 		os.Exit(1)
 	}
 	defer gatewayRuntime.Shutdown(context.Background())
+	participants, ok := coreServices.Sessions().(session.ParticipantService)
+	if !ok {
+		log.Error("communication setup error", map[string]any{"error": "Session participant service unavailable"})
+		os.Exit(1)
+	}
+	communicationService, err := communication.New(coreServices.Sessions(), participants, gatewayRuntime.Events())
+	if err != nil {
+		log.Error("communication setup error", map[string]any{"error": err.Error()})
+		os.Exit(1)
+	}
+	cognitionToolExecutor.SetCommunicationSender(communicationService)
 	extensionState := extension.NewFileStateStore(filepath.Join(cfg.Paths.DataDir, "extensions", "state"))
 	extensionRuntime, err := extension.NewWASMRuntime(ctx, extensionState, cfg.Paths.SecretsDir)
 	if err != nil {

@@ -31,7 +31,7 @@ type VerifiedExternalSender struct {
 type GatewayIngress struct {
 	gateway      externalidentity.GatewayInstanceID
 	resolver     externalidentity.Resolver
-	participants session.ParticipantService
+	participants session.TrustedParticipantService
 	router       SessionRouter
 	authorizer   SessionAuthorizer
 	decisions    PermissionDecisionHandler
@@ -41,7 +41,11 @@ func NewGatewayIngress(gateway externalidentity.GatewayInstanceID, resolver exte
 	if strings.TrimSpace(string(gateway)) == "" || resolver == nil || participants == nil || router == nil {
 		return nil, ErrInvalidRoute
 	}
-	ingress := &GatewayIngress{gateway: gateway, resolver: resolver, participants: participants, router: router}
+	trustedParticipants, ok := participants.(session.TrustedParticipantService)
+	if !ok {
+		return nil, ErrInvalidRoute
+	}
+	ingress := &GatewayIngress{gateway: gateway, resolver: resolver, participants: trustedParticipants, router: router}
 	if len(decisions) > 1 {
 		return nil, ErrInvalidRoute
 	}
@@ -80,7 +84,7 @@ func (i *GatewayIngress) HandleSessionEvent(ctx context.Context, sender Verified
 	ctx = withResolvedPrincipal(ctx, principal)
 	owner := session.Owner{Kind: session.OwnerGateway, InstanceID: string(i.gateway)}
 	_, err = i.authorizer.AuthorizeSession(ctx, event.SessionID, owner, func(ctx context.Context, resolved *session.InteractionSession) error {
-		_, bindErr := i.participants.BindParticipant(ctx, resolved.ID, string(principal.ID))
+		_, bindErr := i.participants.BindResolvedParticipant(ctx, resolved.ID, session.ParticipantSource{SessionID: resolved.ID, GatewayInstanceID: string(i.gateway), Platform: sender.Platform, SubjectID: sender.SubjectID, PrincipalID: string(principal.ID)})
 		return bindErr
 	})
 	if err != nil {
@@ -112,7 +116,7 @@ func (i *GatewayIngress) HandleVerifiedInteraction(ctx context.Context, sessionI
 	request := RouteRequest{SessionID: sessionID, Owner: owner, Event: event}
 	if err == nil {
 		request.onAuthorized = func(ctx context.Context, resolved *session.InteractionSession) error {
-			_, bindErr := i.participants.BindParticipant(ctx, resolved.ID, string(principal.ID))
+			_, bindErr := i.participants.BindResolvedParticipant(ctx, resolved.ID, session.ParticipantSource{SessionID: resolved.ID, GatewayInstanceID: string(i.gateway), Platform: sender.Platform, SubjectID: sender.SubjectID, PrincipalID: string(principal.ID)})
 			return bindErr
 		}
 	}
