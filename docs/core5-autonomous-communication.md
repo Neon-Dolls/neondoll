@@ -21,6 +21,10 @@ principal binding and grant the new principal nothing until trusted ingress is
 observed. Another valid identity for the same principal, and unrelated
 participants in a multi-party Session, remain intact. Communication trusts the
 reconciled binding and does not repeat external authentication on each send.
+Participant rows created before provenance support are removed from outbound
+targeting during the first reconciliation because their mapping origin cannot
+be proven. Their Sessions and conversation references remain intact; the next
+trusted inbound event restores the binding.
 
 The action passes through the existing action-wide policy before routing.
 `deny` is terminal and `require_approval` creates the existing durable
