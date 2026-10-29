@@ -23,8 +23,13 @@ import (
 
 type communicationSender struct {
 	requests []communication.SendTextRequest
+	peers    []communication.Peer
 	result   communication.Result
 	err      error
+}
+
+func (s *communicationSender) ListPeers(context.Context) ([]communication.Peer, error) {
+	return append([]communication.Peer(nil), s.peers...), nil
 }
 
 func TestCommunicationPendingResultIsExplicitlyDurablyQueued(t *testing.T) {
@@ -66,6 +71,30 @@ func TestCommunicationToolUsesPolicyAndPreservesCorrelation(t *testing.T) {
 	denied := executor.ExecuteCall(context.Background(), inference.ToolCall{ID: "send-2", Arguments: map[string]any{"recipient_principal_id": "owner-1", "text": "blocked"}}, ptrTool(communicationTool()))
 	if denied.Error == nil || denied.Error.Code != "action_denied" || len(sender.requests) != 1 {
 		t.Fatalf("denied=%#v requests=%d", denied, len(sender.requests))
+	}
+}
+
+func TestCommunicationPeerDiscoveryThenSendUsesTrustedPrincipal(t *testing.T) {
+	policy := &permissionPolicy{decision: actionpolicy.DecisionAllow}
+	executor := NewToolExecutor(body.NewRegistry(), body.NewGuard(body.NewRegistry(), &recordingAuthority{}), policy, "doll")
+	sender := &communicationSender{
+		peers:  []communication.Peer{{PrincipalID: "owner-1", Authority: "owner", ActiveGatewayRoute: true, EligibleSessionCount: 1}},
+		result: communication.Result{DeliveryID: "delivery-discovered", Status: sessionevent.DeliveryAccepted},
+	}
+	executor.SetCommunicationSender(sender)
+	discovered := executor.ExecuteCall(context.Background(), inference.ToolCall{ID: "discover", Name: "core.communication__list_peers"}, ptrTool(communicationPeersTool()))
+	if discovered.Status != inference.ToolResultSuccess || discovered.Result["peer_count"] != 1 {
+		t.Fatalf("discovered=%#v", discovered)
+	}
+	peers, ok := discovered.Result["peers"].([]communication.Peer)
+	if !ok || len(peers) != 1 || peers[0].PrincipalID != "owner-1" {
+		t.Fatalf("peers=%#v", discovered.Result["peers"])
+	}
+	sent := executor.ExecuteCall(context.Background(), inference.ToolCall{ID: "send", Name: "core.communication__send_text", Arguments: map[string]any{
+		"recipient_principal_id": peers[0].PrincipalID, "text": "hello after discovery",
+	}}, ptrTool(communicationTool()))
+	if sent.Status != inference.ToolResultSuccess || len(sender.requests) != 1 || sender.requests[0].RecipientPrincipalID != "owner-1" {
+		t.Fatalf("sent=%#v requests=%#v", sent, sender.requests)
 	}
 }
 
@@ -123,6 +152,32 @@ func TestPulseCanInitiateCommunicationThroughSharedExecution(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(sender.requests) != 1 || sender.requests[0].Text != "I noticed something important." || sender.requests[0].Correlation.CognitiveRunID == "" {
+		t.Fatalf("requests=%#v", sender.requests)
+	}
+}
+
+func TestPulseCanDiscoverPeerThenCommunicateThroughSharedExecution(t *testing.T) {
+	policy := &permissionPolicy{decision: actionpolicy.DecisionAllow}
+	executor := NewToolExecutor(body.NewRegistry(), body.NewGuard(body.NewRegistry(), &recordingAuthority{}), policy, "doll")
+	sender := &communicationSender{
+		peers:  []communication.Peer{{PrincipalID: "owner-1", Authority: "owner", ActiveGatewayRoute: true}},
+		result: communication.Result{DeliveryID: "pulse-discovered-delivery", Status: sessionevent.DeliveryAccepted},
+	}
+	executor.SetCommunicationSender(sender)
+	provider := &toolContextProvider{responses: []*inference.Response{
+		{Content: `{"summary":"contact someone","matters":true,"reason":"important observation"}`},
+		{ToolCalls: []inference.ToolCall{{ID: "discover-peer", Name: "core.communication__list_peers", Arguments: map[string]any{}}}},
+		{ToolCalls: []inference.ToolCall{{ID: "send-peer", Name: "core.communication__send_text", Arguments: map[string]any{"recipient_principal_id": "owner-1", "text": "An autonomous update."}}}},
+		{Content: `{"summary":"peer contacted","proposed_action":"wait","observations":[],"should_reorient":false,"request_future_cognition":false}`},
+	}}
+	model := testModelConfiguration("communication-discovery", inference.DefaultModelContextBudget())
+	scheduler := New(provider, logger.New(logger.ErrorLevel, nil), &orientMockAPI{state: &dollstate.DollState{Identity: dollstate.Identity{DollID: "doll"}}},
+		WithModelConfiguration(model), WithTaskModelConfiguration(config.InferenceTaskOrient, provider, model),
+		WithTaskModelConfiguration(config.InferenceTaskPlan, provider, model), WithToolExecutor(executor))
+	if err := scheduler.EnterPulseWake(context.Background(), pulse.PulseWake{Pressure: 0.9, EffectivePressure: 0.8}); err != nil {
+		t.Fatal(err)
+	}
+	if len(sender.requests) != 1 || sender.requests[0].RecipientPrincipalID != "owner-1" || sender.requests[0].Correlation.CognitiveRunID == "" {
 		t.Fatalf("requests=%#v", sender.requests)
 	}
 }
