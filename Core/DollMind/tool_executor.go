@@ -12,25 +12,28 @@ import (
 	"github.com/Neon-Dolls/neondoll/Core/Body"
 	"github.com/Neon-Dolls/neondoll/Core/BodyResolver"
 	"github.com/Neon-Dolls/neondoll/Core/CognitiveExecution"
+	"github.com/Neon-Dolls/neondoll/Core/Communication"
 	"github.com/Neon-Dolls/neondoll/Core/Inference"
 	"github.com/Neon-Dolls/neondoll/Core/PermissionRequest"
 	"github.com/Neon-Dolls/neondoll/Core/Session"
+	"github.com/Neon-Dolls/neondoll/Core/SessionEvent"
 )
 
 // ToolExecutor is the single cognitive tool execution path. It performs the
 // action-wide authority check, resolves trusted Registry Bodies, and delegates
 // every concrete attempt to BodyResolver.Coordinator and therefore Body.Guard.
 type ToolExecutor struct {
-	registry     *body.Registry
-	actionPolicy actionpolicy.Policy
-	coordinator  *bodyresolver.Coordinator
-	dollID       string
-	preferences  map[body.BodyID]int
-	ownerPolicy  bodyresolver.OwnerPolicy
-	requests     *permissionrequest.Manager
-	ownerID      string
-	approvalTTL  time.Duration
-	notifier     PermissionResolutionNotifier
+	registry      *body.Registry
+	actionPolicy  actionpolicy.Policy
+	coordinator   *bodyresolver.Coordinator
+	dollID        string
+	preferences   map[body.BodyID]int
+	ownerPolicy   bodyresolver.OwnerPolicy
+	requests      *permissionrequest.Manager
+	ownerID       string
+	approvalTTL   time.Duration
+	notifier      PermissionResolutionNotifier
+	communication communication.Sender
 }
 
 type PermissionResolutionNotifier interface {
@@ -64,6 +67,12 @@ func (executor *ToolExecutor) SetPermissionResolutionNotifier(notifier Permissio
 	executor.notifier = notifier
 }
 
+// SetCommunicationSender installs Core's durable, transport-neutral outbound
+// Session event boundary. Production sets it after the Gateway runtime exists.
+func (executor *ToolExecutor) SetCommunicationSender(sender communication.Sender) {
+	executor.communication = sender
+}
+
 func (executor *ToolExecutor) intentionAwaitingPermission(ctx context.Context, intentionID string, exclude permissionrequest.ID) (bool, error) {
 	if executor == nil || executor.requests == nil {
 		return false, nil
@@ -86,10 +95,13 @@ func NewToolExecutor(registry *body.Registry, guard *body.Guard, actionPolicy ac
 // Tools projects each currently available semantic capability/operation once.
 // Body selection stays internal; provider-visible names never encode identity.
 func (executor *ToolExecutor) Tools() []inference.Tool {
-	if executor.registry == nil {
+	if executor.registry == nil && executor.communication == nil {
 		return nil
 	}
-	bodies := executor.registry.All()
+	var bodies []body.Body
+	if executor.registry != nil {
+		bodies = executor.registry.All()
+	}
 	sort.Slice(bodies, func(i, j int) bool { return bodies[i].ID() < bodies[j].ID() })
 	byName := make(map[string]inference.Tool)
 	for _, candidate := range bodies {
@@ -103,6 +115,9 @@ func (executor *ToolExecutor) Tools() []inference.Tool {
 	tools := make([]inference.Tool, 0, len(byName))
 	for _, tool := range byName {
 		tools = append(tools, tool)
+	}
+	if executor.communication != nil {
+		tools = append(tools, communicationTool())
 	}
 	sort.Slice(tools, func(i, j int) bool { return tools[i].Name < tools[j].Name })
 	return tools
@@ -146,6 +161,9 @@ func (executor *ToolExecutor) executeCall(ctx context.Context, correlation cogni
 	default:
 		return failureResult(call.ID, "invalid_configuration", "action policy returned an invalid decision")
 	}
+	if tool.CapabilityID == communication.Capability && tool.OperationID == communication.OperationSendText {
+		return executor.sendCommunication(ctx, correlation, call)
+	}
 
 	constraints := bodyresolver.TaskConstraints{}
 	if tool.TargetBodyID != "" {
@@ -168,6 +186,50 @@ func (executor *ToolExecutor) executeCall(ctx context.Context, correlation cogni
 		Arguments:   call.Arguments,
 	})
 	return toolOutcome(call.ID, outcome, rejections, executionErr)
+}
+
+func communicationTool() inference.Tool {
+	return inference.Tool{Name: communication.Capability + inference.ToolNameDelimiter + communication.OperationSendText,
+		Description:  "Send a text message to a known Core principal through their existing active Gateway conversation.",
+		CapabilityID: communication.Capability, OperationID: communication.OperationSendText,
+		InputSchema: map[string]any{"type": "object", "properties": map[string]any{
+			"recipient_principal_id": map[string]any{"type": "string"}, "text": map[string]any{"type": "string"},
+		}, "required": []string{"recipient_principal_id", "text"}},
+	}
+}
+
+func (executor *ToolExecutor) sendCommunication(ctx context.Context, correlation cognitiveexecution.ToolCorrelation, call inference.ToolCall) inference.ToolResult {
+	if executor.communication == nil {
+		return failureResult(call.ID, "communication_unavailable", "communication service is unavailable")
+	}
+	recipient, recipientOK := call.Arguments["recipient_principal_id"].(string)
+	text, textOK := call.Arguments["text"].(string)
+	if !recipientOK || !textOK || strings.TrimSpace(recipient) == "" || strings.TrimSpace(text) == "" {
+		return failureResult(call.ID, "invalid_arguments", "recipient_principal_id and text are required")
+	}
+	result, err := executor.communication.SendText(ctx, communication.SendTextRequest{RecipientPrincipalID: recipient, Text: text, Correlation: communication.Correlation{
+		SessionID: string(correlation.SessionID), TurnID: string(correlation.TurnID), ToolCallID: call.ID,
+		CognitiveRunID: correlation.CognitiveRunID, IntentionID: correlation.IntentionID,
+	}})
+	toolResult := inference.ToolResult{ToolCallID: call.ID, ExecutionID: result.DeliveryID}
+	if err == nil && result.Status == sessionevent.DeliveryAccepted {
+		toolResult.Status = inference.ToolResultSuccess
+		toolResult.Result = map[string]any{"delivery_id": result.DeliveryID, "session_id": string(result.SessionID), "delivery_status": string(result.Status)}
+		return toolResult
+	}
+	code, message := "delivery_failed", "message delivery failed"
+	if result.Status == sessionevent.DeliveryPending {
+		code, message = "delivery_pending", "message is durably queued and awaiting Gateway delivery"
+	} else if errors.Is(err, communication.ErrUnknownRecipient) {
+		code, message = "unknown_recipient", "recipient is not known to Core"
+	} else if errors.Is(err, communication.ErrRecipientUnavailable) || errors.Is(err, sessionevent.ErrRecipientUnavailable) {
+		code, message = "recipient_unavailable", "recipient has no active Gateway conversation"
+	} else if err != nil {
+		message = err.Error()
+	}
+	toolResult.Status = inference.ToolResultFailure
+	toolResult.Error = &inference.ToolError{Code: code, Message: message}
+	return toolResult
 }
 
 func (executor *ToolExecutor) requestApproval(ctx context.Context, correlation cognitiveexecution.ToolCorrelation, call inference.ToolCall, tool *inference.Tool, decision actionpolicy.Result) inference.ToolResult {

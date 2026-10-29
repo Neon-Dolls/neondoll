@@ -17,6 +17,7 @@ import (
 
 	"github.com/Neon-Dolls/neondoll/Core/ActionPolicy"
 	"github.com/Neon-Dolls/neondoll/Core/Body"
+	"github.com/Neon-Dolls/neondoll/Core/Communication"
 	"github.com/Neon-Dolls/neondoll/Core/Config"
 	"github.com/Neon-Dolls/neondoll/Core/DollMind"
 	"github.com/Neon-Dolls/neondoll/Core/Enrollment"
@@ -357,6 +358,17 @@ func main() {
 		os.Exit(1)
 	}
 	defer gatewayRuntime.Shutdown(context.Background())
+	participants, ok := coreServices.Sessions().(session.ParticipantService)
+	if !ok {
+		log.Error("communication setup error", map[string]any{"error": "Session participant service unavailable"})
+		os.Exit(1)
+	}
+	communicationService, err := communication.New(externalIdentityResolver, coreServices.Sessions(), participants, gatewayRuntime.Events())
+	if err != nil {
+		log.Error("communication setup error", map[string]any{"error": err.Error()})
+		os.Exit(1)
+	}
+	cognitionToolExecutor.SetCommunicationSender(communicationService)
 	extensionState := extension.NewFileStateStore(filepath.Join(cfg.Paths.DataDir, "extensions", "state"))
 	extensionRuntime, err := extension.NewWASMRuntime(ctx, extensionState, cfg.Paths.SecretsDir)
 	if err != nil {

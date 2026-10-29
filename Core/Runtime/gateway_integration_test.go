@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/Neon-Dolls/neondoll/Core/ActionPolicy"
+	"github.com/Neon-Dolls/neondoll/Core/Communication"
 	"github.com/Neon-Dolls/neondoll/Core/ExternalIdentity"
 	"github.com/Neon-Dolls/neondoll/Core/Gateway"
 	"github.com/Neon-Dolls/neondoll/Core/Interaction"
@@ -294,6 +295,36 @@ func TestPlatformInteractionResponseUsesDurableSessionDelivery(t *testing.T) {
 	}
 	var payload sessionevent.MessagePayload
 	if json.Unmarshal(decoded.Event.Payload, &payload) != nil || len(payload.Parts) != 1 || payload.Parts[0].Text != "legacy-ok" {
+		t.Fatalf("payload=%s", decoded.Event.Payload)
+	}
+}
+
+func TestAutonomousCommunicationUsesProductionGatewayHost(t *testing.T) {
+	f := newGatewayFixture(t)
+	adapter := f.register(t, gateway.StructuredSessionEventVersion)
+	f.admitOwner(t, adapter)
+	participants := f.services.Sessions().(session.ParticipantService)
+	service, err := communication.New(f.resolver, f.services.Sessions(), participants, f.runtime.Events())
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := service.SendText(context.Background(), communication.SendTextRequest{RecipientPrincipalID: "owner-core", Text: "autonomous message", Correlation: communication.Correlation{CognitiveRunID: "run-1", IntentionID: "intention-1"}})
+	if err != nil || result.Status != sessionevent.DeliveryAccepted || result.DeliveryID == "" {
+		t.Fatalf("result=%#v err=%v", result, err)
+	}
+	delivered := adapter.delivered()
+	if len(delivered) != 1 {
+		t.Fatalf("deliveries=%d", len(delivered))
+	}
+	decoded, err := delivered[0].DecodeDelivery()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decoded.ID != result.DeliveryID || decoded.TargetPrincipalID != "owner-core" || decoded.Event.Correlation.IntentionID != "intention-1" {
+		t.Fatalf("delivery=%#v", decoded)
+	}
+	var payload sessionevent.MessagePayload
+	if json.Unmarshal(decoded.Event.Payload, &payload) != nil || len(payload.Parts) != 1 || payload.Parts[0].Text != "autonomous message" {
 		t.Fatalf("payload=%s", decoded.Event.Payload)
 	}
 }
