@@ -304,7 +304,7 @@ func TestAutonomousCommunicationUsesProductionGatewayHost(t *testing.T) {
 	adapter := f.register(t, gateway.StructuredSessionEventVersion)
 	f.admitOwner(t, adapter)
 	participants := f.services.Sessions().(session.ParticipantService)
-	service, err := communication.New(f.resolver, f.services.Sessions(), participants, f.runtime.Events())
+	service, err := communication.New(f.services.Sessions(), participants, f.runtime.Events())
 	if err != nil {
 		t.Fatal(err)
 	}

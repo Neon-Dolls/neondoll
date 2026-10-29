@@ -7,7 +7,6 @@ import (
 	"testing"
 
 	communication "github.com/Neon-Dolls/neondoll/Core/Communication"
-	externalidentity "github.com/Neon-Dolls/neondoll/Core/ExternalIdentity"
 	"github.com/Neon-Dolls/neondoll/Core/Persistence"
 	"github.com/Neon-Dolls/neondoll/Core/Session"
 	sessionevent "github.com/Neon-Dolls/neondoll/Core/SessionEvent"
@@ -37,16 +36,12 @@ func TestSendTextUsesKnownPrincipalSessionAndDurableDelivery(t *testing.T) {
 	if _, err = sessions.BindParticipant(context.Background(), created.ID, "owner-1"); err != nil {
 		t.Fatal(err)
 	}
-	resolver, err := externalidentity.NewMemoryResolver([]externalidentity.Mapping{{Identity: externalidentity.Identity{GatewayInstanceID: "gateway-1", Platform: "test", SubjectID: "42"}, Principal: externalidentity.Principal{ID: "owner-1", Authority: externalidentity.AuthorityOwner}}})
-	if err != nil {
-		t.Fatal(err)
-	}
 	deliveryTransport := &transport{}
 	events, err := sessionevent.New(store.(sessionevent.Store), sessions, sessions, deliveryTransport)
 	if err != nil {
 		t.Fatal(err)
 	}
-	service, err := communication.New(resolver, sessions, sessions, events)
+	service, err := communication.New(sessions, sessions, events)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -71,6 +66,14 @@ func TestSendTextUsesKnownPrincipalSessionAndDurableDelivery(t *testing.T) {
 	if err != nil || stored.Status != sessionevent.DeliveryPending {
 		t.Fatalf("stored=%#v err=%v", stored, err)
 	}
+	deliveryTransport.err = nil
+	replayed, err := events.RetryDelivery(context.Background(), pending.DeliveryID)
+	if err != nil || replayed.Status != sessionevent.DeliveryAccepted {
+		t.Fatalf("replayed=%#v err=%v", replayed, err)
+	}
+	if len(deliveryTransport.deliveries) != 3 || deliveryTransport.deliveries[1].ID != pending.DeliveryID || deliveryTransport.deliveries[2].ID != pending.DeliveryID {
+		t.Fatalf("replay deliveries=%#v", deliveryTransport.deliveries)
+	}
 }
 
 func TestSendTextRejectsUnknownOrUnroutableRecipient(t *testing.T) {
@@ -80,10 +83,36 @@ func TestSendTextRejectsUnknownOrUnroutableRecipient(t *testing.T) {
 	}
 	defer store.Close()
 	sessions := session.New(store.(session.Store))
-	resolver, _ := externalidentity.NewMemoryResolver(nil)
 	events, _ := sessionevent.New(store.(sessionevent.Store), sessions, sessions, &transport{})
-	service, _ := communication.New(resolver, sessions, sessions, events)
+	service, _ := communication.New(sessions, sessions, events)
 	if _, err = service.SendText(context.Background(), communication.SendTextRequest{RecipientPrincipalID: "forged", Text: "hello"}); !errors.Is(err, communication.ErrUnknownRecipient) {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestRevokedIdentityCannotRemainOutboundTarget(t *testing.T) {
+	store, err := persistence.NewStore(filepath.Join(t.TempDir(), "core.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	sessions := session.New(store.(session.Store))
+	created, err := sessions.Create(context.Background(), session.CreateRequest{Owner: session.Owner{Kind: session.OwnerGateway, InstanceID: "gateway"}, ExternalConversationRef: "chat"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = sessions.BindResolvedParticipant(context.Background(), created.ID, session.ParticipantSource{SessionID: created.ID, GatewayInstanceID: "gateway", Platform: "telegram", SubjectID: "42", PrincipalID: "owner"}); err != nil {
+		t.Fatal(err)
+	}
+	events, _ := sessionevent.New(store.(sessionevent.Store), sessions, sessions, &transport{})
+	service, _ := communication.New(sessions, sessions, events)
+	if _, err = service.SendText(context.Background(), communication.SendTextRequest{RecipientPrincipalID: "owner", Text: "before revocation"}); err != nil {
+		t.Fatal(err)
+	}
+	if err = sessions.ReconcileParticipantSources(context.Background(), nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = service.SendText(context.Background(), communication.SendTextRequest{RecipientPrincipalID: "owner", Text: "after revocation"}); !errors.Is(err, communication.ErrUnknownRecipient) {
 		t.Fatalf("err=%v", err)
 	}
 }

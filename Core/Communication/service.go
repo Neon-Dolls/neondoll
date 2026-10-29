@@ -9,7 +9,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Neon-Dolls/neondoll/Core/ExternalIdentity"
 	"github.com/Neon-Dolls/neondoll/Core/Session"
 	"github.com/Neon-Dolls/neondoll/Core/SessionEvent"
 )
@@ -51,17 +50,16 @@ type Sender interface {
 }
 
 type Service struct {
-	principals   externalidentity.PrincipalResolver
 	sessions     session.Service
 	participants session.ParticipantService
 	events       *sessionevent.Service
 }
 
-func New(principals externalidentity.PrincipalResolver, sessions session.Service, participants session.ParticipantService, events *sessionevent.Service) (*Service, error) {
-	if principals == nil || sessions == nil || participants == nil || events == nil {
+func New(sessions session.Service, participants session.ParticipantService, events *sessionevent.Service) (*Service, error) {
+	if sessions == nil || participants == nil || events == nil {
 		return nil, ErrInvalidRequest
 	}
-	return &Service{principals: principals, sessions: sessions, participants: participants, events: events}, nil
+	return &Service{sessions: sessions, participants: participants, events: events}, nil
 }
 
 func (s *Service) SendText(ctx context.Context, request SendTextRequest) (Result, error) {
@@ -69,9 +67,6 @@ func (s *Service) SendText(ctx context.Context, request SendTextRequest) (Result
 	text := strings.TrimSpace(request.Text)
 	if recipient == "" || text == "" {
 		return Result{}, ErrInvalidRequest
-	}
-	if _, err := s.principals.LookupPrincipal(ctx, externalidentity.PrincipalID(recipient)); err != nil {
-		return Result{}, ErrUnknownRecipient
 	}
 	bindings, err := s.participants.ListParticipantSessions(ctx, recipient)
 	if err != nil {
@@ -95,6 +90,9 @@ func (s *Service) SendText(ctx context.Context, request SendTextRequest) (Result
 		}
 	}
 	if selected == nil {
+		if len(bindings) == 0 {
+			return Result{}, ErrUnknownRecipient
+		}
 		return Result{}, ErrRecipientUnavailable
 	}
 	event, err := sessionevent.NewEvent(selected.ID, sessionevent.TypeMessage, sessionevent.MessagePayload{Parts: []sessionevent.MessagePart{{Type: sessionevent.PartText, Text: text}}}, sessionevent.Correlation{

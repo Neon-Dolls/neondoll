@@ -221,6 +221,25 @@ func main() {
 		log.Error("Core runtime services setup error", map[string]any{"error": err.Error()})
 		os.Exit(1)
 	}
+	trustedParticipants, ok := coreServices.Sessions().(session.TrustedParticipantService)
+	if !ok {
+		log.Error("external identity reconciliation error", map[string]any{"error": "trusted participant service unavailable"})
+		os.Exit(1)
+	}
+	configuredSources := make([]session.ParticipantSource, 0, len(cfg.Core.ExternalIdentities))
+	configuredPrincipals := make([]string, 0, len(cfg.Core.ExternalIdentities))
+	seenPrincipals := make(map[string]struct{})
+	for _, mapping := range cfg.Core.ExternalIdentities {
+		configuredSources = append(configuredSources, session.ParticipantSource{GatewayInstanceID: string(mapping.Identity.GatewayInstanceID), Platform: mapping.Identity.Platform, SubjectID: mapping.Identity.SubjectID, PrincipalID: string(mapping.Principal.ID)})
+		if _, exists := seenPrincipals[string(mapping.Principal.ID)]; !exists {
+			configuredPrincipals = append(configuredPrincipals, string(mapping.Principal.ID))
+			seenPrincipals[string(mapping.Principal.ID)] = struct{}{}
+		}
+	}
+	if err = trustedParticipants.ReconcileParticipantSources(ctx, configuredSources, configuredPrincipals); err != nil {
+		log.Error("external identity reconciliation error", map[string]any{"error": err.Error()})
+		os.Exit(1)
+	}
 	activeSessions, err := coreServices.Sessions().ListActive(ctx, nil)
 	if err != nil {
 		log.Error("Interaction Session reconstruction error", map[string]any{"error": err.Error()})
@@ -363,7 +382,7 @@ func main() {
 		log.Error("communication setup error", map[string]any{"error": "Session participant service unavailable"})
 		os.Exit(1)
 	}
-	communicationService, err := communication.New(externalIdentityResolver, coreServices.Sessions(), participants, gatewayRuntime.Events())
+	communicationService, err := communication.New(coreServices.Sessions(), participants, gatewayRuntime.Events())
 	if err != nil {
 		log.Error("communication setup error", map[string]any{"error": err.Error()})
 		os.Exit(1)

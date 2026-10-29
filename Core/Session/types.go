@@ -81,6 +81,23 @@ type ParticipantBinding struct {
 	LastSeenAt  time.Time `json:"last_seen_at"`
 }
 
+// ParticipantSource records the trusted external identity from which a
+// participant binding was derived. It is provenance for lifecycle
+// reconciliation, not a second recipient-routing authority.
+type ParticipantSource struct {
+	SessionID         ID     `json:"session_id"`
+	GatewayInstanceID string `json:"gateway_instance_id"`
+	Platform          string `json:"platform"`
+	SubjectID         string `json:"subject_id"`
+	PrincipalID       string `json:"principal_id"`
+}
+
+type TrustedParticipantService interface {
+	ParticipantService
+	BindResolvedParticipant(context.Context, ID, ParticipantSource) (*ParticipantBinding, error)
+	ReconcileParticipantSources(context.Context, []ParticipantSource, []string) error
+}
+
 // ParticipantService is the durable participant-membership boundary used by
 // trusted ingress and future Session event delivery.
 type ParticipantService interface {
@@ -111,4 +128,6 @@ type Store interface {
 	BindSessionParticipant(context.Context, ID, string, time.Time) (*ParticipantBinding, error)
 	ListSessionParticipants(context.Context, ID) ([]*ParticipantBinding, error)
 	ListPrincipalSessions(context.Context, string) ([]*ParticipantBinding, error)
+	BindResolvedSessionParticipant(context.Context, ID, ParticipantSource, time.Time) (*ParticipantBinding, error)
+	ReconcileSessionParticipantSources(context.Context, []ParticipantSource, []string) error
 }

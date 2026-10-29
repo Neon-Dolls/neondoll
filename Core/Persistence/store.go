@@ -339,6 +339,22 @@ func createSchema(db *sql.DB) error {
 		return fmt.Errorf("interaction_session_participants table: %v", err)
 	}
 	_, err = db.Exec(`
+		CREATE TABLE IF NOT EXISTS interaction_session_participant_sources (
+			session_id TEXT NOT NULL,
+			gateway_instance_id TEXT NOT NULL,
+			platform TEXT NOT NULL,
+			subject_id TEXT NOT NULL,
+			principal_id TEXT NOT NULL,
+			PRIMARY KEY (session_id, gateway_instance_id, platform, subject_id),
+			FOREIGN KEY (session_id) REFERENCES interaction_sessions(session_id) ON DELETE CASCADE
+		);
+		CREATE INDEX IF NOT EXISTS interaction_session_participant_sources_principal
+			ON interaction_session_participant_sources(session_id, principal_id);
+	`)
+	if err != nil {
+		return fmt.Errorf("interaction_session_participant_sources table: %v", err)
+	}
+	_, err = db.Exec(`
 		CREATE TABLE IF NOT EXISTS interaction_session_event_deliveries (
 			delivery_id TEXT PRIMARY KEY,
 			event_id TEXT NOT NULL UNIQUE,

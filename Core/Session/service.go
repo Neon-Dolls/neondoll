@@ -25,6 +25,7 @@ type Manager struct {
 
 var _ Service = (*Manager)(nil)
 var _ ParticipantService = (*Manager)(nil)
+var _ TrustedParticipantService = (*Manager)(nil)
 
 func New(store Store) *Manager { return NewWithClock(store, realClock{}) }
 
@@ -137,6 +138,23 @@ func (m *Manager) BindParticipant(ctx context.Context, sessionID ID, principalID
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.store.BindSessionParticipant(ctx, sessionID, strings.TrimSpace(principalID), m.clock.Now().UTC())
+}
+
+func (m *Manager) BindResolvedParticipant(ctx context.Context, sessionID ID, source ParticipantSource) (*ParticipantBinding, error) {
+	if strings.TrimSpace(string(sessionID)) == "" || source.SessionID != sessionID ||
+		strings.TrimSpace(source.GatewayInstanceID) == "" || strings.TrimSpace(source.Platform) == "" ||
+		strings.TrimSpace(source.SubjectID) == "" || strings.TrimSpace(source.PrincipalID) == "" {
+		return nil, ErrInvalidRequest
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.store.BindResolvedSessionParticipant(ctx, sessionID, source, m.clock.Now().UTC())
+}
+
+func (m *Manager) ReconcileParticipantSources(ctx context.Context, sources []ParticipantSource, principals []string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.store.ReconcileSessionParticipantSources(ctx, sources, principals)
 }
 
 func (m *Manager) ListParticipants(ctx context.Context, sessionID ID) ([]*ParticipantBinding, error) {

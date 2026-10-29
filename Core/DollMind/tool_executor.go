@@ -220,6 +220,8 @@ func (executor *ToolExecutor) sendCommunication(ctx context.Context, correlation
 	code, message := "delivery_failed", "message delivery failed"
 	if result.Status == sessionevent.DeliveryPending {
 		code, message = "delivery_pending", "message is durably queued and awaiting Gateway delivery"
+		toolResult.Result = map[string]any{"delivery_id": result.DeliveryID, "delivery_status": string(sessionevent.DeliveryPending),
+			"durably_queued": true, "retry_owner": "core_session_event_replay", "resend_required": false}
 	} else if errors.Is(err, communication.ErrUnknownRecipient) {
 		code, message = "unknown_recipient", "recipient is not known to Core"
 	} else if errors.Is(err, communication.ErrRecipientUnavailable) || errors.Is(err, sessionevent.ErrRecipientUnavailable) {

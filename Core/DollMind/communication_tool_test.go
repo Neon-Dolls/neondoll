@@ -2,6 +2,7 @@ package dollmind
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"testing"
 	"time"
@@ -24,6 +25,22 @@ type communicationSender struct {
 	requests []communication.SendTextRequest
 	result   communication.Result
 	err      error
+}
+
+func TestCommunicationPendingResultIsExplicitlyDurablyQueued(t *testing.T) {
+	executor := NewToolExecutor(body.NewRegistry(), body.NewGuard(body.NewRegistry(), &recordingAuthority{}), &permissionPolicy{decision: actionpolicy.DecisionAllow}, "doll")
+	sender := &communicationSender{result: communication.Result{DeliveryID: "stable-delivery", Status: sessionevent.DeliveryPending}, err: errors.New("gateway offline")}
+	executor.SetCommunicationSender(sender)
+	result := executor.ExecuteCall(context.Background(), inference.ToolCall{ID: "pending-send", Arguments: map[string]any{"recipient_principal_id": "owner", "text": "queued once"}}, ptrTool(communicationTool()))
+	if result.Status != inference.ToolResultFailure || result.Error == nil || result.Error.Code != "delivery_pending" || result.ExecutionID != "stable-delivery" {
+		t.Fatalf("result=%#v", result)
+	}
+	if result.Result["delivery_id"] != "stable-delivery" || result.Result["delivery_status"] != "pending" || result.Result["durably_queued"] != true || result.Result["resend_required"] != false {
+		t.Fatalf("structured result=%#v", result.Result)
+	}
+	if len(sender.requests) != 1 {
+		t.Fatalf("requests=%d", len(sender.requests))
+	}
 }
 
 func (s *communicationSender) SendText(_ context.Context, request communication.SendTextRequest) (communication.Result, error) {
