@@ -64,6 +64,13 @@ func (executor *ToolExecutor) SetPermissionResolutionNotifier(notifier Permissio
 	executor.notifier = notifier
 }
 
+func (executor *ToolExecutor) intentionAwaitingPermission(ctx context.Context, intentionID string, exclude permissionrequest.ID) (bool, error) {
+	if executor == nil || executor.requests == nil {
+		return false, nil
+	}
+	return executor.requests.HasUnresolvedIntention(ctx, intentionID, exclude)
+}
+
 // NewToolExecutor composes existing Core authority, Registry, resolver, and
 // Guard boundaries. actionPolicy evaluates the Body-independent action;
 // Guard independently authorizes every selected Body execution.
@@ -183,7 +190,7 @@ func (executor *ToolExecutor) requestApproval(ctx context.Context, correlation c
 		DollID: executor.dollID, OwnerID: executor.ownerID, Origin: permissionrequest.OriginPolicyRequired,
 		Action: tool.Name, Question: question, Capability: tool.CapabilityID, Operation: tool.OperationID,
 		Arguments: arguments, ExpiresAt: time.Now().Add(ttl),
-		Correlation: permissionrequest.Correlation{CognitiveRunID: correlation.CognitiveRunID, SessionID: string(correlation.SessionID), TurnID: string(correlation.TurnID), ToolCallID: call.ID},
+		Correlation: permissionrequest.Correlation{CognitiveRunID: correlation.CognitiveRunID, SessionID: string(correlation.SessionID), TurnID: string(correlation.TurnID), ToolCallID: call.ID, IntentionID: correlation.IntentionID},
 	})
 	if err != nil {
 		return failureResult(call.ID, "approval_request_failed", err.Error())
@@ -231,7 +238,7 @@ func (executor *ToolExecutor) HandlePermissionResolution(ctx context.Context, re
 	}
 	tool := &inference.Tool{Name: claimed.Action, CapabilityID: claimed.Capability, OperationID: claimed.Operation}
 	result := executor.executeCall(ctx, cognitiveexecution.ToolCorrelation{
-		SessionID: session.ID(claimed.Correlation.SessionID), TurnID: session.TurnID(claimed.Correlation.TurnID), CognitiveRunID: claimed.Correlation.CognitiveRunID,
+		SessionID: session.ID(claimed.Correlation.SessionID), TurnID: session.TurnID(claimed.Correlation.TurnID), CognitiveRunID: claimed.Correlation.CognitiveRunID, IntentionID: claimed.Correlation.IntentionID,
 	}, inference.ToolCall{ID: callID, Name: tool.Name, Arguments: arguments}, tool, true)
 	outcome := permissionrequest.ContinuationOutcome{Success: result.Status == inference.ToolResultSuccess, ExecutionID: result.ExecutionID}
 	if result.Result != nil {

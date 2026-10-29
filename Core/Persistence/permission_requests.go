@@ -56,6 +56,20 @@ func (s *store) ListPendingPermissionRequests(ctx context.Context) ([]*permissio
 	return result, rows.Err()
 }
 
+func (s *store) HasUnresolvedPermissionForIntention(ctx context.Context, intentionID string, exclude permissionrequest.ID) (bool, error) {
+	var exists int
+	err := s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM permission_requests
+		WHERE json_extract(correlation_json, '$.intention_id') = ? AND request_id <> ? AND (
+			status = ? OR continuation_status IN (?, ?, ?) OR
+			notification_status IN (?, ?)))`, intentionID, exclude, permissionrequest.StatusPending,
+		permissionrequest.ContinuationReady, permissionrequest.ContinuationRunning, permissionrequest.ContinuationDenied,
+		permissionrequest.NotificationPending, permissionrequest.NotificationDelivering).Scan(&exists)
+	if err != nil {
+		return false, fmt.Errorf("query unresolved intention permission: %w", err)
+	}
+	return exists == 1, nil
+}
+
 func (s *store) TransitionPermissionRequest(ctx context.Context, id permissionrequest.ID, status permissionrequest.Status, at time.Time, authority string) (bool, error) {
 	result, err := s.db.ExecContext(ctx, `UPDATE permission_requests
 		SET status = ?, resolved_at = ?, resolving_authority = ?,

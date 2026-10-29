@@ -8,6 +8,7 @@
 package dollmind
 
 import (
+	"context"
 	"fmt"
 	"time"
 
@@ -35,6 +36,13 @@ func (s *Scheduler) DueIntentions() ([]dollstate.IntentionItem, error) {
 	var due []dollstate.IntentionItem
 	for _, item := range state.Intentions.Items {
 		if item.State != dollstate.IntentionStatePending {
+			continue
+		}
+		waiting, err := s.toolExecutor.intentionAwaitingPermission(context.Background(), item.ID, "")
+		if err != nil {
+			return nil, fmt.Errorf("due intentions: permission state for %q: %w", item.ID, err)
+		}
+		if waiting {
 			continue
 		}
 		wakeTime, err := time.Parse(time.RFC3339, item.WakeTime)

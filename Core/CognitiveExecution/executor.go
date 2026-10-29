@@ -47,6 +47,7 @@ type ToolCorrelation struct {
 	SessionID      session.ID
 	TurnID         session.TurnID
 	CognitiveRunID string
+	IntentionID    string
 }
 
 // CorrelatedToolExecutor receives explicit Core lifecycle identities. The
@@ -64,6 +65,7 @@ type Request struct {
 	TurnID             session.TurnID
 	SessionID          session.ID
 	CognitiveRunID     string
+	IntentionID        string
 	BuildContext       ContextBuilder
 	ToolExecutor       ToolExecutor
 	MaxToolCalls       int
@@ -157,7 +159,7 @@ func Execute(ctx context.Context, request Request) (*Result, error) {
 			var result inference.ToolResult
 			if correlated, ok := request.ToolExecutor.(CorrelatedToolExecutor); ok {
 				result = correlated.ExecuteCorrelatedCall(ctx, ToolCorrelation{
-					SessionID: request.SessionID, TurnID: request.TurnID, CognitiveRunID: request.CognitiveRunID,
+					SessionID: request.SessionID, TurnID: request.TurnID, CognitiveRunID: request.CognitiveRunID, IntentionID: request.IntentionID,
 				}, call, toolMap[call.Name])
 			} else {
 				result = request.ToolExecutor.ExecuteCall(ctx, call, toolMap[call.Name])

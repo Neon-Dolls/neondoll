@@ -9,7 +9,16 @@ import (
 	contextbuilder "github.com/Neon-Dolls/neondoll/Core/ContextBuilder"
 	"github.com/Neon-Dolls/neondoll/Core/Inference"
 	"github.com/Neon-Dolls/neondoll/Core/PermissionRequest"
+	"github.com/Neon-Dolls/neondoll/DollLink/Events"
+	"github.com/Neon-Dolls/neondoll/DollState"
 )
+
+type permissionResolutionContextKey struct{}
+
+func permissionResolutionFromContext(ctx context.Context) permissionrequest.ID {
+	id, _ := ctx.Value(permissionResolutionContextKey{}).(permissionrequest.ID)
+	return id
+}
 
 // NotifyPermissionResolution starts a fresh ephemeral cognition run with the
 // durable decision and action outcome as evidence. The original Cognitive Run
@@ -30,7 +39,18 @@ func (s *Scheduler) NotifyPermissionResolution(ctx context.Context, notification
 	if err != nil {
 		return err
 	}
-	_, err = s.Run(ctx, LevelPlan, "Owner permission resolution and action outcome:\n"+string(encoded)+"\nReconsider the plan using this authoritative result.")
+	evidence := "Owner permission resolution and action outcome:\n" + string(encoded) + "\nReconsider the plan using this authoritative result."
+	if request.Correlation.IntentionID != "" {
+		state := s.mindAPI.State()
+		for _, intention := range state.Intentions.Items {
+			if intention.ID == request.Correlation.IntentionID && intention.State == dollstate.IntentionStatePending {
+				resolutionCtx := context.WithValue(ctx, permissionResolutionContextKey{}, request.ID)
+				_, err = s.EnterWake(resolutionCtx, events.IntentionWakePayload{IntentionID: intention.ID, Subject: intention.Subject, Description: intention.Description + "\n" + evidence})
+				return err
+			}
+		}
+	}
+	_, err = s.Run(ctx, LevelPlan, evidence)
 	return err
 }
 
@@ -50,6 +70,7 @@ func (s *Scheduler) executeCognition(ctx context.Context, run *cognitionRunExecu
 		Purpose:            purpose,
 		Temperature:        temperature,
 		CognitiveRunID:     run.id,
+		IntentionID:        run.intention(),
 		ToolExecutor:       toolExecutor,
 		MaxToolCalls:       ToolCallLimit,
 		BuildContext: func(ctx context.Context, state cognitiveexecution.ContextState) ([]inference.Message, error) {

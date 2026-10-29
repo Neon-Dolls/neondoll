@@ -253,15 +253,16 @@ func (s *Scheduler) Enter(ctx context.Context, eventType events.Type, input stri
 
 // EnterWake is the cognition entry boundary for internal wake events.
 //
-// The lifecycle is minimal:
+// The lifecycle is minimal and preserves the originating identity:
 //
-//	pending → wake cognition → completed → Save
+//	pending → wake cognition → completed or rescheduled pending → Save
 //
 // A failed cognition leaves the Intention pending with the error surfaced.
-// A successfully completed wake cognition is fulfillment of the Intention
-// regardless of whether L1 concluded matters=false — Spark woke and
-// reconsidered what she intended to reconsider; the obligation was fulfilled.
-// matters=false means no L2 is needed, not "retry in one hour."
+// A plan can explicitly request future cognition. In that case the same
+// Intention is rescheduled with the plan's updated subject, reason, and wake
+// time. This keeps unfinished business durable without persisting a Cognitive
+// Run or creating a duplicate intention. Otherwise a successful wake fulfills
+// the Intention. matters=false still means the reconsideration was fulfilled.
 //
 // Steps:
 //  1. Find the Intention in Doll State (must be Pending)
@@ -301,7 +302,13 @@ func (s *Scheduler) EnterWake(ctx context.Context, payload events.IntentionWakeP
 		text += "\nIntentionID: " + payload.IntentionID
 	}
 
-	// 3. Enter cognition (L0 → L1 → optional L2).
+	// 3. Enter cognition (L0 → L1 → optional L2) with the durable
+	//    intention identity correlated through any tool/permission boundary.
+	ctx, run, err := s.ensureCognitionRun(ctx, cognitionObjective(events.TypeInternalWake), text)
+	if err != nil {
+		return nil, fmt.Errorf("enter wake: cognition run: %w", err)
+	}
+	run.setIntentionID(payload.IntentionID)
 	result, err := s.Enter(ctx, events.TypeInternalWake, text)
 	if err != nil {
 		// Cognition failed — leave Intention Pending, surface the error.
@@ -310,9 +317,24 @@ func (s *Scheduler) EnterWake(ctx context.Context, payload events.IntentionWakeP
 		return nil, fmt.Errorf("enter wake: cognition failed: %w", err)
 	}
 
-	// 4. Cognition succeeded — mark Completed (obligation fulfilled).
-	//    matters=false still counts: Spark woke and reconsidered.
-	s.completeIntention(payload.IntentionID)
+	// 4. Preserve unfinished business only when the plan explicitly asks for a
+	//    later wake. Otherwise the reconsideration obligation is fulfilled.
+	waiting, waitErr := s.toolExecutor.intentionAwaitingPermission(ctx, payload.IntentionID, permissionResolutionFromContext(ctx))
+	if waitErr != nil {
+		return nil, fmt.Errorf("enter wake: permission state: %w", waitErr)
+	}
+	if waiting {
+		// The durable permission lifecycle now owns progress. Keep the same
+		// due intention pending, but DueIntentions suppresses it until the
+		// resolution outcome has been handed back to cognition.
+	} else if result.Plan != nil && result.Plan.RequestFutureCognition {
+		if err := s.rescheduleIntention(payload.IntentionID, result.Plan); err != nil {
+			return nil, fmt.Errorf("enter wake: reschedule intention: %w", err)
+		}
+		result.StateDirty = true
+	} else {
+		s.completeIntention(payload.IntentionID)
+	}
 
 	// 5. Persist final state.
 	if err := s.mindAPI.Save(); err != nil {
@@ -320,6 +342,23 @@ func (s *Scheduler) EnterWake(ctx context.Context, payload events.IntentionWakeP
 	}
 
 	return result, nil
+}
+
+func (s *Scheduler) rescheduleIntention(id string, plan *Plan) error {
+	if _, err := s.validateFutureCognition(plan); err != nil {
+		return err
+	}
+	state := s.mindAPI.State()
+	for i := range state.Intentions.Items {
+		if state.Intentions.Items[i].ID == id {
+			state.Intentions.Items[i].Subject = plan.FutureSubject
+			state.Intentions.Items[i].Description = plan.FutureReason
+			state.Intentions.Items[i].WakeTime = plan.FutureWakeTime
+			state.Intentions.Items[i].State = dollstate.IntentionStatePending
+			return nil
+		}
+	}
+	return fmt.Errorf("intention %q not found", id)
 }
 
 // completeIntention marks an intention as Completed — it will not be

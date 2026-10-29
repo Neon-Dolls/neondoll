@@ -57,6 +57,7 @@ type Correlation struct {
 	SessionID      string `json:"session_id,omitempty"`
 	TurnID         string `json:"turn_id,omitempty"`
 	ToolCallID     string `json:"tool_call_id,omitempty"`
+	IntentionID    string `json:"intention_id,omitempty"`
 }
 
 type Request struct {
@@ -128,6 +129,7 @@ type Store interface {
 	ClaimPermissionOutcomeNotification(context.Context, ID, time.Time, time.Time) (bool, error)
 	CompletePermissionOutcomeNotification(context.Context, ID, time.Time) (bool, error)
 	ReleasePermissionOutcomeNotification(context.Context, ID, string, time.Time) (bool, error)
+	HasUnresolvedPermissionForIntention(context.Context, string, ID) (bool, error)
 }
 
 // ResolutionHandler continues a durable decision after the authenticated
