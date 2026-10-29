@@ -4,7 +4,7 @@ LDFLAGS := -s -w -X github.com/Neon-Dolls/neondoll/pkg/version.Version=$(VERSION
 
 BUILD_DIR ?= build
 
-.PHONY: all build build-daemon build-client build-printspark clean test test-e2e vet lint fmt version
+.PHONY: all build build-daemon build-client build-printspark clean test test-e2e vet lint fmt version acceptance
 
 all: build test vet
 
@@ -35,6 +35,13 @@ test-e2e-short:
 test-e2e-destroy:
 	$(GO) test -tags e2e -count=1 -v -run TestSparkSurvivesDestruction ./test/...
 
+PROFILE ?= core5
+ACCEPTANCE_REPORT ?= acceptance-report.json
+
+acceptance:
+	ACCEPTANCE_CORE_REVISION="$$(git rev-parse HEAD 2>/dev/null || echo unknown)" \
+		$(GO) run ./cmd/neondoll-acceptance -profile "$(PROFILE)" -report "$(ACCEPTANCE_REPORT)"
+
 # ── Quality ────────────────────────────────────────────────────────
 
 vet:
@@ -63,4 +70,4 @@ release-dry-run:
 
 .PHONY: build build-daemon build-client build-printspark
 .PHONY: test test-e2e test-e2e-short test-e2e-destroy
-.PHONY: vet fmt lint version clean release-dry-run
+.PHONY: vet fmt lint version clean release-dry-run acceptance
