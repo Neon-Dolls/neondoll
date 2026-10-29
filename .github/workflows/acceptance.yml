@@ -35,3 +35,44 @@ jobs:
           else
             echo "acceptance report was not produced"
           fi
+
+  core5-shellbody:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout Core
+        uses: actions/checkout@v4
+        with:
+          path: core
+          fetch-depth: 1
+
+      - name: Checkout pinned Shell Body
+        uses: actions/checkout@v4
+        with:
+          repository: Neon-Dolls/neondoll-shellbody
+          ref: 10b2d510d9a5887800c8e6f72c2ef05530bf6c46
+          path: shellbody
+          fetch-depth: 1
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+          cache: true
+          cache-dependency-path: |
+            core/go.sum
+            shellbody/go.sum
+
+      - name: Run Core 5 external Shell Body acceptance
+        working-directory: core
+        run: make acceptance-external PROFILE=core5 SHELLBODY_SOURCE="$GITHUB_WORKSPACE/shellbody" ACCEPTANCE_REPORT=acceptance-shellbody-report.json
+
+      - name: Print machine-readable report
+        if: always()
+        working-directory: core
+        run: |
+          if test -f acceptance-shellbody-report.json; then
+            cat acceptance-shellbody-report.json
+          else
+            echo "external acceptance report was not produced"
+          fi

@@ -4,7 +4,7 @@ LDFLAGS := -s -w -X github.com/Neon-Dolls/neondoll/pkg/version.Version=$(VERSION
 
 BUILD_DIR ?= build
 
-.PHONY: all build build-daemon build-client build-printspark clean test test-e2e vet lint fmt version acceptance
+.PHONY: all build build-daemon build-client build-printspark clean test test-e2e vet lint fmt version acceptance acceptance-external
 
 all: build test vet
 
@@ -42,6 +42,16 @@ acceptance:
 	ACCEPTANCE_CORE_REVISION="$$(git rev-parse HEAD 2>/dev/null || echo unknown)" \
 		$(GO) run ./cmd/neondoll-acceptance -profile "$(PROFILE)" -report "$(ACCEPTANCE_REPORT)"
 
+SHELLBODY_SOURCE ?=
+SHELLBODY_BINARY ?=
+SHELLBODY_REVISION ?= 10b2d510d9a5887800c8e6f72c2ef05530bf6c46
+
+acceptance-external:
+	ACCEPTANCE_CORE_REVISION="$$(git rev-parse HEAD 2>/dev/null || echo unknown)" \
+		$(GO) run ./cmd/neondoll-acceptance -profile "$(PROFILE)" -external \
+		-shellbody-source "$(SHELLBODY_SOURCE)" -shellbody-binary "$(SHELLBODY_BINARY)" \
+		-shellbody-revision "$(SHELLBODY_REVISION)" -report "$(ACCEPTANCE_REPORT)"
+
 # ── Quality ────────────────────────────────────────────────────────
 
 vet:
@@ -70,4 +80,4 @@ release-dry-run:
 
 .PHONY: build build-daemon build-client build-printspark
 .PHONY: test test-e2e test-e2e-short test-e2e-destroy
-.PHONY: vet fmt lint version clean release-dry-run acceptance
+.PHONY: vet fmt lint version clean release-dry-run acceptance acceptance-external
