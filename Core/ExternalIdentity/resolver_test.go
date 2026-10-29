@@ -117,3 +117,38 @@ func TestMultipleIdentitiesMaySharePrincipalButNotConflictOnAuthority(t *testing
 		t.Fatalf("conflicting principal authority error = %v", err)
 	}
 }
+
+func TestListPrincipalsCollapsesIdentitiesAndIsDeterministic(t *testing.T) {
+	resolver, err := NewMemoryResolver([]Mapping{
+		{Identity: Identity{GatewayInstanceID: "telegram-b", Platform: "telegram", SubjectID: "42"}, Principal: Principal{ID: "owner", Authority: AuthorityOwner}},
+		{Identity: Identity{GatewayInstanceID: "matrix-a", Platform: "matrix", SubjectID: "zero"}, Principal: Principal{ID: "owner", Authority: AuthorityOwner}},
+		{Identity: Identity{GatewayInstanceID: "gateway", Platform: "test", SubjectID: "7"}, Principal: Principal{ID: "peer", Authority: AuthorityPeer}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	records, err := resolver.ListPrincipals(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != 2 || records[0].Principal.ID != "owner" || records[1].Principal.ID != "peer" {
+		t.Fatalf("records=%#v", records)
+	}
+	if len(records[0].Identities) != 2 || records[0].Identities[0].Platform != "matrix" || records[0].Identities[1].Platform != "telegram" {
+		t.Fatalf("owner identities=%#v", records[0].Identities)
+	}
+
+	// Resolver replacement is the existing configuration reload boundary. A
+	// removed mapping is not discoverable from the replacement directory.
+	reloaded, err := NewMemoryResolver([]Mapping{{
+		Identity:  Identity{GatewayInstanceID: "gateway", Platform: "test", SubjectID: "7"},
+		Principal: Principal{ID: "peer", Authority: AuthorityPeer},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	records, err = reloaded.ListPrincipals(context.Background())
+	if err != nil || len(records) != 1 || records[0].Principal.ID != "peer" {
+		t.Fatalf("reloaded records=%#v err=%v", records, err)
+	}
+}

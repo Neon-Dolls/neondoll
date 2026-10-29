@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 )
 
@@ -72,6 +73,19 @@ type PrincipalResolver interface {
 	LookupPrincipal(context.Context, PrincipalID) (Principal, error)
 }
 
+// PrincipalDirectory exposes the immutable, trusted configuration view used
+// for on-demand peer discovery. It does not expose credentials or permit
+// runtime mutation.
+type PrincipalDirectory interface {
+	PrincipalResolver
+	ListPrincipals(context.Context) ([]PrincipalRecord, error)
+}
+
+type PrincipalRecord struct {
+	Principal  Principal  `json:"principal"`
+	Identities []Identity `json:"identities,omitempty"`
+}
+
 // MemoryResolver is an immutable in-memory resolver built from trusted Core
 // configuration. Exact tuple matching prevents one Gateway from borrowing a
 // subject mapping established for another Gateway.
@@ -128,6 +142,40 @@ func (r *MemoryResolver) LookupPrincipal(ctx context.Context, id PrincipalID) (P
 	return principal, nil
 }
 
+func (r *MemoryResolver) ListPrincipals(ctx context.Context) ([]PrincipalRecord, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if r == nil {
+		return nil, ErrInvalidIdentity
+	}
+	byPrincipal := make(map[PrincipalID]*PrincipalRecord, len(r.principals))
+	for id, principal := range r.principals {
+		copy := principal
+		byPrincipal[id] = &PrincipalRecord{Principal: copy}
+	}
+	for key, principal := range r.mappings {
+		record := byPrincipal[principal.ID]
+		record.Identities = append(record.Identities, Identity{GatewayInstanceID: key.gateway, Platform: key.platform, SubjectID: key.subject})
+	}
+	result := make([]PrincipalRecord, 0, len(byPrincipal))
+	for _, record := range byPrincipal {
+		sort.Slice(record.Identities, func(i, j int) bool {
+			a, b := record.Identities[i], record.Identities[j]
+			if a.Platform != b.Platform {
+				return a.Platform < b.Platform
+			}
+			if a.GatewayInstanceID != b.GatewayInstanceID {
+				return a.GatewayInstanceID < b.GatewayInstanceID
+			}
+			return a.SubjectID < b.SubjectID
+		})
+		result = append(result, *record)
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i].Principal.ID < result[j].Principal.ID })
+	return result, nil
+}
+
 func (r *MemoryResolver) Resolve(ctx context.Context, presented PresentedIdentity) (Principal, error) {
 	if err := ctx.Err(); err != nil {
 		return Principal{}, err
@@ -165,3 +213,4 @@ func validPrincipal(principal Principal) bool {
 
 var _ Resolver = (*MemoryResolver)(nil)
 var _ PrincipalResolver = (*MemoryResolver)(nil)
+var _ PrincipalDirectory = (*MemoryResolver)(nil)

@@ -376,7 +376,7 @@ func main() {
 		log.Error("communication setup error", map[string]any{"error": "Session participant service unavailable"})
 		os.Exit(1)
 	}
-	communicationService, err := communication.New(coreServices.Sessions(), participants, gatewayRuntime.Events())
+	communicationService, err := communication.New(externalIdentityResolver, coreServices.Sessions(), participants, gatewayRuntime.Events())
 	if err != nil {
 		log.Error("communication setup error", map[string]any{"error": err.Error()})
 		os.Exit(1)

@@ -117,7 +117,7 @@ func (executor *ToolExecutor) Tools() []inference.Tool {
 		tools = append(tools, tool)
 	}
 	if executor.communication != nil {
-		tools = append(tools, communicationTool())
+		tools = append(tools, communicationTool(), communicationPeersTool())
 	}
 	sort.Slice(tools, func(i, j int) bool { return tools[i].Name < tools[j].Name })
 	return tools
@@ -161,8 +161,13 @@ func (executor *ToolExecutor) executeCall(ctx context.Context, correlation cogni
 	default:
 		return failureResult(call.ID, "invalid_configuration", "action policy returned an invalid decision")
 	}
-	if tool.CapabilityID == communication.Capability && tool.OperationID == communication.OperationSendText {
-		return executor.sendCommunication(ctx, correlation, call)
+	if tool.CapabilityID == communication.Capability {
+		switch tool.OperationID {
+		case communication.OperationSendText:
+			return executor.sendCommunication(ctx, correlation, call)
+		case communication.OperationListPeers:
+			return executor.listCommunicationPeers(ctx, call)
+		}
 	}
 
 	constraints := bodyresolver.TaskConstraints{}
@@ -186,6 +191,25 @@ func (executor *ToolExecutor) executeCall(ctx context.Context, correlation cogni
 		Arguments:   call.Arguments,
 	})
 	return toolOutcome(call.ID, outcome, rejections, executionErr)
+}
+
+func communicationPeersTool() inference.Tool {
+	return inference.Tool{Name: communication.Capability + inference.ToolNameDelimiter + communication.OperationListPeers,
+		Description:  "List trusted Core principals known to the Doll, their authority classification, identity platforms, and whether an eligible active Gateway Session can carry a message.",
+		CapabilityID: communication.Capability, OperationID: communication.OperationListPeers,
+		InputSchema: map[string]any{"type": "object", "properties": map[string]any{}},
+	}
+}
+
+func (executor *ToolExecutor) listCommunicationPeers(ctx context.Context, call inference.ToolCall) inference.ToolResult {
+	if executor.communication == nil {
+		return failureResult(call.ID, "communication_unavailable", "communication service is unavailable")
+	}
+	peers, err := executor.communication.ListPeers(ctx)
+	if err != nil {
+		return failureResult(call.ID, "peer_discovery_failed", err.Error())
+	}
+	return inference.ToolResult{ToolCallID: call.ID, Status: inference.ToolResultSuccess, Result: map[string]any{"peers": peers, "peer_count": len(peers)}}
 }
 
 func communicationTool() inference.Tool {

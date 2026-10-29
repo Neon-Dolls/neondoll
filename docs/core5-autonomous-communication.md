@@ -7,6 +7,48 @@ engine. Its provider-neutral arguments are:
 {"recipient_principal_id":"owner-1","text":"I wanted to tell you something."}
 ```
 
+Recipient discovery is available through `core.communication__list_peers`.
+It takes an empty object and returns a bounded, on-demand projection such as:
+
+```json
+{
+  "peer_count": 1,
+  "peers": [{
+    "principal_id": "owner-1",
+    "authority": "owner",
+    "platforms": ["telegram"],
+    "identity_count": 1,
+    "relationship_available": true,
+    "active_gateway_route": true,
+    "eligible_session_count": 1,
+    "known_session_count": 1
+  }]
+}
+```
+
+The trusted source is the configured ExternalIdentity principal directory,
+joined with durable, provenance-checked Session participant bindings. Multiple
+external identities collapse into one principal. Discovery exposes platform
+names only; external subject IDs, Gateway instance IDs, addresses, tokens, and
+other transport credentials are never model-visible. Authority is the
+classification already assigned by trusted Core configuration; Session
+membership does not promote it.
+
+`relationship_available` means a durable participant relationship exists,
+including one whose Session is closed. `active_gateway_route` means the same
+selector used by `send_text` found at least one active Gateway-owned Session.
+It does not mean a person is online or has read anything, and the Gateway may
+still be temporarily unavailable when delivery is attempted. Known principals
+remain listed when no eligible route exists. Removed mappings disappear on
+configuration reload/restart reconciliation; reassigned identity provenance
+no longer grants the old principal a route.
+
+The detailed peer list is not injected into every model context. The concise
+tool description tells cognition that discovery is available, and all shared
+cognition paths can request the current trusted projection when needed. This
+keeps Context Builder inputs bounded while allowing a `list_peers` followed by
+`send_text` in the same multi-step execution.
+
 The recipient is a Core principal—not a Gateway ID, Telegram/chat ID,
 credential, or platform address. Trusted ingress records the resolved external
 identity as provenance for its durable Session participant binding. Core then
