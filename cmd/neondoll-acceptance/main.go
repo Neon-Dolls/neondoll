@@ -13,15 +13,29 @@ import (
 func main() {
 	profileName := flag.String("profile", "core5", "acceptance profile")
 	reportPath := flag.String("report", "acceptance-report.json", "JSON report path")
+	external := flag.Bool("external", false, "include required external participant scenarios")
+	shellBodySource := flag.String("shellbody-source", os.Getenv("SHELLBODY_SOURCE"), "pinned neondoll-shellbody checkout")
+	shellBodyBinary := flag.String("shellbody-binary", os.Getenv("SHELLBODY_BINARY"), "prebuilt neondoll-shellbody executable")
+	shellBodyRevision := flag.String("shellbody-revision", acceptance.ShellBodyRevision, "required neondoll-shellbody revision")
 	flag.Parse()
 
-	profiles := []acceptance.Profile{acceptance.Core5Profile()}
+	var driver *acceptance.ShellBodyDriver
+	profile := acceptance.Core5Profile()
+	if *external {
+		driver = acceptance.NewShellBodyDriver(acceptance.ShellBodyDriverConfig{SourceDir: *shellBodySource, Binary: *shellBodyBinary, Revision: *shellBodyRevision})
+		defer driver.Close()
+		profile = acceptance.Core5ExternalProfile(driver)
+	}
+	profiles := []acceptance.Profile{profile}
 	runner, err := acceptance.NewRunner(profiles...)
 	if err != nil {
 		fatal(err)
 	}
-	external := parseRevisions(os.Getenv("ACCEPTANCE_EXTERNAL_REVISIONS"))
-	report, runErr := runner.Run(context.Background(), *profileName, acceptance.CoreRevision(), external, os.Stdout)
+	externalRevisions := parseRevisions(os.Getenv("ACCEPTANCE_EXTERNAL_REVISIONS"))
+	if driver != nil {
+		externalRevisions["neondoll-shellbody"] = driver.Revision()
+	}
+	report, runErr := runner.Run(context.Background(), *profileName, acceptance.CoreRevision(), externalRevisions, os.Stdout)
 	if runErr != nil {
 		fmt.Fprintf(os.Stderr, "acceptance: %v; available profiles: %s\n", runErr, strings.Join(acceptance.ProfileNames(profiles...), ", "))
 		os.Exit(2)

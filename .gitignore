@@ -32,6 +32,7 @@ Thumbs.db
 /build
 /dist
 /acceptance-report.json
+/acceptance-*-report.json
 
 # Body binary
 cmd/neondoll-body/neondoll-body
