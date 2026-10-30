@@ -4,7 +4,7 @@ LDFLAGS := -s -w -X github.com/Neon-Dolls/neondoll/pkg/version.Version=$(VERSION
 
 BUILD_DIR ?= build
 
-.PHONY: all build build-daemon build-client build-printspark clean test test-e2e vet lint fmt version acceptance acceptance-external
+.PHONY: all build build-daemon build-client build-printspark clean test test-e2e vet lint fmt version acceptance acceptance-external acceptance-telegram
 
 all: build test vet
 
@@ -51,6 +51,17 @@ acceptance-external:
 		$(GO) run ./cmd/neondoll-acceptance -profile "$(PROFILE)" -external \
 		-shellbody-source "$(SHELLBODY_SOURCE)" -shellbody-binary "$(SHELLBODY_BINARY)" \
 		-shellbody-revision "$(SHELLBODY_REVISION)" -report "$(ACCEPTANCE_REPORT)"
+
+TELEGRAM_GATEWAY_SOURCE ?=
+TELEGRAM_GATEWAY_WASM ?=
+TELEGRAM_GATEWAY_REVISION ?= 962e09b396a389950ed2d926ba38efc4baf37dfd
+TINYGO ?= tinygo
+
+acceptance-telegram:
+	ACCEPTANCE_CORE_REVISION="$$(git rev-parse HEAD 2>/dev/null || echo unknown)" \
+		$(GO) run ./cmd/neondoll-acceptance -profile "$(PROFILE)" -telegram \
+		-telegram-source "$(TELEGRAM_GATEWAY_SOURCE)" -telegram-artifact "$(TELEGRAM_GATEWAY_WASM)" \
+		-telegram-revision "$(TELEGRAM_GATEWAY_REVISION)" -tinygo "$(TINYGO)" -report "$(ACCEPTANCE_REPORT)"
 
 # ── Quality ────────────────────────────────────────────────────────
 
