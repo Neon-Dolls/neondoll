@@ -104,9 +104,45 @@ an in-process runtime and is labeled that way in JSON. They use no test-only
 authorization or identity bypass. Temporary stores are removed and runtime
 shutdown is invoked after every scenario.
 
+## External Telegram WASM acceptance
+
+The Telegram profile builds the independently versioned TinyGo guest and loads
+it through Core's production Wazero Extension Manager. Telegram itself is
+represented only by a local TLS Bot API fixture; it supplies raw `getUpdates`
+responses and observes real `sendMessage` requests. It never injects normalized
+Core events.
+
+```sh
+git clone https://github.com/dividebyzero/neondoll-gateway-telegram.git ../neondoll-gateway-telegram
+git -C ../neondoll-gateway-telegram checkout 962e09b396a389950ed2d926ba38efc4baf37dfd
+make acceptance-telegram PROFILE=core5 \
+  TELEGRAM_GATEWAY_SOURCE="$PWD/../neondoll-gateway-telegram" \
+  ACCEPTANCE_REPORT=acceptance-telegram-report.json
+```
+
+TinyGo 0.39.0 is the tested compiler. `TELEGRAM_GATEWAY_WASM` may name a
+prebuilt artifact, but the pinned source checkout remains mandatory and its
+Git revision is verified. Missing source, revision mismatch, build failure,
+invalid WASM, initialization failure, or a missing Bot API delivery is a
+scenario failure; there is no Go-adapter fallback.
+
+The suite adds `telegram-wasm-inbound-conversation`,
+`telegram-wasm-autonomous-outbound`, and
+`telegram-wasm-permission-interaction`. Together they exercise raw Telegram
+updates, trusted identity resolution, Interaction Sessions, Pulse cognition,
+peer discovery, durable SessionEvent delivery, Owner decisions, and permission
+continuation through the real ABI v2 guest. The permission scenario separately
+proves that a non-Owner Telegram participant cannot approve or execute the
+protected action.
+
+The JSON report labels the Gateway as `real-wasm`, Core as a real in-process
+production-service composition, deterministic inference where used, and the
+Telegram platform as simulated. It contains neither the ephemeral bot token
+nor TLS material. Shell Body and Telegram external suites are independent, so
+each external repository can be tested without checking out the other.
+
 ## Remaining acceptance gaps
 
-- Run the independently compiled Telegram WASM artifact as the Gateway driver.
 - Add a separate real-daemon Core driver; current Shell Body evidence uses the
   production in-process Core runtime rather than a `neondolld` process.
 - Add an embedded-device profile only when that participant is required.
