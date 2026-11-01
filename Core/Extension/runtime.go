@@ -57,9 +57,23 @@ type WASMRuntime struct {
 	secretsRoot string
 	instances   map[string]*instanceRuntime
 	closed      bool
+	httpClient  *http.Client
 }
 
-func NewWASMRuntime(ctx context.Context, state StateStore, secretsRoot string) (*WASMRuntime, error) {
+type RuntimeOption func(*WASMRuntime)
+
+// WithHTTPClient supplies the mediated HTTPS client used by extensions. Core
+// still validates HTTPS and the manifest allowlist before every request. This
+// is primarily useful for private PKI and deterministic local integration.
+func WithHTTPClient(client *http.Client) RuntimeOption {
+	return func(runtime *WASMRuntime) {
+		if client != nil {
+			runtime.httpClient = client
+		}
+	}
+}
+
+func NewWASMRuntime(ctx context.Context, state StateStore, secretsRoot string, options ...RuntimeOption) (*WASMRuntime, error) {
 	if state == nil {
 		return nil, ErrInvalidManifest
 	}
@@ -67,7 +81,12 @@ func NewWASMRuntime(ctx context.Context, state StateStore, secretsRoot string) (
 	if _, err := wasi_snapshot_preview1.Instantiate(ctx, rt); err != nil {
 		return nil, err
 	}
-	r := &WASMRuntime{runtime: rt, state: state, secretsRoot: secretsRoot, instances: map[string]*instanceRuntime{}}
+	r := &WASMRuntime{runtime: rt, state: state, secretsRoot: secretsRoot, instances: map[string]*instanceRuntime{}, httpClient: &http.Client{}}
+	for _, option := range options {
+		if option != nil {
+			option(r)
+		}
+	}
 	if err := r.installHost(ctx); err != nil {
 		rt.Close(ctx)
 		return nil, err
@@ -432,12 +451,13 @@ func (r *WASMRuntime) httpGet(ctx context.Context, m api.Module, up, un, bp, bma
 	cctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	req, _ := http.NewRequestWithContext(cctx, http.MethodGet, u.String(), nil)
-	client := &http.Client{CheckRedirect: func(req *http.Request, _ []*http.Request) error {
+	client := *r.httpClient
+	client.CheckRedirect = func(req *http.Request, _ []*http.Request) error {
 		if req.URL.Scheme != "https" || !allowedHost(req.URL.Hostname(), i.manifest.HTTPAllowlist) {
 			return ErrCapabilityDenied
 		}
 		return nil
-	}}
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		result(0, 4, 0)

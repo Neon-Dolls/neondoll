@@ -76,3 +76,50 @@ jobs:
           else
             echo "external acceptance report was not produced"
           fi
+
+  core5-telegram-wasm:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout Core
+        uses: actions/checkout@v4
+        with:
+          path: core
+          fetch-depth: 1
+
+      - name: Checkout pinned Telegram Gateway
+        uses: actions/checkout@v4
+        with:
+          repository: dividebyzero/neondoll-gateway-telegram
+          ref: 962e09b396a389950ed2d926ba38efc4baf37dfd
+          path: telegram-gateway
+          fetch-depth: 1
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+          cache: true
+          cache-dependency-path: |
+            core/go.sum
+            telegram-gateway/go.sum
+            telegram-gateway/wasm/gateway/go.sum
+
+      - name: Set up TinyGo
+        uses: acifani/setup-tinygo@v2
+        with:
+          tinygo-version: "0.39.0"
+
+      - name: Run real Telegram WASM acceptance
+        working-directory: core
+        run: make acceptance-telegram PROFILE=core5 TELEGRAM_GATEWAY_SOURCE="$GITHUB_WORKSPACE/telegram-gateway" ACCEPTANCE_REPORT=acceptance-telegram-report.json
+
+      - name: Print machine-readable report
+        if: always()
+        working-directory: core
+        run: |
+          if test -f acceptance-telegram-report.json; then
+            cat acceptance-telegram-report.json
+          else
+            echo "Telegram acceptance report was not produced"
+          fi
