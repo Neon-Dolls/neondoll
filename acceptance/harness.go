@@ -35,7 +35,18 @@ type Scenario struct {
 	ID           string
 	Description  string
 	Participants []Participant
+	Lifecycle    *LifecycleEvidence
 	Run          func(context.Context) error
+}
+
+// LifecycleEvidence describes the restart boundary and the observable durable
+// guarantee exercised by a scenario. It records the claimed boundary even on
+// failure; Status determines whether that guarantee was actually established.
+type LifecycleEvidence struct {
+	RestartType       string   `json:"restart_type"`
+	ProcessBoundary   string   `json:"process_boundary"`
+	RecoveredState    []string `json:"durable_state_recovered"`
+	ObservableOutcome string   `json:"observable_outcome"`
 }
 
 type Profile struct {
@@ -44,12 +55,13 @@ type Profile struct {
 }
 
 type ScenarioResult struct {
-	ID           string        `json:"id"`
-	Description  string        `json:"description"`
-	Status       Status        `json:"status"`
-	Duration     time.Duration `json:"duration_ns"`
-	Failure      string        `json:"failure_reason,omitempty"`
-	Participants []Participant `json:"participants"`
+	ID           string             `json:"id"`
+	Description  string             `json:"description"`
+	Status       Status             `json:"status"`
+	Duration     time.Duration      `json:"duration_ns"`
+	Failure      string             `json:"failure_reason,omitempty"`
+	Participants []Participant      `json:"participants"`
+	Lifecycle    *LifecycleEvidence `json:"lifecycle,omitempty"`
 }
 
 type Report struct {
@@ -113,7 +125,7 @@ func (r *Runner) Run(ctx context.Context, profileName, revision string, external
 	started := r.now().UTC()
 	report := Report{Version: 1, Profile: profile.Name, CoreRevision: revision, ExternalRevisions: copyStrings(external), StartedAt: started, Status: StatusPass}
 	for _, scenario := range profile.Scenarios {
-		result := ScenarioResult{ID: scenario.ID, Description: scenario.Description, Status: StatusPass, Participants: append([]Participant(nil), scenario.Participants...)}
+		result := ScenarioResult{ID: scenario.ID, Description: scenario.Description, Status: StatusPass, Participants: append([]Participant(nil), scenario.Participants...), Lifecycle: cloneLifecycle(scenario.Lifecycle)}
 		if console != nil {
 			fmt.Fprintf(console, "[ RUN  ] %s\n", scenario.ID)
 		}
@@ -140,6 +152,15 @@ func (r *Runner) Run(ctx context.Context, profileName, revision string, external
 	}
 	report.Duration = r.now().Sub(started)
 	return report, nil
+}
+
+func cloneLifecycle(value *LifecycleEvidence) *LifecycleEvidence {
+	if value == nil {
+		return nil
+	}
+	copy := *value
+	copy.RecoveredState = append([]string(nil), value.RecoveredState...)
+	return &copy
 }
 
 func runScenario(ctx context.Context, run func(context.Context) error) (err error) {
