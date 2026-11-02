@@ -15,6 +15,8 @@ func main() {
 	reportPath := flag.String("report", "acceptance-report.json", "JSON report path")
 	external := flag.Bool("external", false, "include required external participant scenarios")
 	telegram := flag.Bool("telegram", false, "include real Telegram WASM Gateway scenarios")
+	lifecycle := flag.Bool("lifecycle", false, "run restart and recovery lifecycle scenarios")
+	coreSource := flag.String("core-source", ".", "Core repository used to build the lifecycle daemon")
 	shellBodySource := flag.String("shellbody-source", os.Getenv("SHELLBODY_SOURCE"), "pinned neondoll-shellbody checkout")
 	shellBodyBinary := flag.String("shellbody-binary", os.Getenv("SHELLBODY_BINARY"), "prebuilt neondoll-shellbody executable")
 	shellBodyRevision := flag.String("shellbody-revision", acceptance.ShellBodyRevision, "required neondoll-shellbody revision")
@@ -26,9 +28,16 @@ func main() {
 
 	var driver *acceptance.ShellBodyDriver
 	var telegramDriver *acceptance.TelegramDriver
+	var daemonDriver *acceptance.CoreDaemonDriver
 	profile := acceptance.Core5Profile()
-	if *external && *telegram {
-		fatal(fmt.Errorf("select either Shell Body external acceptance or Telegram acceptance"))
+	selected := 0
+	for _, enabled := range []bool{*external, *telegram, *lifecycle} {
+		if enabled {
+			selected++
+		}
+	}
+	if selected > 1 {
+		fatal(fmt.Errorf("select only one external or lifecycle acceptance mode"))
 	}
 	if *external {
 		driver = acceptance.NewShellBodyDriver(acceptance.ShellBodyDriverConfig{SourceDir: *shellBodySource, Binary: *shellBodyBinary, Revision: *shellBodyRevision})
@@ -39,6 +48,13 @@ func main() {
 		telegramDriver = acceptance.NewTelegramDriver(acceptance.TelegramDriverConfig{SourceDir: *telegramSource, Artifact: *telegramArtifact, Revision: *telegramRevision, TinyGo: *tinyGo})
 		defer telegramDriver.Close()
 		profile = acceptance.Core5TelegramProfile(telegramDriver)
+	}
+	if *lifecycle {
+		driver = acceptance.NewShellBodyDriver(acceptance.ShellBodyDriverConfig{SourceDir: *shellBodySource, Binary: *shellBodyBinary, Revision: *shellBodyRevision})
+		defer driver.Close()
+		daemonDriver = acceptance.NewCoreDaemonDriver(*coreSource)
+		defer daemonDriver.Close()
+		profile = acceptance.Core5LifecycleProfile(daemonDriver, driver)
 	}
 	profiles := []acceptance.Profile{profile}
 	runner, err := acceptance.NewRunner(profiles...)

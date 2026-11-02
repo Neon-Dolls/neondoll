@@ -141,10 +141,55 @@ Telegram platform as simulated. It contains neither the ephemeral bot token
 nor TLS material. Shell Body and Telegram external suites are independent, so
 each external repository can be tested without checking out the other.
 
+## Lifecycle and restart acceptance
+
+Run the restart profile independently with the same pinned Shell Body used by
+M2:
+
+```sh
+make acceptance-lifecycle PROFILE=core5 \
+  SHELLBODY_SOURCE="$PWD/../neondoll-shellbody" \
+  ACCEPTANCE_REPORT=acceptance-lifecycle-report.json
+```
+
+The lifecycle report adds a `lifecycle` object to each scenario containing the
+restart type, actual process boundary, durable state expected to be recovered,
+and the observable outcome. A failed scenario retains this description but is
+still reported as failed; a recovered row is never equated with an operational
+resume.
+
+Core 5 durability boundaries exercised here are:
+
+- Doll state, identity, intentions, Body enrollment/credentials, Interaction
+  Sessions, participant bindings, permission requests and continuations, and
+  SessionEvent deliveries are durable.
+- Cognitive Run objects, providers, registries, live transports, Gateway
+  adapters, schedulers, and execution objects are intentionally process-local
+  and are reconstructed rather than persisted.
+- `lifecycle-durable-doll-identity` and
+  `lifecycle-shellbody-core-restart` terminate and relaunch a real
+  `neondolld` executable over the same data directory. The latter leaves the
+  independently running Shell Body to reconnect and proves post-restart
+  execution through authenticated Doll Link.
+- intention, permission, and communication scenarios close the SQLite Store
+  and discard every relevant Core service before creating a fresh production
+  composition. Their report boundary is explicitly `in-process`; they are not
+  described as daemon-process E2E tests.
+
+The current production daemon has no owner/admin surface for creating an
+intention or observing permission and SessionEvent continuation, and its Pulse
+runner does not itself dispatch `Scheduler.DueIntentions`. Consequently the
+profile proves that a freshly reconstructed Scheduler can discover and act on
+the original intention, but it does not claim that `neondolld` automatically
+dispatches due intentions after restart. That production orchestration gap is
+a Core 5 readiness limitation, not hidden by the report.
+
 ## Remaining acceptance gaps
 
 - Add a separate real-daemon Core driver; current Shell Body evidence uses the
-  production in-process Core runtime rather than a `neondolld` process.
+  production in-process Core runtime rather than a `neondolld` process. The
+  lifecycle profile now supplies this boundary for identity and reconnect;
+  general interaction coverage still uses the in-process composition.
 - Add an embedded-device profile only when that participant is required.
 - Add restart/recall scenarios for Core 6 memory providers through observable
   behavior. The harness does not inspect SQLite or assume a memory-provider

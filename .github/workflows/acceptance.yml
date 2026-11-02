@@ -123,3 +123,44 @@ jobs:
           else
             echo "Telegram acceptance report was not produced"
           fi
+
+  core5-lifecycle:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout Core
+        uses: actions/checkout@v4
+        with:
+          path: core
+          fetch-depth: 1
+
+      - name: Checkout pinned Shell Body
+        uses: actions/checkout@v4
+        with:
+          repository: Neon-Dolls/neondoll-shellbody
+          ref: 10b2d510d9a5887800c8e6f72c2ef05530bf6c46
+          path: shellbody
+          fetch-depth: 1
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+          cache: true
+          cache-dependency-path: |
+            core/go.sum
+            shellbody/go.sum
+
+      - name: Run Core 5 lifecycle acceptance
+        working-directory: core
+        run: make acceptance-lifecycle PROFILE=core5 SHELLBODY_SOURCE="$GITHUB_WORKSPACE/shellbody" ACCEPTANCE_REPORT=acceptance-lifecycle-report.json
+
+      - name: Print machine-readable report
+        if: always()
+        working-directory: core
+        run: |
+          if test -f acceptance-lifecycle-report.json; then
+            cat acceptance-lifecycle-report.json
+          else
+            echo "lifecycle acceptance report was not produced"
+          fi

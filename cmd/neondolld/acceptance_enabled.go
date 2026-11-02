@@ -23,6 +23,9 @@ func (acceptanceAuthority) Evaluate(request body.AuthorityRequest) body.Authorit
 	if request.Doll == "core4-acceptance" && request.Capability == "test.echo" && request.Operation == "echo" {
 		return body.AuthorityResult{Decision: body.AuthorityAllow}
 	}
+	if request.Doll == "core4-acceptance" && request.Capability == "process" && request.Operation == "run" {
+		return body.AuthorityResult{Decision: body.AuthorityAllow}
+	}
 	return body.AuthorityResult{Decision: body.AuthorityDeny, Reason: "acceptance_default_deny"}
 }
 
