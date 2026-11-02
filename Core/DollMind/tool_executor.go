@@ -24,19 +24,19 @@ import (
 // action-wide authority check, resolves trusted Registry Bodies, and delegates
 // every concrete attempt to BodyResolver.Coordinator and therefore Body.Guard.
 type ToolExecutor struct {
-	registry      *body.Registry
-	actionPolicy  actionpolicy.Policy
-	coordinator   *bodyresolver.Coordinator
-	dollID        string
-	preferences   map[body.BodyID]int
-	ownerPolicy   bodyresolver.OwnerPolicy
-	requests      *permissionrequest.Manager
-	ownerID       string
-	approvalTTL   time.Duration
-	notifier      PermissionResolutionNotifier
-	communication communication.Sender
-	recoveryOnce  sync.Once
-	recoveryErr   error
+	registry            *body.Registry
+	actionPolicy        actionpolicy.Policy
+	coordinator         *bodyresolver.Coordinator
+	dollID              string
+	preferences         map[body.BodyID]int
+	ownerPolicy         bodyresolver.OwnerPolicy
+	requests            *permissionrequest.Manager
+	ownerID             string
+	approvalTTL         time.Duration
+	notifier            PermissionResolutionNotifier
+	communication       communication.Sender
+	recoveryMu          sync.Mutex
+	recoveryInitialized bool
 }
 
 type PermissionResolutionNotifier interface {
@@ -385,11 +385,8 @@ func (executor *ToolExecutor) ReplayPermissionResolutions(ctx context.Context) e
 	if executor.requests == nil {
 		return permissionrequest.ErrInvalidRequest
 	}
-	executor.recoveryOnce.Do(func() {
-		_, executor.recoveryErr = executor.requests.RecoverInterruptedContinuations(ctx)
-	})
-	if executor.recoveryErr != nil {
-		return executor.recoveryErr
+	if err := executor.initializePermissionRecovery(ctx); err != nil {
+		return err
 	}
 	ready, err := executor.requests.ListReadyContinuations(ctx)
 	if err != nil {
@@ -409,6 +406,19 @@ func (executor *ToolExecutor) ReplayPermissionResolutions(ctx context.Context) e
 			return err
 		}
 	}
+	return nil
+}
+
+func (executor *ToolExecutor) initializePermissionRecovery(ctx context.Context) error {
+	executor.recoveryMu.Lock()
+	defer executor.recoveryMu.Unlock()
+	if executor.recoveryInitialized {
+		return nil
+	}
+	if _, err := executor.requests.RecoverInterruptedContinuations(ctx); err != nil {
+		return err
+	}
+	executor.recoveryInitialized = true
 	return nil
 }
 
