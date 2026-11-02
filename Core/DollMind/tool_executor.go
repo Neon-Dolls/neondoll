@@ -6,6 +6,7 @@ import (
 	"errors"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Neon-Dolls/neondoll/Core/ActionPolicy"
@@ -23,17 +24,19 @@ import (
 // action-wide authority check, resolves trusted Registry Bodies, and delegates
 // every concrete attempt to BodyResolver.Coordinator and therefore Body.Guard.
 type ToolExecutor struct {
-	registry      *body.Registry
-	actionPolicy  actionpolicy.Policy
-	coordinator   *bodyresolver.Coordinator
-	dollID        string
-	preferences   map[body.BodyID]int
-	ownerPolicy   bodyresolver.OwnerPolicy
-	requests      *permissionrequest.Manager
-	ownerID       string
-	approvalTTL   time.Duration
-	notifier      PermissionResolutionNotifier
-	communication communication.Sender
+	registry            *body.Registry
+	actionPolicy        actionpolicy.Policy
+	coordinator         *bodyresolver.Coordinator
+	dollID              string
+	preferences         map[body.BodyID]int
+	ownerPolicy         bodyresolver.OwnerPolicy
+	requests            *permissionrequest.Manager
+	ownerID             string
+	approvalTTL         time.Duration
+	notifier            PermissionResolutionNotifier
+	communication       communication.Sender
+	recoveryMu          sync.Mutex
+	recoveryInitialized bool
 }
 
 type PermissionResolutionNotifier interface {
@@ -328,6 +331,10 @@ func (executor *ToolExecutor) HandlePermissionResolution(ctx context.Context, re
 	result := executor.executeCall(ctx, cognitiveexecution.ToolCorrelation{
 		SessionID: session.ID(claimed.Correlation.SessionID), TurnID: session.TurnID(claimed.Correlation.TurnID), CognitiveRunID: claimed.Correlation.CognitiveRunID, IntentionID: claimed.Correlation.IntentionID,
 	}, inference.ToolCall{ID: callID, Name: tool.Name, Arguments: arguments}, tool, true)
+	if result.Error != nil && (result.Error.Code == "no_eligible_body" || result.Error.Code == "unavailable") {
+		_, releaseErr := executor.requests.ReleaseContinuation(ctx, claimed.ID)
+		return releaseErr
+	}
 	outcome := permissionrequest.ContinuationOutcome{Success: result.Status == inference.ToolResultSuccess, ExecutionID: result.ExecutionID}
 	if result.Result != nil {
 		outcome.Output, _ = json.Marshal(result.Result)
@@ -378,6 +385,9 @@ func (executor *ToolExecutor) ReplayPermissionResolutions(ctx context.Context) e
 	if executor.requests == nil {
 		return permissionrequest.ErrInvalidRequest
 	}
+	if err := executor.initializePermissionRecovery(ctx); err != nil {
+		return err
+	}
 	ready, err := executor.requests.ListReadyContinuations(ctx)
 	if err != nil {
 		return err
@@ -396,6 +406,19 @@ func (executor *ToolExecutor) ReplayPermissionResolutions(ctx context.Context) e
 			return err
 		}
 	}
+	return nil
+}
+
+func (executor *ToolExecutor) initializePermissionRecovery(ctx context.Context) error {
+	executor.recoveryMu.Lock()
+	defer executor.recoveryMu.Unlock()
+	if executor.recoveryInitialized {
+		return nil
+	}
+	if _, err := executor.requests.RecoverInterruptedContinuations(ctx); err != nil {
+		return err
+	}
+	executor.recoveryInitialized = true
 	return nil
 }
 

@@ -341,7 +341,12 @@ func main() {
 		dollmind.WithTaskModelConfiguration(config.InferenceTaskPlan, inference.NewToolEnabledProvider(planProvider), planModel),
 		dollmind.WithToolExecutor(cognitionToolExecutor),
 	)
-	cognitionToolExecutor.SetPermissionResolutionNotifier(scheduler)
+	cognitionLifecycle, err := dollmind.NewLifecycle(scheduler)
+	if err != nil {
+		log.Error("cognition lifecycle setup error", map[string]any{"error": err.Error()})
+		os.Exit(1)
+	}
+	cognitionToolExecutor.SetPermissionResolutionNotifier(cognitionLifecycle)
 
 	// Create the Interaction service (Doll Link ↔ Persistence bridge).
 	interactionSvc := interaction.New(store, inference.NewToolEnabledProvider(interactionProvider), log,
@@ -483,14 +488,14 @@ func main() {
 			map[string]any{"port": port, "overlay_addr": nw.Core.OverlayAddress.String()})
 	}
 
-	// Create Pulse runner if enabled in config.
-	// When Pulse is enabled, load (or create) a host doll state and wire
-	// the real Doll Mind Scheduler as the MindEntrance, so spontaneous
-	// Pulse opportunities can actually enter cognition.
-	var pulseRunner *pulse.Runner
+	// Create the lifecycle runner. When Pulse is enabled, also restore its
+	// spontaneous-cognition bookkeeping and semantic subjects.
+	// The Pulse runner is also Core's durable intention clock. It therefore
+	// runs even when optional spontaneous Pulse cognition is disabled; the
+	// Runner suppresses spontaneous opportunities while continuing to check
+	// durable intention wake times.
+	pulseRunner := pulse.NewRunner(cfg.Core.Pulse, pulse.NewRealClock(), pulse.NewProductionRNG(), log, cognitionLifecycle)
 	if cfg.Core.Pulse.Enabled {
-		// Wire the Scheduler as Pulse's MindEntrance.
-		pulseRunner = pulse.NewRunner(cfg.Core.Pulse, pulse.NewRealClock(), pulse.NewProductionRNG(), log, scheduler)
 
 		// ── Register semantic subjects from the doll's identity ──────
 		// Pulse observes changes to core identity and soul content to
@@ -547,16 +552,16 @@ func main() {
 			}
 			return cpStore.SavePulseCheckpoint(ctx, dollID, data)
 		}
-
-		if err := pulseRunner.Start(ctx); err != nil {
-			log.Error("pulse runner start error", map[string]any{"error": err.Error()})
-			os.Exit(1)
-		}
-		log.Info("pulse runner started", map[string]any{
-			"enabled": cfg.Core.Pulse.Enabled,
-			"doll_id": dollID,
-		})
 	}
+	if err := pulseRunner.Start(ctx); err != nil {
+		log.Error("pulse runner start error", map[string]any{"error": err.Error()})
+		os.Exit(1)
+	}
+	defer pulseRunner.Stop()
+	log.Info("cognition lifecycle runner started", map[string]any{
+		"spontaneous_pulse_enabled": cfg.Core.Pulse.Enabled,
+		"doll_id":                   dollID,
+	})
 
 	// Handle graceful shutdown.
 	sigCh := make(chan os.Signal, 1)
@@ -578,11 +583,9 @@ func main() {
 		if err := gatewayRuntime.Shutdown(shutdownCtx); err != nil {
 			log.Error("Gateway runtime shutdown error", map[string]any{"error": err.Error()})
 		}
-		if pulseRunner != nil {
-			pulseRunner.Stop()
-			log.Info("pulse runner stopped")
-		}
 		cancel()
+		pulseRunner.Stop()
+		log.Info("cognition lifecycle runner stopped")
 	}()
 
 	// Write a small startup banner.

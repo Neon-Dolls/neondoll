@@ -121,6 +121,17 @@ func (s *store) ClaimPermissionContinuation(ctx context.Context, id permissionre
 	return changed == 1, err
 }
 
+func (s *store) ReleasePermissionContinuation(ctx context.Context, id permissionrequest.ID, at time.Time) (bool, error) {
+	result, err := s.db.ExecContext(ctx, `UPDATE permission_requests SET continuation_status = ?, continuation_updated_at = ?
+		WHERE request_id = ? AND status = ? AND continuation_status = ?`, permissionrequest.ContinuationReady,
+		formatTime(at), id, permissionrequest.StatusApproved, permissionrequest.ContinuationRunning)
+	if err != nil {
+		return false, fmt.Errorf("release permission continuation: %w", err)
+	}
+	changed, err := result.RowsAffected()
+	return changed == 1, err
+}
+
 func (s *store) CompletePermissionContinuation(ctx context.Context, id permissionrequest.ID, status permissionrequest.ContinuationStatus, resultJSON json.RawMessage, at time.Time) (bool, error) {
 	result, err := s.db.ExecContext(ctx, `UPDATE permission_requests
 		SET continuation_status = ?, continuation_result_json = ?, continuation_updated_at = ?,
@@ -131,6 +142,40 @@ func (s *store) CompletePermissionContinuation(ctx context.Context, id permissio
 	}
 	changed, err := result.RowsAffected()
 	return changed == 1, err
+}
+
+func (s *store) RecoverInterruptedPermissionContinuations(ctx context.Context, ambiguousResult json.RawMessage, at time.Time) (int64, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("recover interrupted permission continuations: %w", err)
+	}
+	defer tx.Rollback()
+	approved, err := tx.ExecContext(ctx, `UPDATE permission_requests SET continuation_status = ?, continuation_result_json = ?,
+		continuation_updated_at = ?, notification_status = ?, notification_lease_until = NULL,
+		notification_delivered_at = NULL, notification_error = ''
+		WHERE status = ? AND continuation_status = ?`, permissionrequest.ContinuationFailed, string(ambiguousResult), formatTime(at),
+		permissionrequest.NotificationPending, permissionrequest.StatusApproved, permissionrequest.ContinuationRunning)
+	if err != nil {
+		return 0, fmt.Errorf("recover interrupted approved continuation: %w", err)
+	}
+	denied, err := tx.ExecContext(ctx, `UPDATE permission_requests SET continuation_status = ?, continuation_updated_at = ?
+		WHERE status = ? AND continuation_status = ?`, permissionrequest.ContinuationDenied, formatTime(at),
+		permissionrequest.StatusDenied, permissionrequest.ContinuationRunning)
+	if err != nil {
+		return 0, fmt.Errorf("recover interrupted denied continuation: %w", err)
+	}
+	approvedCount, err := approved.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	deniedCount, err := denied.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	if err = tx.Commit(); err != nil {
+		return 0, fmt.Errorf("recover interrupted permission continuations commit: %w", err)
+	}
+	return approvedCount + deniedCount, nil
 }
 
 func (s *store) ListPermissionOutcomeNotifications(ctx context.Context, now time.Time) ([]*permissionrequest.Request, error) {

@@ -2,6 +2,7 @@ package pulse
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -9,6 +10,36 @@ import (
 	"github.com/Neon-Dolls/neondoll/Core/Config"
 	"github.com/Neon-Dolls/neondoll/pkg/logger"
 )
+
+type lifecycleMind struct {
+	mu       sync.Mutex
+	dueCalls int
+	count    int
+	err      error
+}
+
+type blockingLifecycleMind struct {
+	started chan struct{}
+}
+
+func (*blockingLifecycleMind) EnterPulseWake(context.Context, PulseWake) error { return nil }
+func (m *blockingLifecycleMind) EnterDueIntentions(ctx context.Context) (int, error) {
+	select {
+	case <-m.started:
+	default:
+		close(m.started)
+	}
+	<-ctx.Done()
+	return 1, ctx.Err()
+}
+
+func (*lifecycleMind) EnterPulseWake(context.Context, PulseWake) error { return nil }
+func (m *lifecycleMind) EnterDueIntentions(context.Context) (int, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.dueCalls++
+	return m.count, m.err
+}
 
 // newTestRunner creates a Pulse runner configured for deterministic testing.
 // It returns the runner with its injectable tick and ack channels set up,
@@ -88,6 +119,80 @@ func TestRunner_DuplicateStart(t *testing.T) {
 	}
 
 	r.Stop()
+}
+
+func TestRunnerDispatchesDueIntentionsWhenSpontaneousPulseDisabled(t *testing.T) {
+	start := time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)
+	ticks, acknowledgements := make(chan time.Time, 2), make(chan struct{}, 2)
+	mind := &lifecycleMind{count: 1}
+	runner := NewTestRunner(config.PulseConfig{Enabled: false}, NewFakeClock(start), nil,
+		logger.New(logger.ErrorLevel, nil), mind, ticks, acknowledgements)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := runner.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	triggerTick(t, ticks, acknowledgements)
+	runner.Stop()
+	mind.mu.Lock()
+	defer mind.mu.Unlock()
+	if mind.dueCalls != 1 {
+		t.Fatalf("due lifecycle calls=%d, want 1", mind.dueCalls)
+	}
+	if runner.Snapshot().TickCount != 0 {
+		t.Fatal("disabled spontaneous Pulse bookkeeping advanced")
+	}
+}
+
+func TestRunnerRetriesFailedDueIntentionOnLaterTick(t *testing.T) {
+	start := time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)
+	ticks, acknowledgements := make(chan time.Time, 2), make(chan struct{}, 2)
+	mind := &lifecycleMind{count: 1, err: errors.New("inference unavailable")}
+	runner := NewTestRunner(config.PulseConfig{Enabled: false}, NewFakeClock(start), nil,
+		logger.New(logger.ErrorLevel, nil), mind, ticks, acknowledgements)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := runner.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	triggerTick(t, ticks, acknowledgements)
+	mind.mu.Lock()
+	mind.err = nil
+	mind.mu.Unlock()
+	triggerTick(t, ticks, acknowledgements)
+	runner.Stop()
+	mind.mu.Lock()
+	defer mind.mu.Unlock()
+	if mind.dueCalls != 2 {
+		t.Fatalf("due lifecycle calls=%d, want retry", mind.dueCalls)
+	}
+}
+
+func TestRunnerStopCancelsActiveDueIntention(t *testing.T) {
+	start := time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)
+	ticks, acknowledgements := make(chan time.Time, 1), make(chan struct{}, 1)
+	mind := &blockingLifecycleMind{started: make(chan struct{})}
+	runner := NewTestRunner(config.PulseConfig{Enabled: false}, NewFakeClock(start), nil,
+		logger.New(logger.ErrorLevel, nil), mind, ticks, acknowledgements)
+	if err := runner.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	ticks <- start
+	select {
+	case <-mind.started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("due intention did not start")
+	}
+	done := make(chan struct{})
+	go func() {
+		runner.Stop()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Stop did not cancel active intention cognition")
+	}
 }
 
 func TestRunner_Disabled(t *testing.T) {

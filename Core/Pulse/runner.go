@@ -29,15 +29,18 @@ type Runner struct {
 	rng   RNG
 	log   *logger.Logger
 
-	mu      sync.Mutex
-	started atomic.Bool
-	stopCh  chan struct{}
-	wg      sync.WaitGroup
+	mu       sync.Mutex
+	started  atomic.Bool
+	stopCh   chan struct{}
+	stopOnce sync.Once
+	wg       sync.WaitGroup
 
 	// ctx is the runtime context passed to Start. It is stored for derived
 	// sub-contexts (cognition timeouts) so that Pulse-originated cognition
 	// respects Core shutdown.
 	ctx context.Context
+	// cancel stops both the tick loop and cognition derived from ctx.
+	cancel context.CancelFunc
 
 	tickCount             int64
 	lastTickAt            time.Time
@@ -143,9 +146,9 @@ func (r *Runner) Start(ctx context.Context) error {
 	if !r.started.CompareAndSwap(false, true) {
 		return errors.New("pulse runner already started")
 	}
-	r.ctx = ctx
+	r.ctx, r.cancel = context.WithCancel(ctx)
 	r.wg.Add(1)
-	go r.run(ctx)
+	go r.run(r.ctx)
 	return nil
 }
 
@@ -155,12 +158,12 @@ func (r *Runner) Stop() {
 	if !r.started.Load() {
 		return
 	}
-	select {
-	case <-r.stopCh:
-		// already closed
-	default:
+	r.stopOnce.Do(func() {
 		close(r.stopCh)
-	}
+		if r.cancel != nil {
+			r.cancel()
+		}
+	})
 	r.wg.Wait() // only the first close triggers stop
 }
 
@@ -277,7 +280,8 @@ func (r *Runner) RecordCognition(at time.Time) {
 func (r *Runner) run(ctx context.Context) {
 	defer r.wg.Done()
 
-	if !r.cfg.Enabled {
+	_, hasDueIntentions := r.mindEntry.(DueIntentionEntrance)
+	if !r.cfg.Enabled && !hasDueIntentions {
 		<-r.stopCh
 		return
 	}
@@ -311,6 +315,19 @@ func (r *Runner) run(ctx context.Context) {
 // never runs under the Pulse state mutex. The Cognition Run occupancy is
 // managed atomically (not under mu).
 func (r *Runner) evaluate() {
+	dueDispatched, dueErr := r.admitDueIntentions()
+	if dueErr != nil {
+		r.log.Error("due intention wake error", map[string]any{"error": dueErr})
+	}
+	if dueDispatched {
+		r.sendTickAck()
+		return
+	}
+	if !r.cfg.Enabled {
+		r.sendTickAck()
+		return
+	}
+
 	r.mu.Lock()
 
 	prev := PulseSnapshot{
@@ -365,6 +382,25 @@ func (r *Runner) evaluate() {
 	}
 
 	r.sendTickAck()
+}
+
+func (r *Runner) admitDueIntentions() (bool, error) {
+	entry, ok := r.mindEntry.(DueIntentionEntrance)
+	if !ok {
+		return false, nil
+	}
+	if !r.TryClaimCognitionRun() {
+		return false, nil
+	}
+	defer r.ReleaseCognitionRun()
+	parent := r.ctx
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(parent, 30*time.Second)
+	defer cancel()
+	count, err := entry.EnterDueIntentions(ctx)
+	return count > 0, err
 }
 
 // admitPulseWake claims cognition run occupancy and, if successful, enters

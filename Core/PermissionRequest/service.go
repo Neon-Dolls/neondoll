@@ -106,6 +106,26 @@ func (m *Manager) ClaimContinuation(ctx context.Context, id ID) (*Request, error
 	return clone(current), nil
 }
 
+// ReleaseContinuation returns an approved, claimed continuation to the ready
+// state when dispatch could not begin because no eligible Body was available.
+// It does not apply after an external execution attempt has produced a result.
+func (m *Manager) ReleaseContinuation(ctx context.Context, id ID) (*Request, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	changed, err := m.store.ReleasePermissionContinuation(ctx, id, m.clock.Now().UTC())
+	if err != nil {
+		return nil, err
+	}
+	current, loadErr := m.store.LoadPermissionRequest(ctx, id)
+	if loadErr != nil {
+		return nil, loadErr
+	}
+	if !changed && current.ContinuationStatus != ContinuationReady {
+		return nil, ErrInvalidTransition
+	}
+	return clone(current), nil
+}
+
 func (m *Manager) CompleteContinuation(ctx context.Context, id ID, outcome ContinuationOutcome) (*Request, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -129,6 +149,26 @@ func (m *Manager) CompleteContinuation(ctx context.Context, id ID, outcome Conti
 		return nil, ErrInvalidTransition
 	}
 	return clone(current), nil
+}
+
+// RecoverInterruptedContinuations closes the crash boundary after Core had
+// durably claimed an approved action but before recording its result. Core
+// cannot know whether the external side effect occurred, so it records an
+// explicit ambiguous terminal outcome and never blindly executes it again.
+// Denied continuations are safe to return to their ready state because they
+// have no external action to repeat.
+func (m *Manager) RecoverInterruptedContinuations(ctx context.Context) (int64, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	outcome, err := json.Marshal(ContinuationOutcome{
+		Success:   false,
+		ErrorCode: "execution_outcome_ambiguous",
+		Error:     "Core restarted after action dispatch began; external execution outcome is unknown and was not replayed",
+	})
+	if err != nil {
+		return 0, err
+	}
+	return m.store.RecoverInterruptedPermissionContinuations(ctx, outcome, m.clock.Now().UTC())
 }
 
 func (m *Manager) ListOutcomeNotifications(ctx context.Context) ([]*Request, error) {

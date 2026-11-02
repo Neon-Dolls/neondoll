@@ -95,8 +95,10 @@ func (b *PermissionBridge) Present(ctx context.Context, requestID permissionrequ
 	return b.delivery.EmitPermission(ctx, event, request.OwnerID, string(request.ID))
 }
 
-// Decide records one structured decision. Approval remains state only and
-// never executes or resumes the requested action.
+// Decide records one structured decision. When production supplies a
+// resolution handler, the durable decision is immediately offered to that
+// handler; claim semantics in PermissionRequest prevent repeated decisions
+// from executing the action twice.
 func (b *PermissionBridge) Decide(ctx context.Context, sessionID session.ID, acting externalidentity.Principal, payload PermissionDecidedPayload) (*permissionrequest.Request, error) {
 	configured, err := b.principals.LookupPrincipal(ctx, acting.ID)
 	if err != nil || configured != acting || configured.Authority != externalidentity.AuthorityOwner {
