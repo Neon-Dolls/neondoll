@@ -92,8 +92,8 @@ func Core5LifecycleProfile(daemon *CoreDaemonDriver, shell *ShellBodyDriver) Pro
 	inProcess := Participant{Kind: "core", Mode: "real-in-process", Revision: CoreRevision(), Boundary: "fresh production services over a closed and reopened durable store"}
 	return Profile{Name: "core5", Scenarios: []Scenario{
 		{ID: ScenarioDurableDollIdentity, Description: "Doll and Core identity survive a graceful daemon restart", Participants: []Participant{daemonParticipant}, Lifecycle: &LifecycleEvidence{RestartType: "graceful", ProcessBoundary: "neondolld OS process terminated and relaunched", RecoveredState: []string{"Core signing identity", "Doll identity and durable intention record"}, ObservableOutcome: "restarted daemon serves the same identity and owner-local control"}, Run: daemon.runIdentity},
-		{ID: ScenarioIntentionContinuity, Description: "an unfinished intention is reconstructed and reconsidered", Participants: []Participant{inProcess, {Kind: "inference", Mode: "simulated", Boundary: "production shared cognition execution"}}, Lifecycle: &LifecycleEvidence{RestartType: "in-process", ProcessBoundary: "Store closed; DollMind, provider, and Scheduler discarded and reconstructed", RecoveredState: []string{"Doll identity", "pending intention"}, ObservableOutcome: "fresh Scheduler discovers and completes the original intention without duplication"}, Run: runIntentionRestart},
-		{ID: ScenarioPendingPermissionRecovery, Description: "pending approval survives reconstruction and executes once", Participants: []Participant{inProcess, {Kind: "body", Mode: "simulated", Boundary: "production Registry, Guard, and permission continuation"}}, Lifecycle: &LifecycleEvidence{RestartType: "in-process", ProcessBoundary: "Store closed; Permission Manager and ToolExecutor discarded and reconstructed", RecoveredState: []string{"pending PermissionRequest", "action arguments and correlation"}, ObservableOutcome: "authenticated approval resumes guarded execution exactly once"}, Run: runPermissionRestart},
+		{ID: ScenarioIntentionContinuity, Description: "an unfinished intention is reconstructed and reconsidered", Participants: []Participant{inProcess, {Kind: "inference", Mode: "simulated", Boundary: "production shared cognition execution"}}, Lifecycle: &LifecycleEvidence{RestartType: "in-process", ProcessBoundary: "Store closed; DollMind, provider, Scheduler, and Pulse lifecycle discarded and reconstructed", RecoveredState: []string{"Doll identity", "pending intention"}, ObservableOutcome: "production lifecycle tick discovers and completes the original intention without duplication"}, Run: runIntentionRestart},
+		{ID: ScenarioPendingPermissionRecovery, Description: "pending approval survives reconstruction and executes once", Participants: []Participant{inProcess, {Kind: "body", Mode: "simulated", Boundary: "production Gateway runtime, Registry, Guard, and permission continuation"}}, Lifecycle: &LifecycleEvidence{RestartType: "in-process", ProcessBoundary: "Store closed; Permission Manager, ToolExecutor, and Gateway runtime discarded and reconstructed", RecoveredState: []string{"pending PermissionRequest", "action arguments and correlation"}, ObservableOutcome: "production Gateway recovery resumes guarded execution exactly once"}, Run: runPermissionRestart},
 		{ID: ScenarioCommunicationRecovery, Description: "pending communication replays with stable identifiers", Participants: []Participant{inProcess, {Kind: "gateway", Mode: "simulated", Boundary: "production Gateway Host and SessionEvent transport"}}, Lifecycle: &LifecycleEvidence{RestartType: "in-process", ProcessBoundary: "Store closed; Session, Gateway runtime, and transport discarded and reconstructed", RecoveredState: []string{"Interaction Session", "participant binding", "pending SessionEvent delivery"}, ObservableOutcome: "replacement Gateway receives the original delivery and event IDs without rerunning inference"}, Run: runCommunicationRestart},
 		{ID: ScenarioBodyCoreRestart, Description: "real Shell Body reconnects after a graceful daemon restart", Participants: []Participant{daemonParticipant, {Kind: "body", Mode: "real", Revision: shell.Revision(), Boundary: "independent neondoll-shellbody process over authenticated Doll Link"}}, Lifecycle: &LifecycleEvidence{RestartType: "graceful", ProcessBoundary: "neondolld OS process terminated while Shell Body remains independently running", RecoveredState: []string{"Core signing identity", "Body enrollment credential and membership", "Body process identity"}, ObservableOutcome: "same Body reconnects, advertises capabilities, and completes an authorized harmless action"}, Run: func(ctx context.Context) error { return runDaemonShellBodyRestart(ctx, daemon, shell) }},
 	}}
@@ -340,13 +340,26 @@ func runIntentionRestart(ctx context.Context) error {
 	provider2 := &scriptedProvider{responses: []*inference.Response{{Content: `{"summary":"finish work","matters":true,"reason":"due"}`}, {Content: `{"summary":"complete","proposed_action":"done","observations":[],"should_reorient":false,"request_future_cognition":false}`}}}
 	mind2 := &persistentMind{state: loaded, store: reopened, provider: provider2}
 	scheduler2 := dollmind.New(provider2, logger.New(logger.ErrorLevel, io.Discard), mind2, dollmind.WithModelConfiguration(acceptanceModel()), dollmind.WithTaskModelConfiguration(config.InferenceTaskOrient, provider2, acceptanceModel()), dollmind.WithTaskModelConfiguration(config.InferenceTaskPlan, provider2, acceptanceModel()))
-	due, err := scheduler2.DueIntentions()
-	if err != nil || len(due) != 1 || due[0].ID != id {
-		return fmt.Errorf("reconstructed due intentions=%#v: %v", due, err)
-	}
-	if _, err = scheduler2.EnterWake(ctx, events.IntentionWakePayload{IntentionID: due[0].ID, Subject: due[0].Subject, Description: due[0].Description}); err != nil {
+	lifecycle, err := dollmind.NewLifecycle(scheduler2)
+	if err != nil {
 		return err
 	}
+	ticks, acknowledgements := make(chan time.Time, 1), make(chan struct{}, 1)
+	runner := pulse.NewTestRunner(config.PulseConfig{Enabled: false}, pulse.NewRealClock(), pulse.NewProductionRNG(), logger.New(logger.ErrorLevel, io.Discard), lifecycle, ticks, acknowledgements)
+	if err = runner.Start(ctx); err != nil {
+		return err
+	}
+	ticks <- time.Now()
+	select {
+	case <-acknowledgements:
+	case <-ctx.Done():
+		runner.Stop()
+		return ctx.Err()
+	case <-time.After(5 * time.Second):
+		runner.Stop()
+		return errors.New("automatic intention dispatch timed out")
+	}
+	runner.Stop()
 	if err = reopened.Close(); err != nil {
 		return err
 	}
@@ -428,7 +441,7 @@ func runPermissionRestart(ctx context.Context) error {
 		return fmt.Errorf("unauthorized approval error=%v", err)
 	}
 	decision := permissionrequest.NewDecisionService(requests2, lifecycleOwnerBoundary{owner: "owner", authorized: true})
-	approved, err := decision.Resolve(ctx, permissionrequest.DecisionRequest{RequestID: id, Decision: permissionrequest.DecisionApprove})
+	_, err = decision.Resolve(ctx, permissionrequest.DecisionRequest{RequestID: id, Decision: permissionrequest.DecisionApprove})
 	if err != nil {
 		return err
 	}
@@ -439,12 +452,24 @@ func runPermissionRestart(ctx context.Context) error {
 	}
 	guard2 := body.NewGuard(registry2, body.NewRuleEvaluator(body.AuthorityRule{Doll: "lifecycle-doll", Body: target2.ID(), Capability: "acceptance.echo", Operation: "echo", Decision: body.AuthorityAllow}))
 	executor2 := dollmind.NewToolExecutor(registry2, guard2, policy, "lifecycle-doll", dollmind.WithPermissionRequests(requests2, "owner", time.Hour))
-	if err = executor2.HandlePermissionResolution(ctx, approved); err != nil {
+	resolver, err := externalidentity.NewMemoryResolver(nil)
+	if err != nil {
 		return err
 	}
-	if err = executor2.HandlePermissionResolution(ctx, approved); err != nil {
+	services, err := coreruntime.NewServices(ctx, reopened.(session.Store), coreruntime.WithExternalIdentityResolver(resolver))
+	if err != nil {
 		return err
 	}
+	router, err := services.InteractionRouter(silentInteractionHandler{})
+	if err != nil {
+		return err
+	}
+	productionRuntime, err := coreruntime.NewGatewayRuntime(ctx, services, reopened.(sessionevent.Store), reopened.(permissionrequest.Store), resolver, router, policy,
+		coreruntime.WithPermissionManager(requests2), coreruntime.WithPermissionResolutionHandler(executor2))
+	if err != nil {
+		return err
+	}
+	defer productionRuntime.Shutdown(context.Background())
 	target2.mu.Lock()
 	count := len(target2.requests)
 	target2.mu.Unlock()

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Neon-Dolls/neondoll/Core/ActionPolicy"
@@ -34,6 +35,8 @@ type ToolExecutor struct {
 	approvalTTL   time.Duration
 	notifier      PermissionResolutionNotifier
 	communication communication.Sender
+	recoveryOnce  sync.Once
+	recoveryErr   error
 }
 
 type PermissionResolutionNotifier interface {
@@ -328,6 +331,10 @@ func (executor *ToolExecutor) HandlePermissionResolution(ctx context.Context, re
 	result := executor.executeCall(ctx, cognitiveexecution.ToolCorrelation{
 		SessionID: session.ID(claimed.Correlation.SessionID), TurnID: session.TurnID(claimed.Correlation.TurnID), CognitiveRunID: claimed.Correlation.CognitiveRunID, IntentionID: claimed.Correlation.IntentionID,
 	}, inference.ToolCall{ID: callID, Name: tool.Name, Arguments: arguments}, tool, true)
+	if result.Error != nil && (result.Error.Code == "no_eligible_body" || result.Error.Code == "unavailable") {
+		_, releaseErr := executor.requests.ReleaseContinuation(ctx, claimed.ID)
+		return releaseErr
+	}
 	outcome := permissionrequest.ContinuationOutcome{Success: result.Status == inference.ToolResultSuccess, ExecutionID: result.ExecutionID}
 	if result.Result != nil {
 		outcome.Output, _ = json.Marshal(result.Result)
@@ -377,6 +384,12 @@ func (executor *ToolExecutor) ResumeReadyPermissions(ctx context.Context) error 
 func (executor *ToolExecutor) ReplayPermissionResolutions(ctx context.Context) error {
 	if executor.requests == nil {
 		return permissionrequest.ErrInvalidRequest
+	}
+	executor.recoveryOnce.Do(func() {
+		_, executor.recoveryErr = executor.requests.RecoverInterruptedContinuations(ctx)
+	})
+	if executor.recoveryErr != nil {
+		return executor.recoveryErr
 	}
 	ready, err := executor.requests.ListReadyContinuations(ctx)
 	if err != nil {

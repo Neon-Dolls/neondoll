@@ -112,6 +112,121 @@ func TestPermissionOutcomeNotificationRetriesWithoutRepeatingExecution(t *testin
 	}
 }
 
+func TestRestartMarksClaimedApprovedContinuationAmbiguousWithoutReexecution(t *testing.T) {
+	database := filepath.Join(t.TempDir(), "core.db")
+	store, err := persistence.NewStore(database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy := &permissionPolicy{decision: actionpolicy.DecisionRequireApproval}
+	requests := permissionrequest.New(store.(permissionrequest.Store), policy)
+	candidate := &resolverBody{id: "must-not-replay"}
+	registry := body.NewRegistry()
+	if err = registry.Register(candidate); err != nil {
+		t.Fatal(err)
+	}
+	executor := NewToolExecutor(registry, body.NewGuard(registry, &recordingAuthority{results: map[body.BodyID]body.AuthorityResult{"must-not-replay": {Decision: body.AuthorityAllow}}}), policy, "doll", WithPermissionRequests(requests, "owner", time.Hour))
+	result := executor.ExecuteCall(context.Background(), inference.ToolCall{ID: "call"}, echoTool(""))
+	id := permissionrequest.ID(result.Error.PermissionRequestID)
+	if _, err = requests.Approve(context.Background(), id, "owner"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = requests.ClaimContinuation(context.Background(), id); err != nil {
+		t.Fatal(err)
+	}
+	if err = store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := persistence.NewStore(database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	restartedRequests := permissionrequest.New(reopened.(permissionrequest.Store), policy)
+	restarted := NewToolExecutor(registry, body.NewGuard(registry, &recordingAuthority{results: map[body.BodyID]body.AuthorityResult{"must-not-replay": {Decision: body.AuthorityAllow}}}), policy, "doll", WithPermissionRequests(restartedRequests, "owner", time.Hour))
+	notifier := &permissionNotifier{}
+	restarted.SetPermissionResolutionNotifier(notifier)
+	var wg sync.WaitGroup
+	errorsSeen := make(chan error, 2)
+	for range 2 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errorsSeen <- restarted.ReplayPermissionResolutions(context.Background())
+		}()
+	}
+	wg.Wait()
+	close(errorsSeen)
+	for replayErr := range errorsSeen {
+		if replayErr != nil {
+			t.Fatal(replayErr)
+		}
+	}
+	if candidate.executions != 0 {
+		t.Fatalf("ambiguous action replayed %d times", candidate.executions)
+	}
+	stored, err := restartedRequests.Get(context.Background(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var outcome permissionrequest.ContinuationOutcome
+	if err = json.Unmarshal(stored.ContinuationResult, &outcome); err != nil {
+		t.Fatal(err)
+	}
+	if stored.ContinuationStatus != permissionrequest.ContinuationFailed || outcome.ErrorCode != "execution_outcome_ambiguous" {
+		t.Fatalf("recovered continuation=%#v outcome=%#v", stored, outcome)
+	}
+	if len(notifier.outcomes) != 1 {
+		t.Fatalf("outcome notifications=%d, want 1", len(notifier.outcomes))
+	}
+}
+
+func TestApprovedContinuationWaitsForTemporarilyUnavailableBody(t *testing.T) {
+	store, err := persistence.NewStore(filepath.Join(t.TempDir(), "core.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	policy := &permissionPolicy{decision: actionpolicy.DecisionRequireApproval}
+	requests := permissionrequest.New(store.(permissionrequest.Store), policy)
+	registry := body.NewRegistry()
+	authority := &recordingAuthority{results: map[body.BodyID]body.AuthorityResult{"returning": {Decision: body.AuthorityAllow}}}
+	executor := NewToolExecutor(registry, body.NewGuard(registry, authority), policy, "doll", WithPermissionRequests(requests, "owner", time.Hour))
+	result := executor.ExecuteCall(context.Background(), inference.ToolCall{ID: "call"}, echoTool(""))
+	id := permissionrequest.ID(result.Error.PermissionRequestID)
+	approved, err := requests.Approve(context.Background(), id, "owner")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = executor.HandlePermissionResolution(context.Background(), approved); err != nil {
+		t.Fatal(err)
+	}
+	stored, err := requests.Get(context.Background(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.ContinuationStatus != permissionrequest.ContinuationReady {
+		t.Fatalf("unavailable continuation status=%q, want ready", stored.ContinuationStatus)
+	}
+	candidate := &resolverBody{id: "returning"}
+	if err = registry.Register(candidate); err != nil {
+		t.Fatal(err)
+	}
+	notifier := &permissionNotifier{}
+	executor.SetPermissionResolutionNotifier(notifier)
+	if err = executor.ReplayPermissionResolutions(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if candidate.executions != 1 {
+		t.Fatalf("executions after Body return=%d, want 1", candidate.executions)
+	}
+	stored, err = requests.Get(context.Background(), id)
+	if err != nil || stored.ContinuationStatus != permissionrequest.ContinuationSucceeded {
+		t.Fatalf("completed continuation=%#v error=%v", stored, err)
+	}
+}
+
 func TestPulseAutonomousActionCreatesDurableApprovalAndResumesAfterRestart(t *testing.T) {
 	database := filepath.Join(t.TempDir(), "core.db")
 	store, err := persistence.NewStore(database)

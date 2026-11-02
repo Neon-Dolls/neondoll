@@ -174,15 +174,10 @@ Core 5 durability boundaries exercised here are:
 - intention, permission, and communication scenarios close the SQLite Store
   and discard every relevant Core service before creating a fresh production
   composition. Their report boundary is explicitly `in-process`; they are not
-  described as daemon-process E2E tests.
-
-The current production daemon has no owner/admin surface for creating an
-intention or observing permission and SessionEvent continuation, and its Pulse
-runner does not itself dispatch `Scheduler.DueIntentions`. Consequently the
-profile proves that a freshly reconstructed Scheduler can discover and act on
-the original intention, but it does not claim that `neondolld` automatically
-dispatches due intentions after restart. That production orchestration gap is
-a Core 5 readiness limitation, not hidden by the report.
+  described as daemon-process E2E tests. The intention scenario drives the
+  production Pulse lifecycle tick and the permission scenario constructs the
+  production Gateway runtime; neither calls `Scheduler.EnterWake` or
+  `ToolExecutor.HandlePermissionResolution` directly.
 
 ## Remaining acceptance gaps
 

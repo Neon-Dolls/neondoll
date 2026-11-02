@@ -181,6 +181,13 @@ type MindEntrance interface {
 	EnterPulseWake(ctx context.Context, wake PulseWake) error
 }
 
+// DueIntentionEntrance is the optional durable-intention lifecycle supported
+// by DollMind. Runner checks it on every lifecycle tick, independently of
+// whether spontaneous Pulse cognition is enabled.
+type DueIntentionEntrance interface {
+	EnterDueIntentions(ctx context.Context) (int, error)
+}
+
 // ensureSubjects returns a non-nil empty slice when in is nil, allowing
 // JSON serialization to produce "subjects": [] rather than "subjects": null.
 func ensureSubjects(in []SubjectActivation) []SubjectActivation {
