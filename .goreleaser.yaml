@@ -117,7 +117,7 @@ release:
   header: |
     ## NeonDoll {{ .Tag }}
 
-    > Core 4 — The Doll moves freely, finds its own paths, and reconnects after disconnection.
+    > Core 5 — The Doll orchestrates: coherent continuity across simultaneous interactions, Bodies, contexts, and specialized cognition.
 
     ### Binaries
 
