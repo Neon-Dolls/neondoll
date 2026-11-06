@@ -15,8 +15,11 @@ const (
 	ContractGateway       = "gateway"
 	ContractCapability    = "capability"
 	ContractPackageSource = "package_source"
-	ManagedConfiguration  = "configuration"
-	ManagedInstalled      = "installed"
+	// ContractMemoryProvider reserves the stateful Core 6 provider boundary.
+	// Runtime support is deliberately deferred beyond the contract milestone.
+	ContractMemoryProvider = "memory-provider/v1"
+	ManagedConfiguration   = "configuration"
+	ManagedInstalled       = "installed"
 )
 
 type Capability string
@@ -72,7 +75,7 @@ func (m Manifest) Validate() error {
 		return ErrInvalidManifest
 	}
 	if m.Contract != ContractGateway {
-		if m.Contract == ContractCapability || m.Contract == ContractPackageSource {
+		if m.Contract == ContractCapability || m.Contract == ContractPackageSource || m.Contract == ContractMemoryProvider {
 			return ErrUnsupportedContract
 		}
 		return ErrInvalidManifest
