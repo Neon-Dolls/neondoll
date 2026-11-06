@@ -364,6 +364,12 @@ func (b *TransferBudget) Usage() (records, bytes uint64) {
 	return b.records, b.bytes
 }
 
+func (b *TransferBudget) hasRecordCapacity() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.records < b.maxRecords
+}
+
 func (b *TransferBudget) admit(transfer Transfer) (Transfer, error) {
 	if err := transfer.Validate(); err != nil {
 		return Transfer{}, err
@@ -450,6 +456,12 @@ func (s *BoundedExportSink) Put(ctx context.Context, transfer Transfer) error {
 	}
 	return s.sink.Put(ctx, bounded)
 }
+
+// Usage reports attempted-transfer accounting. Once a valid transfer is
+// admitted, its record envelope and any payload bytes consumed by the
+// downstream sink remain charged even if that sink returns an error. This
+// fail-closed rule prevents retries through the same wrapper from exceeding
+// the caller's requested bounds.
 func (s *BoundedExportSink) Usage() (uint64, uint64) { return s.budget.Usage() }
 
 type BoundedImportSource struct {
@@ -470,6 +482,11 @@ func NewBoundedImportSource(request ImportRequest, source ImportSource) (*Bounde
 func (s *BoundedImportSource) Next(ctx context.Context) (Transfer, error) {
 	if err := ctx.Err(); err != nil {
 		return Transfer{}, err
+	}
+	// ImportSource is a sequential pull contract. Check the record bound before
+	// advancing it so a rejected request cannot consume an upstream record.
+	if !s.budget.hasRecordCapacity() {
+		return Transfer{}, ErrTransferLimit
 	}
 	transfer, err := s.source.Next(ctx)
 	if err != nil {

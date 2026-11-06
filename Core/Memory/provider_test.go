@@ -120,6 +120,16 @@ type consumingSink struct {
 	transfers int
 }
 
+type failingSink struct {
+	calls int
+	err   error
+}
+
+func (s *failingSink) Put(context.Context, Transfer) error {
+	s.calls++
+	return s.err
+}
+
 func (s *consumingSink) Put(ctx context.Context, transfer Transfer) error {
 	s.transfers++
 	if transfer.Payload == nil {
@@ -288,6 +298,29 @@ func TestBoundedExportSinkExactBoundaryAndOverflow(t *testing.T) {
 	}
 }
 
+func TestBoundedExportSinkFailureUsesAttemptedAccounting(t *testing.T) {
+	record := fixtureRecord()
+	envelope, _ := EncodeRecord(record)
+	downstream := &failingSink{err: errors.New("transport failed")}
+	sink, err := NewBoundedExportSink(ExportRequest{MaxRecords: 1, MaxBytes: uint64(len(envelope))}, downstream)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sink.Put(context.Background(), Transfer{Record: record}); !errors.Is(err, downstream.err) {
+		t.Fatalf("downstream error: %v", err)
+	}
+	records, used := sink.Usage()
+	if records != 1 || used != uint64(len(envelope)) {
+		t.Fatalf("failed attempt not charged: %d %d", records, used)
+	}
+	if err := sink.Put(context.Background(), Transfer{Record: record}); !errors.Is(err, ErrTransferLimit) {
+		t.Fatalf("retry escaped attempted bound: %v", err)
+	}
+	if downstream.calls != 1 {
+		t.Fatalf("downstream called after bound exhaustion: %d", downstream.calls)
+	}
+}
+
 func TestBoundedTransferStreamBytesAndCancellation(t *testing.T) {
 	record := fixtureRecord()
 	record.Content = Content{MediaType: "image/png", Transport: TransportStream}
@@ -333,6 +366,25 @@ func TestBoundedImportSourceLimits(t *testing.T) {
 	cancel()
 	if _, err := source.Next(ctx); !errors.Is(err, context.Canceled) {
 		t.Fatalf("source cancellation: %v", err)
+	}
+}
+
+func TestBoundedImportSourceDoesNotConsumePastRecordLimit(t *testing.T) {
+	record := fixtureRecord()
+	envelope, _ := EncodeRecord(record)
+	upstream := &sliceSource{records: []Transfer{{Record: record}, {Record: record}}}
+	source, err := NewBoundedImportSource(ImportRequest{MaxRecords: 1, MaxBytes: uint64(len(envelope) * 2)}, upstream)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := source.Next(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := source.Next(context.Background()); !errors.Is(err, ErrTransferLimit) {
+		t.Fatalf("record limit: %v", err)
+	}
+	if upstream.n != 1 {
+		t.Fatalf("rejected request consumed upstream record: %d", upstream.n)
 	}
 }
 
