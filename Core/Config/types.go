@@ -11,6 +11,7 @@ import (
 	"github.com/Neon-Dolls/neondoll/Core/Body"
 	"github.com/Neon-Dolls/neondoll/Core/ExternalIdentity"
 	"github.com/Neon-Dolls/neondoll/Core/Inference"
+	"github.com/Neon-Dolls/neondoll/Core/Memory"
 )
 
 // secAsDuration converts an int64 seconds value (as stored in PulseConfig)
@@ -28,14 +29,15 @@ type RelayConfig struct {
 
 // Config holds the Doll's runtime configuration.
 type Config struct {
-	Core       CoreConfig          `json:"core"`
-	Console    ConsoleConfig       `json:"console"`
-	Inference  InferenceConfig     `json:"inference"`
-	Paths      PathConfig          `json:"paths"`
-	Link       LinkConfig          `json:"link"`
-	HTTP       HTTPConfig          `json:"http"`
-	Relay      RelayConfig         `json:"relay"`
-	Extensions []ExtensionManifest `json:"extensions,omitempty"`
+	Core       CoreConfig           `json:"core"`
+	Console    ConsoleConfig        `json:"console"`
+	Inference  InferenceConfig      `json:"inference"`
+	Paths      PathConfig           `json:"paths"`
+	Link       LinkConfig           `json:"link"`
+	HTTP       HTTPConfig           `json:"http"`
+	Relay      RelayConfig          `json:"relay"`
+	Extensions []ExtensionManifest  `json:"extensions,omitempty"`
+	Memory     memory.Configuration `json:"memory,omitempty"`
 }
 
 type ExtensionArtifact struct {
@@ -203,6 +205,9 @@ func Load(path string) (*Config, error) {
 	}
 	if _, err := NewExternalIdentityResolver(cfg.Core); err != nil {
 		return nil, fmt.Errorf("config external identities: %w", err)
+	}
+	if err := cfg.Memory.Validate(); err != nil {
+		return nil, fmt.Errorf("config memory: %w", err)
 	}
 	return &cfg, nil
 }
