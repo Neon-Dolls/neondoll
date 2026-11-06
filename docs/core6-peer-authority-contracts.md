@@ -52,17 +52,41 @@ tie-breaker, provenance, assurance, and optional absolute expiry. Reusable
 allowances default to no expiry. One-time approvals require an exact
 correlation ID and never become reusable. There is no session-duration grant.
 
+An ordinary Peer decision is effective only when accompanied by a verified,
+currently applicable delegation from the Primary Peer for the exact subject,
+capability, operation, and resource. Delegations record stable identities,
+absolute lifetime/revocation, strong assurance, and provenance. This is the
+minimum reconciliation boundary, not a full delegation-management lifecycle.
+Authentication or Peer recognition alone never supplies authority. Primary
+Peer decisions require no delegation and retain unconditional precedence.
+
+One-time approval consumption is an append-only portable record containing the
+approval decision, correlation, stable execution-attempt ID, and consumption
+time. Reconciliation returns a pending consumption record on first use. Core
+must durably commit that record before dispatching the attempt. Once present,
+the approval cannot authorize another attempt—including a replay using the
+same attempt ID or a retry using a different one. This fail-closed ordering
+avoids duplicate execution across retries, restart, and DollCard migration. A
+crash after consumption but before dispatch can strand the approval; resolving
+that ambiguous boundary requires operational continuation state and remains
+outside this contract-only milestone. Approval-gated queries report
+`require_approval` after consumption rather than falling through to autonomy.
+Ordinary queries retain the autonomy default.
+
 Reconciliation is deterministic:
 
 1. Validate and sort by timestamp, tie-breaker, and decision ID.
-2. Apply valid revocations. An ordinary Peer may revoke only its own ordinary
-   decision; it cannot revoke a Primary Peer decision.
-3. Ignore expired, future, revoked, or inapplicable records for the queried
+2. Validate delegations and durable one-time consumption records.
+3. Apply valid revocations. An ordinary Peer may revoke only its own ordinary
+   decision and only under applicable delegation; it cannot revoke a Primary
+   Peer decision.
+4. Ignore expired, future, revoked, consumed, undelegated, or inapplicable records for the queried
    action without deleting them from portable history.
-4. The latest applicable Primary Peer decision wins over every ordinary Peer
+5. The latest applicable Primary Peer decision wins over every ordinary Peer
    decision, regardless of cross-issuer timestamp.
-5. Otherwise the latest applicable ordinary decision wins.
-6. With no applicable prohibition, autonomy defaults to allow.
+6. Otherwise the latest applicable delegated ordinary decision wins.
+7. With no applicable prohibition, autonomy defaults to allow unless the
+   caller explicitly identifies an approval-gated operation.
 
 The reconciliation helper assumes provenance and role-at-issuance were
 verified at the trusted import/ingress boundary. Missing credentials,
@@ -91,9 +115,12 @@ Primary Peer status from deployment ownership.
 
 - The exceptional recovery process for a permanently unreachable or
   compromised Primary Peer requires architectural approval.
-- Trusted import verification of historical issuer role and delegation needs a
-  later persistence/DollCard integration design.
-- Ordinary-Peer delegation lifecycle and relationship-description revision
+- Trusted import verification of historical issuer role, delegation
+  provenance, and consumption history needs a later persistence/DollCard
+  integration design.
+- Atomic persistence of one-time consumption with production execution
+  continuation is deferred; M1.2 deliberately fails closed after consumption.
+- Ordinary-Peer delegation management and relationship-description revision
   storage are later milestones; this PR does not invent either subsystem.
 - Equal-timestamp tie-breaker production generation must be standardized when
   persisted authority writes are introduced.
