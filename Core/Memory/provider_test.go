@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 type fakeProvider struct {
@@ -114,15 +115,36 @@ func (s *collectSink) Put(_ context.Context, t Transfer) error {
 	return nil
 }
 
+type consumingSink struct {
+	payload   bytes.Buffer
+	transfers int
+}
+
+func (s *consumingSink) Put(ctx context.Context, transfer Transfer) error {
+	s.transfers++
+	if transfer.Payload == nil {
+		return nil
+	}
+	_, err := CopyBounded(ctx, Writer(&s.payload), transfer.Payload, 1<<20)
+	return err
+}
+
 func TestRememberOutcomesAndRecallBounds(t *testing.T) {
 	r := fixtureRecord()
-	for _, result := range []RememberResult{{Outcome: RememberStored, Retained: &r}, {Outcome: RememberTransformed, Retained: &r}, {Outcome: RememberRejected, Reason: "unsupported"}} {
+	transformation := &Transformation{Kind: "content_conversion", Description: "provider extracted text from image", FromMediaType: "image/png", ToMediaType: "text/plain"}
+	for _, result := range []RememberResult{{Outcome: RememberStored, Retained: &r}, {Outcome: RememberTransformed, Retained: &r, Transformation: transformation}, {Outcome: RememberRejected, Reason: "unsupported image encoding"}} {
 		if err := result.Validate(); err != nil {
 			t.Fatal(err)
 		}
 	}
 	if err := (RememberResult{Outcome: RememberRejected}).Validate(); err == nil {
 		t.Fatal("accepted reasonless rejection")
+	}
+	if err := (RememberResult{Outcome: RememberTransformed, Retained: &r}).Validate(); err == nil {
+		t.Fatal("accepted transformation without explicit detail")
+	}
+	if err := (RememberResult{Outcome: RememberRejected, Retained: &r, Reason: "unsupported"}).Validate(); err == nil {
+		t.Fatal("accepted rejected content with retained representation")
 	}
 	if err := (RecallRequest{Limit: MaxRecallLimit + 1}).Validate(); err == nil {
 		t.Fatal("accepted unbounded recall")
@@ -188,16 +210,145 @@ func TestConfigurationSelection(t *testing.T) {
 
 func TestCopyBounded(t *testing.T) {
 	var out bytes.Buffer
-	if n, err := CopyBounded(context.Background(), &out, strings.NewReader("1234"), 4); err != nil || n != 4 || out.String() != "1234" {
+	if n, err := CopyBounded(context.Background(), Writer(&out), Reader(strings.NewReader("1234")), 4); err != nil || n != 4 || out.String() != "1234" {
 		t.Fatalf("bounded copy: %d %q %v", n, out.String(), err)
 	}
 	out.Reset()
-	if _, err := CopyBounded(context.Background(), &out, strings.NewReader("12345"), 4); !errors.Is(err, ErrTransferLimit) {
+	if _, err := CopyBounded(context.Background(), Writer(&out), Reader(strings.NewReader("12345")), 4); !errors.Is(err, ErrTransferLimit) {
 		t.Fatalf("limit: %v", err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, err := CopyBounded(ctx, io.Discard, strings.NewReader("x"), 1); !errors.Is(err, context.Canceled) {
+	if _, err := CopyBounded(ctx, Writer(io.Discard), Reader(strings.NewReader("x")), 1); !errors.Is(err, context.Canceled) {
 		t.Fatalf("cancel: %v", err)
+	}
+}
+
+func TestCopyBoundedCancelsBlockedIO(t *testing.T) {
+	started := make(chan struct{})
+	reader := StreamReaderFunc(func(ctx context.Context, _ []byte) (int, error) {
+		close(started)
+		<-ctx.Done()
+		return 0, ctx.Err()
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { _, err := CopyBounded(ctx, Writer(io.Discard), reader, 10); done <- err }()
+	<-started
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("blocked cancellation: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("blocked stream did not honor cancellation contract")
+	}
+}
+
+func TestCopyBoundedCancelsBlockedWriter(t *testing.T) {
+	started := make(chan struct{})
+	writer := StreamWriterFunc(func(ctx context.Context, _ []byte) (int, error) {
+		close(started)
+		<-ctx.Done()
+		return 0, ctx.Err()
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { _, err := CopyBounded(ctx, writer, Reader(strings.NewReader("x")), 10); done <- err }()
+	<-started
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("blocked writer cancellation: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("blocked writer did not honor cancellation contract")
+	}
+}
+
+func TestBoundedExportSinkExactBoundaryAndOverflow(t *testing.T) {
+	record := fixtureRecord()
+	envelope, _ := EncodeRecord(record)
+	downstream := &consumingSink{}
+	sink, err := NewBoundedExportSink(ExportRequest{MaxRecords: 1, MaxBytes: uint64(len(envelope))}, downstream)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sink.Put(context.Background(), Transfer{Record: record}); err != nil {
+		t.Fatalf("exact boundary: %v", err)
+	}
+	if err := sink.Put(context.Background(), Transfer{Record: record}); !errors.Is(err, ErrTransferLimit) {
+		t.Fatalf("record overflow: %v", err)
+	}
+	records, used := sink.Usage()
+	if records != 1 || used != uint64(len(envelope)) {
+		t.Fatalf("usage: %d %d", records, used)
+	}
+}
+
+func TestBoundedTransferStreamBytesAndCancellation(t *testing.T) {
+	record := fixtureRecord()
+	record.Content = Content{MediaType: "image/png", Transport: TransportStream}
+	envelope, _ := EncodeRecord(record)
+	downstream := &consumingSink{}
+	sink, err := NewBoundedExportSink(ExportRequest{MaxRecords: 1, MaxBytes: uint64(len(envelope) + 4)}, downstream)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sink.Put(context.Background(), Transfer{Record: record, Payload: Reader(strings.NewReader("1234"))}); err != nil {
+		t.Fatalf("exact stream boundary: %v", err)
+	}
+	if downstream.payload.String() != "1234" {
+		t.Fatalf("payload: %q", downstream.payload.String())
+	}
+
+	overflowSink, _ := NewBoundedExportSink(ExportRequest{MaxRecords: 1, MaxBytes: uint64(len(envelope) + 4)}, &consumingSink{})
+	if err := overflowSink.Put(context.Background(), Transfer{Record: record, Payload: Reader(strings.NewReader("12345"))}); !errors.Is(err, ErrTransferLimit) {
+		t.Fatalf("stream overflow: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := overflowSink.Put(ctx, Transfer{Record: record, Payload: Reader(strings.NewReader("x"))}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("sink cancellation: %v", err)
+	}
+}
+
+func TestBoundedImportSourceLimits(t *testing.T) {
+	record := fixtureRecord()
+	envelope, _ := EncodeRecord(record)
+	source, err := NewBoundedImportSource(ImportRequest{MaxRecords: 1, MaxBytes: uint64(len(envelope))}, &sliceSource{records: []Transfer{{Record: record}, {Record: record}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := source.Next(context.Background()); err != nil {
+		t.Fatalf("exact boundary: %v", err)
+	}
+	if _, err := source.Next(context.Background()); !errors.Is(err, ErrTransferLimit) {
+		t.Fatalf("record overflow: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := source.Next(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("source cancellation: %v", err)
+	}
+}
+
+func TestBoundedImportSourceStreamOverflow(t *testing.T) {
+	record := fixtureRecord()
+	record.Content = Content{MediaType: "application/octet-stream", Transport: TransportStream}
+	envelope, _ := EncodeRecord(record)
+	source, err := NewBoundedImportSource(ImportRequest{MaxRecords: 1, MaxBytes: uint64(len(envelope) + 2)}, &sliceSource{records: []Transfer{{Record: record, Payload: Reader(strings.NewReader("123"))}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	transfer, err := source.Next(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := CopyBounded(context.Background(), Writer(io.Discard), transfer.Payload, 100); !errors.Is(err, ErrTransferLimit) {
+		t.Fatalf("import stream overflow: %v", err)
 	}
 }

@@ -18,6 +18,26 @@ same-revision replay is idempotent only when the envelope is identical. A
 different same revision or an older revision is a conflict. Newer revisions
 may be stored or transformed by the provider.
 
+A transformed remember result contains both the complete retained
+representation and explicit transformation metadata (`kind`, description,
+and optional input/output media types). A rejection contains no retained
+representation. This makes transformations such as image-to-text observable
+without treating the retained memory as an exact copy of the experience.
+
+Export and import limits are enforced with shared bounded sink/source
+wrappers. The byte budget covers the encoded MemoryRecord envelope plus any
+stream payload, while the record budget covers admitted envelopes. Exact
+boundaries are accepted and the next byte or record fails with
+`ErrTransferLimit`; partial reports remain available to providers.
+
+Streaming payloads use minimal context-aware `ReadContext`/`WriteContext`
+interfaces. Implementations must unblock with `ctx.Err()` when cancellation
+occurs, including while I/O is waiting. The `Reader` and `Writer` adapters are
+only for immediately completing standard-library I/O; blocking filesystem,
+network, and future WASM streams must implement the context-aware interface
+directly. This requirement is intentionally part of the portable contract so
+the future WASM framing layer cannot weaken cancellation.
+
 Core keeps no canonical shadow memory journal. Doll identity, Soul/Self,
 authority, Interaction Session history, and operational state remain outside
 the provider. Provider unavailability therefore cannot invalidate those

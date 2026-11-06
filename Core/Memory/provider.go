@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
+	"sync"
 )
 
 const copyBufferSize = 32 * 1024
@@ -33,7 +35,52 @@ const (
 
 type Transfer struct {
 	Record  Record
-	Payload io.Reader
+	Payload StreamReader
+}
+
+// StreamReader and StreamWriter make cancellation part of the transfer
+// contract, including while an operation is blocked. Implementations must
+// return promptly with ctx.Err() when ctx is cancelled.
+type StreamReader interface {
+	ReadContext(context.Context, []byte) (int, error)
+}
+
+type StreamWriter interface {
+	WriteContext(context.Context, []byte) (int, error)
+}
+
+type StreamReaderFunc func(context.Context, []byte) (int, error)
+
+func (f StreamReaderFunc) ReadContext(ctx context.Context, p []byte) (int, error) {
+	return f(ctx, p)
+}
+
+type StreamWriterFunc func(context.Context, []byte) (int, error)
+
+func (f StreamWriterFunc) WriteContext(ctx context.Context, p []byte) (int, error) {
+	return f(ctx, p)
+}
+
+// Reader adapts an immediately readable io.Reader. It checks cancellation
+// before calling Read; callers must not use it for readers that may block.
+func Reader(reader io.Reader) StreamReader {
+	return StreamReaderFunc(func(ctx context.Context, p []byte) (int, error) {
+		if err := ctx.Err(); err != nil {
+			return 0, err
+		}
+		return reader.Read(p)
+	})
+}
+
+// Writer adapts an immediately writable io.Writer. It checks cancellation
+// before calling Write; callers must not use it for writers that may block.
+func Writer(writer io.Writer) StreamWriter {
+	return StreamWriterFunc(func(ctx context.Context, p []byte) (int, error) {
+		if err := ctx.Err(); err != nil {
+			return 0, err
+		}
+		return writer.Write(p)
+	})
 }
 
 func (t Transfer) Validate() error {
@@ -48,25 +95,41 @@ func (t Transfer) Validate() error {
 
 type RememberRequest struct {
 	Record    Record
-	Payload   io.Reader
+	Payload   StreamReader
 	ReplayKey string
 }
 
+type Transformation struct {
+	Kind          string
+	Description   string
+	FromMediaType string
+	ToMediaType   string
+}
+
 type RememberResult struct {
-	Outcome  RememberOutcome
-	Retained *Record
-	Reason   string
+	Outcome        RememberOutcome
+	Retained       *Record
+	Reason         string
+	Transformation *Transformation
 }
 
 func (r RememberResult) Validate() error {
 	switch r.Outcome {
-	case RememberStored, RememberTransformed:
+	case RememberStored:
 		if r.Retained == nil {
 			return fmt.Errorf("%w: retained record required", ErrInvalidResult)
 		}
+		if r.Transformation != nil {
+			return fmt.Errorf("%w: stored outcome cannot report transformation", ErrInvalidResult)
+		}
+		return r.Retained.Validate()
+	case RememberTransformed:
+		if r.Retained == nil || r.Transformation == nil || strings.TrimSpace(r.Transformation.Kind) == "" || strings.TrimSpace(r.Transformation.Description) == "" {
+			return fmt.Errorf("%w: transformed outcome requires retained representation and transformation detail", ErrInvalidResult)
+		}
 		return r.Retained.Validate()
 	case RememberRejected:
-		if r.Retained != nil || r.Reason == "" {
+		if r.Retained != nil || r.Transformation != nil || r.Reason == "" {
 			return fmt.Errorf("%w: rejection reason required", ErrInvalidResult)
 		}
 		return nil
@@ -231,7 +294,7 @@ func ValidateImportRequest(r ImportRequest) error { return validateBounds(r.MaxR
 // CopyBounded copies a stream while enforcing cancellation and a hard byte
 // bound. Providers can use it for both import and export payloads without
 // adopting a Core-owned storage representation.
-func CopyBounded(ctx context.Context, dst io.Writer, src io.Reader, maxBytes uint64) (uint64, error) {
+func CopyBounded(ctx context.Context, dst StreamWriter, src StreamReader, maxBytes uint64) (uint64, error) {
 	if maxBytes == 0 {
 		return 0, ErrInvalidRequest
 	}
@@ -244,7 +307,7 @@ func CopyBounded(ctx context.Context, dst io.Writer, src io.Reader, maxBytes uin
 		remaining := maxBytes - total
 		if remaining == 0 {
 			var probe [1]byte
-			n, err := src.Read(probe[:])
+			n, err := src.ReadContext(ctx, probe[:])
 			if n > 0 || err == nil {
 				return total, ErrTransferLimit
 			}
@@ -257,9 +320,9 @@ func CopyBounded(ctx context.Context, dst io.Writer, src io.Reader, maxBytes uin
 		if uint64(len(chunk)) > remaining {
 			chunk = chunk[:remaining]
 		}
-		n, readErr := src.Read(chunk)
+		n, readErr := src.ReadContext(ctx, chunk)
 		if n > 0 {
-			written, writeErr := dst.Write(chunk[:n])
+			written, writeErr := dst.WriteContext(ctx, chunk[:n])
 			total += uint64(written)
 			if writeErr != nil {
 				return total, writeErr
@@ -276,3 +339,142 @@ func CopyBounded(ctx context.Context, dst io.Writer, src io.Reader, maxBytes uin
 		}
 	}
 }
+
+// TransferBudget accounts for complete encoded records, including streamed
+// payload bytes. It can be shared by a bounded source or sink. Transfer users
+// must consume a stream payload before requesting the next transfer.
+type TransferBudget struct {
+	mu         sync.Mutex
+	maxRecords uint64
+	maxBytes   uint64
+	records    uint64
+	bytes      uint64
+}
+
+func NewTransferBudget(maxRecords, maxBytes uint64) (*TransferBudget, error) {
+	if err := validateBounds(maxRecords, maxBytes); err != nil {
+		return nil, err
+	}
+	return &TransferBudget{maxRecords: maxRecords, maxBytes: maxBytes}, nil
+}
+
+func (b *TransferBudget) Usage() (records, bytes uint64) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.records, b.bytes
+}
+
+func (b *TransferBudget) admit(transfer Transfer) (Transfer, error) {
+	if err := transfer.Validate(); err != nil {
+		return Transfer{}, err
+	}
+	envelope, err := EncodeRecord(transfer.Record)
+	if err != nil {
+		return Transfer{}, err
+	}
+	b.mu.Lock()
+	if b.records == b.maxRecords || uint64(len(envelope)) > b.maxBytes-b.bytes {
+		b.mu.Unlock()
+		return Transfer{}, ErrTransferLimit
+	}
+	b.records++
+	b.bytes += uint64(len(envelope))
+	b.mu.Unlock()
+	if transfer.Payload != nil {
+		transfer.Payload = &budgetReader{reader: transfer.Payload, budget: b}
+	}
+	return transfer, nil
+}
+
+type budgetReader struct {
+	reader StreamReader
+	budget *TransferBudget
+}
+
+func (r *budgetReader) ReadContext(ctx context.Context, p []byte) (int, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	r.budget.mu.Lock()
+	remaining := r.budget.maxBytes - r.budget.bytes
+	if remaining == 0 {
+		r.budget.mu.Unlock()
+		var probe [1]byte
+		n, err := r.reader.ReadContext(ctx, probe[:])
+		if n > 0 || err == nil {
+			return 0, ErrTransferLimit
+		}
+		return 0, err
+	}
+	if uint64(len(p)) > remaining {
+		p = p[:remaining]
+	}
+	reserved := uint64(len(p))
+	r.budget.bytes += reserved
+	r.budget.mu.Unlock()
+	n, err := r.reader.ReadContext(ctx, p)
+	if n < 0 || n > len(p) {
+		r.budget.mu.Lock()
+		r.budget.bytes -= reserved
+		r.budget.mu.Unlock()
+		return 0, fmt.Errorf("%w: stream reader returned invalid byte count", ErrInvalidResult)
+	}
+	r.budget.mu.Lock()
+	r.budget.bytes -= reserved - uint64(n)
+	r.budget.mu.Unlock()
+	return n, err
+}
+
+type BoundedExportSink struct {
+	budget *TransferBudget
+	sink   ExportSink
+}
+
+func NewBoundedExportSink(request ExportRequest, sink ExportSink) (*BoundedExportSink, error) {
+	budget, err := NewTransferBudget(request.MaxRecords, request.MaxBytes)
+	if err != nil {
+		return nil, err
+	}
+	if sink == nil {
+		return nil, ErrInvalidRequest
+	}
+	return &BoundedExportSink{budget: budget, sink: sink}, nil
+}
+func (s *BoundedExportSink) Put(ctx context.Context, transfer Transfer) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	bounded, err := s.budget.admit(transfer)
+	if err != nil {
+		return err
+	}
+	return s.sink.Put(ctx, bounded)
+}
+func (s *BoundedExportSink) Usage() (uint64, uint64) { return s.budget.Usage() }
+
+type BoundedImportSource struct {
+	budget *TransferBudget
+	source ImportSource
+}
+
+func NewBoundedImportSource(request ImportRequest, source ImportSource) (*BoundedImportSource, error) {
+	budget, err := NewTransferBudget(request.MaxRecords, request.MaxBytes)
+	if err != nil {
+		return nil, err
+	}
+	if source == nil {
+		return nil, ErrInvalidRequest
+	}
+	return &BoundedImportSource{budget: budget, source: source}, nil
+}
+func (s *BoundedImportSource) Next(ctx context.Context) (Transfer, error) {
+	if err := ctx.Err(); err != nil {
+		return Transfer{}, err
+	}
+	transfer, err := s.source.Next(ctx)
+	if err != nil {
+		return Transfer{}, err
+	}
+	return s.budget.admit(transfer)
+}
+func (s *BoundedImportSource) Usage() (uint64, uint64) { return s.budget.Usage() }
