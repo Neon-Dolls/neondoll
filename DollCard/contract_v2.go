@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/Neon-Dolls/neondoll/Core/Memory"
@@ -20,14 +21,22 @@ var ErrInvalidContractIndex = errors.New("dollcard: invalid contract index")
 type SectionKind string
 
 const (
-	SectionIdentity  SectionKind = "identity"
-	SectionSoul      SectionKind = "soul"
-	SectionSelf      SectionKind = "self"
-	SectionSecrets   SectionKind = "secrets"
-	SectionSkills    SectionKind = "skills"
-	SectionMemories  SectionKind = "memories"
-	SectionPeers     SectionKind = "peers"
-	SectionAuthority SectionKind = "authority"
+	SectionIdentity    SectionKind = "identity"
+	SectionSoul        SectionKind = "soul"
+	SectionSelf        SectionKind = "self"
+	SectionAvatar      SectionKind = "avatar"
+	SectionPreferences SectionKind = "preferences"
+	SectionSecrets     SectionKind = "secrets"
+	SectionSkills      SectionKind = "skills"
+	SectionMemories    SectionKind = "memories"
+	SectionPeers       SectionKind = "peers"
+	SectionAuthority   SectionKind = "authority"
+	SectionDrives      SectionKind = "drives"
+	SectionGoals       SectionKind = "goals"
+	SectionIntentions  SectionKind = "intentions"
+	SectionExtensions  SectionKind = "extensions"
+	SectionLegacyOwner SectionKind = "legacy_owner"
+	SectionLegacyAuth  SectionKind = "legacy_auth"
 )
 
 type ArchiveEntry struct {
@@ -37,11 +46,14 @@ type ArchiveEntry struct {
 }
 
 type SectionIndex struct {
-	ID            string         `json:"id"`
-	Kind          SectionKind    `json:"kind"`
-	SchemaVersion int            `json:"schema_version"`
-	Required      bool           `json:"required"`
-	Entries       []ArchiveEntry `json:"entries"`
+	ID            string      `json:"id"`
+	Kind          SectionKind `json:"kind"`
+	SchemaVersion int         `json:"schema_version"`
+	Required      bool        `json:"required"`
+	// Empty explicitly represents a portable area with no retained content.
+	// A present empty section is distinct from an omitted section.
+	Empty         bool           `json:"empty"`
+	Entries       []ArchiveEntry `json:"entries,omitempty"`
 	Compatibility []string       `json:"compatibility,omitempty"`
 }
 
@@ -66,7 +78,10 @@ func (i IndexV2) Validate(bounds ImportBounds) error {
 	sections, paths, kinds := map[string]bool{}, map[string]bool{}, map[SectionKind]bool{}
 	var entries, size uint64
 	for _, section := range i.Sections {
-		if strings.TrimSpace(section.ID) == "" || strings.TrimSpace(string(section.Kind)) == "" || sections[section.ID] || section.SchemaVersion <= 0 || len(section.Entries) == 0 {
+		if strings.TrimSpace(section.ID) == "" || strings.TrimSpace(string(section.Kind)) == "" || sections[section.ID] || section.SchemaVersion <= 0 {
+			return ErrInvalidContractIndex
+		}
+		if section.Empty == (len(section.Entries) > 0) {
 			return ErrInvalidContractIndex
 		}
 		sections[section.ID] = true
@@ -137,7 +152,20 @@ type ParsedIndex struct {
 	Report  CompatibilityReport
 }
 
-var knownSectionVersions = map[SectionKind]int{SectionIdentity: 1, SectionSoul: 1, SectionSelf: 1, SectionSecrets: 1, SectionSkills: skill.SchemaVersion, SectionMemories: memory.SchemaVersion, SectionPeers: 1, SectionAuthority: 1}
+var knownSectionVersions = map[SectionKind]int{
+	SectionIdentity: 1, SectionSoul: 1, SectionSelf: 1, SectionAvatar: 1,
+	SectionPreferences: 1, SectionSecrets: 1, SectionSkills: skill.SchemaVersion,
+	SectionMemories: memory.SchemaVersion, SectionPeers: 1, SectionAuthority: 1,
+	SectionDrives: 1, SectionGoals: 1, SectionIntentions: 1, SectionExtensions: 1,
+	SectionLegacyOwner: 1, SectionLegacyAuth: 1,
+}
+
+var requiredV2Sections = []SectionKind{
+	SectionIdentity, SectionSoul, SectionSelf, SectionAvatar, SectionPreferences,
+	SectionSecrets, SectionSkills, SectionMemories, SectionPeers, SectionAuthority,
+	SectionDrives, SectionGoals, SectionIntentions, SectionExtensions,
+	SectionLegacyOwner, SectionLegacyAuth,
+}
 
 func ParseContractIndex(data []byte, bounds ImportBounds) (ParsedIndex, error) {
 	var header map[string]json.RawMessage
@@ -164,9 +192,34 @@ func ParseContractIndex(data []byte, bounds ImportBounds) (ParsedIndex, error) {
 		return ParsedIndex{}, ErrInvalidContractIndex
 	}
 	report := assessCompatibility(index)
+	unknownIndexFields := make([]string, 0)
 	for name := range header {
 		if name != "version" && name != "doll_id" && name != "sections" {
-			report.Issues = append(report.Issues, CompatibilityIssue{Code: "unknown_index_field", Message: "unknown card.json field preserved by archive tooling: " + name})
+			unknownIndexFields = append(unknownIndexFields, name)
+		}
+	}
+	sort.Strings(unknownIndexFields)
+	for _, name := range unknownIndexFields {
+		report.Issues = append(report.Issues, CompatibilityIssue{Code: "unknown_index_field_not_preserved", Message: "unknown card.json field is not retained by this contract parser: " + name})
+		if report.Status == CompatibilityCompatible {
+			report.Status = CompatibilityDegraded
+		}
+	}
+	var rawSections []map[string]json.RawMessage
+	if err := json.Unmarshal(header["sections"], &rawSections); err != nil || len(rawSections) != len(index.Sections) {
+		return ParsedIndex{}, ErrInvalidContractIndex
+	}
+	knownFields := map[string]bool{"id": true, "kind": true, "schema_version": true, "required": true, "empty": true, "entries": true, "compatibility": true}
+	for sectionIndex, raw := range rawSections {
+		unknownSectionFields := make([]string, 0)
+		for name := range raw {
+			if !knownFields[name] {
+				unknownSectionFields = append(unknownSectionFields, name)
+			}
+		}
+		sort.Strings(unknownSectionFields)
+		for _, name := range unknownSectionFields {
+			report.Issues = append(report.Issues, CompatibilityIssue{Code: "unknown_section_field_not_preserved", SectionID: index.Sections[sectionIndex].ID, Message: "unknown section field is not retained by this contract parser: " + name})
 			if report.Status == CompatibilityCompatible {
 				report.Status = CompatibilityDegraded
 			}
@@ -187,7 +240,7 @@ func assessCompatibility(index IndexV2) CompatibilityReport {
 			} else if report.Status == CompatibilityCompatible {
 				report.Status = CompatibilityDegraded
 			}
-			report.Issues = append(report.Issues, CompatibilityIssue{Code: code, SectionID: section.ID, Message: "section must be preserved but is not understood"})
+			report.Issues = append(report.Issues, CompatibilityIssue{Code: code, SectionID: section.ID, Message: "section semantics are not understood by this contract parser"})
 			continue
 		}
 		seenKinds[section.Kind] = true
@@ -196,7 +249,7 @@ func assessCompatibility(index IndexV2) CompatibilityReport {
 			report.Issues = append(report.Issues, CompatibilityIssue{Code: "unsupported_section_version", SectionID: section.ID, Message: fmt.Sprintf("schema %d is unsupported", section.SchemaVersion)})
 		}
 	}
-	for _, kind := range []SectionKind{SectionIdentity, SectionSoul, SectionSelf, SectionSecrets, SectionSkills, SectionMemories, SectionPeers, SectionAuthority} {
+	for _, kind := range requiredV2Sections {
 		if !seenKinds[kind] {
 			report.Status = CompatibilityIncompatible
 			report.Issues = append(report.Issues, CompatibilityIssue{Code: "missing_section", SectionID: string(kind), Message: "v2 index must explicitly represent this portable area"})

@@ -43,18 +43,31 @@ M1.3 does not implement discovery, selection, context loading, or execution.
 
 `DollCard.IndexV2` is the proposed integer format revision for `card.json`.
 Every portable section has an ID, kind, schema version, required flag,
-compatibility requirements, and complete file list with relative path,
-declared size, and SHA-256. The index explicitly represents:
+an explicit empty marker, compatibility requirements, and complete file list
+with relative path, declared size, and SHA-256. A present section with
+`"empty": true` is intentionally empty and has no entries. It is not
+equivalent to an omitted section; `"empty": false` requires at least one
+entry. The index explicitly represents:
 
 - identity;
 - Soul and the latest active Self;
+- Avatar and Preferences;
 - existing Doll-owned Secrets;
 - the Skill catalog and complete Skill directory payloads;
 - MemoryRecord v1 JSONL segments exported by the selected Memory Provider;
 - Peer identities, Primary Peer lifecycle, and Doll-authored relationship
   descriptions;
 - authority decisions, delegations, revocations, and one-time consumption
-  history.
+  history;
+- Drives, Goals, and durable Intentions;
+- portable extension data; and
+- legacy Owner and Auth data needed for explicit migration.
+
+All known portable areas are required index sections, even when empty. This
+prevents a syntactically valid v2 card from appearing compatible after silently
+omitting an area. Legacy Owner data is migration evidence, not an automatic
+Primary Peer designation. Legacy Auth data is migration evidence, not an
+active credential or authority grant.
 
 Representative paths include `skills/catalog.json`, `skills/<dir>/SKILL.md`,
 `memories/*.jsonl`, `peers/identities.json`,
@@ -73,8 +86,13 @@ archive pipeline.
 
 - Version 1 remains a legacy input for the existing reader. Missing v2
   authority is reported as `unknown/unrepresented`, never allow or prohibit.
-- Unknown optional sections are preserved and reported as degraded
-  compatibility. Unknown required sections are incompatible.
+- Unknown optional sections are reported as degraded compatibility. Unknown
+  required sections are incompatible. This contract parser retains the known
+  section index fields and entry references, but it does not retain unknown
+  top-level or section-level JSON fields in `ParsedIndex`. Such fields are
+  explicitly reported as `*_not_preserved`; M1.3 therefore makes no faithful
+  future round-trip claim. A production v2 archive pipeline must either retain
+  their raw JSON or refuse a round-trip.
 - Missing dependencies yield an installed, dormant Skill.
 - Skill path conflicts and integrity failures are explicit rejection results.
 - Unverifiable authority records are retained as
@@ -99,6 +117,7 @@ archive round-trip and no-silent-loss tests. M1.3 does not claim v2 cards can
 yet be imported or exported by production Core.
 
 Open decisions for that work include archive streaming implementation,
-section/file size defaults, preservation mechanics for unknown optional
-sections, atomic conflict handling, whole-container protection, and the exact
-trusted verification process for imported Peer and authority provenance.
+section/file size defaults, raw preservation mechanics for unknown fields and
+optional sections, atomic conflict handling, whole-container protection, and
+the exact trusted verification process for imported Peer and authority
+provenance.

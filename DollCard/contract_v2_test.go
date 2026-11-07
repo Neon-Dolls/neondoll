@@ -10,7 +10,7 @@ import (
 	"github.com/Neon-Dolls/neondoll/Core/Memory"
 )
 
-var testBounds = ImportBounds{MaxSections: 16, MaxEntries: 100, MaxDeclaredBytes: 1 << 20}
+var testBounds = ImportBounds{MaxSections: 32, MaxEntries: 100, MaxDeclaredBytes: 1 << 20}
 
 func contractEntry(name string, data []byte) ArchiveEntry {
 	sum := sha256.Sum256(data)
@@ -22,12 +22,31 @@ func v2IndexFixture() IndexV2 {
 		{ID: "identity", Kind: SectionIdentity, SchemaVersion: 1, Required: true, Entries: []ArchiveEntry{contractEntry("identity.json", []byte("identity"))}},
 		{ID: "soul", Kind: SectionSoul, SchemaVersion: 1, Required: true, Entries: []ArchiveEntry{contractEntry("soul.md", []byte("soul"))}},
 		{ID: "self", Kind: SectionSelf, SchemaVersion: 1, Required: true, Entries: []ArchiveEntry{contractEntry("self/self.md", []byte("latest self"))}},
+		{ID: "avatar", Kind: SectionAvatar, SchemaVersion: 1, Required: true, Empty: true},
+		{ID: "preferences", Kind: SectionPreferences, SchemaVersion: 1, Required: true, Empty: true},
 		{ID: "secrets", Kind: SectionSecrets, SchemaVersion: 1, Required: true, Entries: []ArchiveEntry{contractEntry("secrets/secrets.json", []byte("[]"))}},
 		{ID: "skills", Kind: SectionSkills, SchemaVersion: 1, Required: true, Entries: []ArchiveEntry{contractEntry("skills/catalog.json", []byte("catalog")), contractEntry("skills/research/SKILL.md", []byte("instructions")), contractEntry("skills/research/assets/icon.png", []byte{0, 1, 2})}},
 		{ID: "memories", Kind: SectionMemories, SchemaVersion: 1, Required: true, Entries: []ArchiveEntry{contractEntry("memories/memories-000001.jsonl", []byte("record\n"))}},
 		{ID: "peers", Kind: SectionPeers, SchemaVersion: 1, Required: true, Entries: []ArchiveEntry{contractEntry("peers/identities.json", []byte("[]")), contractEntry("peers/primary-events.json", []byte("[]")), contractEntry("peers/descriptions/peer-a.json", []byte("description"))}},
 		{ID: "authority", Kind: SectionAuthority, SchemaVersion: 1, Required: true, Entries: []ArchiveEntry{contractEntry("authority/decisions.json", []byte("[]")), contractEntry("authority/delegations.json", []byte("[]")), contractEntry("authority/consumptions.json", []byte("[]"))}},
+		{ID: "drives", Kind: SectionDrives, SchemaVersion: 1, Required: true, Empty: true},
+		{ID: "goals", Kind: SectionGoals, SchemaVersion: 1, Required: true, Empty: true},
+		{ID: "intentions", Kind: SectionIntentions, SchemaVersion: 1, Required: true, Empty: true},
+		{ID: "extensions", Kind: SectionExtensions, SchemaVersion: 1, Required: true, Empty: true},
+		{ID: "legacy-owner", Kind: SectionLegacyOwner, SchemaVersion: 1, Required: true, Entries: []ArchiveEntry{contractEntry("legacy/owner/owner.json", []byte("{}"))}},
+		{ID: "legacy-auth", Kind: SectionLegacyAuth, SchemaVersion: 1, Required: true, Empty: true},
 	}}
+}
+
+func sectionOfKind(t *testing.T, index IndexV2, kind SectionKind) SectionIndex {
+	t.Helper()
+	for _, section := range index.Sections {
+		if section.Kind == kind {
+			return section
+		}
+	}
+	t.Fatalf("missing section %q", kind)
+	return SectionIndex{}
 }
 
 func TestVersion2IndexParsingAndIntegrity(t *testing.T) {
@@ -43,13 +62,99 @@ func TestVersion2IndexParsingAndIntegrity(t *testing.T) {
 	if parsed.Version != 2 || parsed.V2 == nil || parsed.Report.Status != CompatibilityCompatible {
 		t.Fatalf("parsed=%+v", parsed)
 	}
-	asset := index.Sections[4].Entries[2]
+	asset := sectionOfKind(t, index, SectionSkills).Entries[2]
 	if err := ValidateEntryData(asset, []byte{0, 1, 2}); err != nil {
 		t.Fatal(err)
 	}
 	if err := ValidateEntryData(asset, []byte{0, 1, 3}); !errors.Is(err, ErrInvalidContractIndex) {
 		t.Fatalf("integrity: %v", err)
 	}
+}
+
+func TestVersion2DistinguishesEmptyFromMissingSections(t *testing.T) {
+	index := v2IndexFixture()
+	if err := index.Validate(testBounds); err != nil {
+		t.Fatalf("explicitly empty sections should validate: %v", err)
+	}
+
+	for _, omittedKind := range requiredV2Sections {
+		missing := v2IndexFixture()
+		for i, section := range missing.Sections {
+			if section.Kind == omittedKind {
+				missing.Sections = append(missing.Sections[:i], missing.Sections[i+1:]...)
+				break
+			}
+		}
+		data, _ := json.Marshal(missing)
+		parsed, err := ParseContractIndex(data, testBounds)
+		if err != nil {
+			t.Fatalf("omit %s: %v", omittedKind, err)
+		}
+		if parsed.Report.Status != CompatibilityIncompatible || !hasIssue(parsed.Report, "missing_section", string(omittedKind)) {
+			t.Fatalf("missing %s was not reported: %+v", omittedKind, parsed.Report)
+		}
+	}
+
+	invalid := v2IndexFixture()
+	invalid.Sections[3].Empty = false
+	if err := invalid.Validate(testBounds); !errors.Is(err, ErrInvalidContractIndex) {
+		t.Fatalf("implicit empty section accepted: %v", err)
+	}
+	invalid = v2IndexFixture()
+	invalid.Sections[3].Entries = []ArchiveEntry{contractEntry("avatar/avatar.png", []byte("avatar"))}
+	if err := invalid.Validate(testBounds); !errors.Is(err, ErrInvalidContractIndex) {
+		t.Fatalf("section marked empty with entries accepted: %v", err)
+	}
+}
+
+func TestUnknownIndexFieldsAreExplicitlyNotPreserved(t *testing.T) {
+	data, err := json.Marshal(v2IndexFixture())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatal(err)
+	}
+	raw["future_top_level"] = map[string]any{"value": "retained by a future parser"}
+	sections := raw["sections"].([]any)
+	sections[0].(map[string]any)["future_section_field"] = []any{"future", "metadata"}
+	data, err = json.Marshal(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := ParseContractIndex(data, testBounds)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.Report.Status != CompatibilityDegraded || !hasIssue(parsed.Report, "unknown_index_field_not_preserved", "") || !hasIssue(parsed.Report, "unknown_section_field_not_preserved", "identity") {
+		t.Fatalf("unknown fields not reported accurately: %+v", parsed.Report)
+	}
+	roundTrip, err := json.Marshal(parsed.V2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stringContains(string(roundTrip), "future_top_level") || stringContains(string(roundTrip), "future_section_field") {
+		t.Fatalf("test expected current parser not to retain unknown fields: %s", roundTrip)
+	}
+}
+
+func hasIssue(report CompatibilityReport, code, sectionID string) bool {
+	for _, issue := range report.Issues {
+		if issue.Code == code && (sectionID == "" || issue.SectionID == sectionID) {
+			return true
+		}
+	}
+	return false
+}
+
+func stringContains(value, part string) bool {
+	for i := 0; i+len(part) <= len(value); i++ {
+		if value[i:i+len(part)] == part {
+			return true
+		}
+	}
+	return false
 }
 
 func TestVersion1CompatibilityTreatsAuthorityAsUnknown(t *testing.T) {
