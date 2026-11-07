@@ -10,6 +10,7 @@ The adapter is `Core/Memory/SQLite` and uses the repository's existing
 pure-Go `modernc.org/sqlite` driver. `sqlite.Open` accepts a database path, a
 required stable Doll ID, and an optional maximum inline-record size. An empty
 path defaults to `neondoll-memory.sqlite`; the inline limit defaults to 4 MiB.
+The independently configurable stream limit defaults to 16 MiB.
 Database files and newly created parent directories are restricted to the
 local user.
 
@@ -25,23 +26,30 @@ private columns used for deterministic text retrieval. Those columns and
 SQLite row details never appear in recall, export, or import records.
 Replay-key bookkeeping is private provider state.
 
-`Remember` currently accepts inline `text/plain` and `application/json`.
-Unsupported MIME types, stream transport, and over-limit content produce an
-explicit `rejected` result; no transformation is claimed. Stable IDs and
-revisions use the common M1.1 conflict rules: exact replay is idempotent,
-newer revisions replace the retained representation, and stale or differing
-same-revision records are rejected.
+`Remember` accepts inline and streamed `text/plain` and `application/json`.
+Stream bytes are copied through the cancellable M1.1 interface under a hard
+provider limit, checked against any declared size, validated as UTF-8 text or
+JSON, and retained in a private SQLite BLOB. Unsupported MIME types, malformed
+content, size mismatches, and over-limit content produce an explicit
+`rejected` result; no transformation is claimed. Stable IDs and revisions use
+the common M1.1 conflict rules. Exact replay includes the stream payload in
+its identity, newer revisions replace the retained representation, and stale
+or differing same-revision records are rejected.
 
 `Recall` performs bounded case-insensitive substring matching over retained
 text/JSON and supports metadata-kind and source-type filters. Results are
 ordered by effective experience/creation time and stable Memory ID. This is
 basic local retrieval, not semantic ranking or vector search.
 
-Export emits only portable MemoryRecord envelopes. Import reads through the
-shared bounded, cancellable transfer wrapper and applies supported records in
-one transaction. A source, cancellation, validation, or storage failure rolls
-back the transaction; content and revision conflicts remain explicit per-item
-rejections. SQLite schema, indexes, and row IDs are never exported.
+Export emits portable MemoryRecord envelopes and exposes retained stream BLOBs
+through bounded `StreamReader` payloads. It uses deterministic keyset
+iteration, preflights each next record against the remaining transfer budget,
+and loads at most one record/payload at a time. No SQLite cursor is held while
+calling the external sink. Import reads and validates stream payloads through
+the shared bounded, cancellable transfer wrapper and applies supported records
+in one transaction. A source, cancellation, validation, or storage failure
+rolls back the transaction; content and revision conflicts remain explicit
+per-item rejections. SQLite schema, indexes, and row IDs are never exported.
 
 ## Lifecycle and deferred integration
 

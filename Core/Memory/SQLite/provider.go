@@ -4,6 +4,7 @@
 package sqlite
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"database/sql"
@@ -18,6 +19,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	memory "github.com/Neon-Dolls/neondoll/Core/Memory"
 
@@ -27,18 +29,21 @@ import (
 const (
 	DefaultDatabasePath          = "neondoll-memory.sqlite"
 	DefaultMaxInlineBytes uint64 = 4 << 20
+	DefaultMaxStreamBytes uint64 = 16 << 20
 )
 
 type Config struct {
 	Path           string
 	DollID         string
 	MaxInlineBytes uint64
+	MaxStreamBytes uint64
 }
 
 type Provider struct {
 	db             *sql.DB
 	dollID         string
 	maxInlineBytes uint64
+	maxStreamBytes uint64
 	closeOnce      sync.Once
 	closeErr       error
 }
@@ -57,6 +62,9 @@ func Open(config Config) (*Provider, error) {
 	if config.MaxInlineBytes == 0 {
 		config.MaxInlineBytes = DefaultMaxInlineBytes
 	}
+	if config.MaxStreamBytes == 0 {
+		config.MaxStreamBytes = DefaultMaxStreamBytes
+	}
 	if config.Path != ":memory:" {
 		parent := filepath.Dir(config.Path)
 		if err := os.MkdirAll(parent, 0o700); err != nil {
@@ -68,7 +76,7 @@ func Open(config Config) (*Provider, error) {
 		return nil, unavailable("open database", err)
 	}
 	db.SetMaxOpenConns(1)
-	provider := &Provider{db: db, dollID: config.DollID, maxInlineBytes: config.MaxInlineBytes}
+	provider := &Provider{db: db, dollID: config.DollID, maxInlineBytes: config.MaxInlineBytes, maxStreamBytes: config.MaxStreamBytes}
 	if err := provider.initialize(context.Background()); err != nil {
 		_ = db.Close()
 		return nil, err
@@ -97,6 +105,7 @@ func (p *Provider) initialize(ctx context.Context) error {
 			source_type TEXT NOT NULL,
 			created_at TEXT NOT NULL,
 			experienced_at TEXT,
+			payload BLOB,
 			PRIMARY KEY (doll_id, memory_id)
 		)`,
 		`CREATE INDEX IF NOT EXISTS memory_provider_recall
@@ -106,7 +115,7 @@ func (p *Provider) initialize(ctx context.Context) error {
 			replay_key TEXT NOT NULL,
 			memory_id TEXT NOT NULL,
 			revision INTEGER NOT NULL,
-			envelope_sha256 TEXT NOT NULL,
+			retained_sha256 TEXT NOT NULL,
 			PRIMARY KEY (doll_id, replay_key)
 		)`,
 	} {
@@ -114,7 +123,26 @@ func (p *Provider) initialize(ctx context.Context) error {
 			return unavailable("initialize database", err)
 		}
 	}
+	var payloadColumn int
+	if err := p.db.QueryRowContext(ctx, `SELECT count(*) FROM pragma_table_info('memory_provider_records') WHERE name='payload'`).Scan(&payloadColumn); err != nil {
+		return unavailable("inspect database schema", err)
+	}
+	if payloadColumn == 0 {
+		if _, err := p.db.ExecContext(ctx, `ALTER TABLE memory_provider_records ADD COLUMN payload BLOB`); err != nil {
+			return unavailable("migrate stream payload schema", err)
+		}
+	}
 	return nil
+}
+
+type retainedMemory struct {
+	record  memory.Record
+	payload []byte
+}
+
+type importCandidate struct {
+	retained  retainedMemory
+	rejection string
 }
 
 func (p *Provider) Close() error {
@@ -132,14 +160,18 @@ func (p *Provider) Remember(ctx context.Context, request memory.RememberRequest)
 		}
 		return memory.RememberResult{}, memory.ErrInvalidRequest
 	}
-	if reason := p.unsupportedReason(request.Record); reason != "" {
+	payload, reason, err := p.prepareContent(ctx, request.Record, request.Payload)
+	if err != nil {
+		return memory.RememberResult{}, err
+	}
+	if reason != "" {
 		return memory.RememberResult{Outcome: memory.RememberRejected, Reason: reason}, nil
 	}
 	tx, err := p.db.BeginTx(ctx, nil)
 	if err != nil {
 		return memory.RememberResult{}, operationError(ctx, "begin remember", err)
 	}
-	result, err := p.rememberTx(ctx, tx, request.Record, request.ReplayKey)
+	result, err := p.rememberTx(ctx, tx, retainedMemory{record: request.Record, payload: payload}, request.ReplayKey)
 	if err != nil {
 		_ = tx.Rollback()
 		return memory.RememberResult{}, err
@@ -150,29 +182,29 @@ func (p *Provider) Remember(ctx context.Context, request memory.RememberRequest)
 	return result, nil
 }
 
-func (p *Provider) rememberTx(ctx context.Context, tx *sql.Tx, record memory.Record, replayKey string) (memory.RememberResult, error) {
+func (p *Provider) rememberTx(ctx context.Context, tx *sql.Tx, retained retainedMemory, replayKey string) (memory.RememberResult, error) {
+	record := retained.record
 	envelope, err := memory.EncodeRecord(record)
 	if err != nil {
 		return memory.RememberResult{}, err
 	}
-	digest := sha256.Sum256(envelope)
-	digestText := hex.EncodeToString(digest[:])
+	digestText := retainedDigest(envelope, retained.payload)
 	if replayKey != "" {
 		if strings.TrimSpace(replayKey) == "" {
 			return memory.RememberResult{}, memory.ErrInvalidRequest
 		}
 		var id, hash string
 		var revision uint64
-		err := tx.QueryRowContext(ctx, `SELECT memory_id, revision, envelope_sha256 FROM memory_provider_replays WHERE doll_id=? AND replay_key=?`, p.dollID, replayKey).Scan(&id, &revision, &hash)
+		err := tx.QueryRowContext(ctx, `SELECT memory_id, revision, retained_sha256 FROM memory_provider_replays WHERE doll_id=? AND replay_key=?`, p.dollID, replayKey).Scan(&id, &revision, &hash)
 		if err == nil {
 			if id != record.ID || revision != record.Revision || hash != digestText {
 				return memory.RememberResult{}, fmt.Errorf("%w: replay key identifies different content", memory.ErrConflict)
 			}
-			retained, err := p.loadTx(ctx, tx, id)
+			existing, err := p.loadTx(ctx, tx, id)
 			if err != nil {
 				return memory.RememberResult{}, err
 			}
-			return stored(retained), nil
+			return stored(existing.record), nil
 		}
 		if !errors.Is(err, sql.ErrNoRows) {
 			return memory.RememberResult{}, unavailable("read replay", err)
@@ -182,7 +214,7 @@ func (p *Provider) rememberTx(ctx context.Context, tx *sql.Tx, record memory.Rec
 	existing, err := p.loadTx(ctx, tx, record.ID)
 	switch {
 	case err == nil:
-		disposition, compareErr := memory.CompareImportRevision(existing, record)
+		disposition, compareErr := compareRetained(existing, retained)
 		if compareErr != nil {
 			return memory.RememberResult{Outcome: memory.RememberRejected, Reason: compareErr.Error()}, nil
 		}
@@ -190,14 +222,14 @@ func (p *Provider) rememberTx(ctx context.Context, tx *sql.Tx, record memory.Rec
 			if err := p.insertReplay(ctx, tx, replayKey, record, digestText); err != nil {
 				return memory.RememberResult{}, err
 			}
-			return stored(existing), nil
+			return stored(existing.record), nil
 		}
 	case errors.Is(err, sql.ErrNoRows):
 	case err != nil:
 		return memory.RememberResult{}, err
 	}
 
-	searchText, err := searchableText(record)
+	searchText, err := searchableText(record, retained.payload)
 	if err != nil {
 		return memory.RememberResult{}, err
 	}
@@ -206,14 +238,14 @@ func (p *Provider) rememberTx(ctx context.Context, tx *sql.Tx, record memory.Rec
 		experienced = record.ExperiencedAt.UTC().Format(time.RFC3339Nano)
 	}
 	_, err = tx.ExecContext(ctx, `INSERT INTO memory_provider_records
-		(doll_id,memory_id,revision,envelope,search_text,metadata_kind,source_type,created_at,experienced_at)
-		VALUES(?,?,?,?,?,?,?,?,?)
+		(doll_id,memory_id,revision,envelope,search_text,metadata_kind,source_type,created_at,experienced_at,payload)
+		VALUES(?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(doll_id,memory_id) DO UPDATE SET
 			revision=excluded.revision,envelope=excluded.envelope,search_text=excluded.search_text,
 			metadata_kind=excluded.metadata_kind,source_type=excluded.source_type,
-			created_at=excluded.created_at,experienced_at=excluded.experienced_at`,
+			created_at=excluded.created_at,experienced_at=excluded.experienced_at,payload=excluded.payload`,
 		p.dollID, record.ID, record.Revision, envelope, searchText, record.Metadata.Kind, record.Source.Type,
-		record.CreatedAt.UTC().Format(time.RFC3339Nano), experienced)
+		record.CreatedAt.UTC().Format(time.RFC3339Nano), experienced, retained.payload)
 	if err != nil {
 		return memory.RememberResult{}, unavailable("store memory", err)
 	}
@@ -229,7 +261,7 @@ func (p *Provider) insertReplay(ctx context.Context, tx *sql.Tx, replayKey strin
 	if replayKey == "" {
 		return nil
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO memory_provider_replays (doll_id,replay_key,memory_id,revision,envelope_sha256) VALUES(?,?,?,?,?)`, p.dollID, replayKey, record.ID, record.Revision, digest); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO memory_provider_replays (doll_id,replay_key,memory_id,revision,retained_sha256) VALUES(?,?,?,?,?)`, p.dollID, replayKey, record.ID, record.Revision, digest); err != nil {
 		return operationError(ctx, "store replay", err)
 	}
 	return nil
@@ -240,20 +272,20 @@ func stored(record memory.Record) memory.RememberResult {
 	return memory.RememberResult{Outcome: memory.RememberStored, Retained: &copy}
 }
 
-func (p *Provider) loadTx(ctx context.Context, tx *sql.Tx, id string) (memory.Record, error) {
-	var envelope []byte
-	err := tx.QueryRowContext(ctx, `SELECT envelope FROM memory_provider_records WHERE doll_id=? AND memory_id=?`, p.dollID, id).Scan(&envelope)
+func (p *Provider) loadTx(ctx context.Context, tx *sql.Tx, id string) (retainedMemory, error) {
+	var envelope, payload []byte
+	err := tx.QueryRowContext(ctx, `SELECT envelope, payload FROM memory_provider_records WHERE doll_id=? AND memory_id=?`, p.dollID, id).Scan(&envelope, &payload)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return memory.Record{}, sql.ErrNoRows
+			return retainedMemory{}, sql.ErrNoRows
 		}
-		return memory.Record{}, unavailable("load memory", err)
+		return retainedMemory{}, unavailable("load memory", err)
 	}
 	record, err := memory.DecodeRecord(envelope)
 	if err != nil {
-		return memory.Record{}, unavailable("decode retained memory", err)
+		return retainedMemory{}, unavailable("decode retained memory", err)
 	}
-	return record, nil
+	return retainedMemory{record: record, payload: payload}, nil
 }
 
 func (p *Provider) Recall(ctx context.Context, request memory.RecallRequest) (memory.RecallResult, error) {
@@ -316,41 +348,104 @@ func (p *Provider) Export(ctx context.Context, request memory.ExportRequest, sin
 	if err != nil {
 		return memory.ExportReport{}, err
 	}
-	rows, err := p.db.QueryContext(ctx, `SELECT envelope FROM memory_provider_records WHERE doll_id=? ORDER BY memory_id`, p.dollID)
-	if err != nil {
-		return memory.ExportReport{}, operationError(ctx, "export", err)
-	}
-	defer rows.Close()
 	report := memory.ExportReport{}
-	records := make([]memory.Record, 0)
-	for rows.Next() {
-		var envelope []byte
-		if err := rows.Scan(&envelope); err != nil {
-			return exportUsage(report, bounded), unavailable("scan export", err)
-		}
-		record, err := memory.DecodeRecord(envelope)
-		if err != nil {
-			return exportUsage(report, bounded), unavailable("decode export", err)
-		}
-		records = append(records, record)
-	}
-	if err := rows.Err(); err != nil {
-		if ctx.Err() != nil {
-			return exportUsage(report, bounded), ctx.Err()
-		}
-		return exportUsage(report, bounded), unavailable("iterate export", err)
-	}
-	if err := rows.Close(); err != nil {
-		return exportUsage(report, bounded), unavailable("close export query", err)
-	}
-	for _, record := range records {
-		if err := bounded.Put(ctx, memory.Transfer{Record: record}); err != nil {
+	lastID := ""
+	for {
+		if err := ctx.Err(); err != nil {
 			return exportUsage(report, bounded), err
 		}
+		nextID, err := p.nextExportID(ctx, lastID)
+		if errors.Is(err, sql.ErrNoRows) {
+			report = exportUsage(report, bounded)
+			report.Completed = true
+			return report, nil
+		}
+		if err != nil {
+			return exportUsage(report, bounded), err
+		}
+		usedRecords, usedBytes := bounded.Usage()
+		if usedRecords == request.MaxRecords {
+			return exportUsage(report, bounded), memory.ErrTransferLimit
+		}
+		retained, envelopeBytes, payloadBytes, err := p.loadExportRecord(ctx, nextID)
+		if err != nil {
+			return exportUsage(report, bounded), err
+		}
+		if envelopeBytes+payloadBytes > request.MaxBytes-usedBytes {
+			return exportUsage(report, bounded), memory.ErrTransferLimit
+		}
+		if payloadBytes > 0 {
+			retained.payload, err = p.loadExportPayload(ctx, nextID, retained.record.Revision)
+			if err != nil {
+				return exportUsage(report, bounded), err
+			}
+			if uint64(len(retained.payload)) != payloadBytes {
+				return exportUsage(report, bounded), unavailable("export payload changed during read", memory.ErrConflict)
+			}
+		}
+		transfer := memory.Transfer{Record: retained.record}
+		var consumed *countingReader
+		if retained.record.Content.Transport == memory.TransportStream {
+			consumed = &countingReader{reader: memory.Reader(bytes.NewReader(retained.payload))}
+			transfer.Payload = consumed
+		}
+		if err := bounded.Put(ctx, transfer); err != nil {
+			return exportUsage(report, bounded), err
+		}
+		if consumed != nil && consumed.bytes != uint64(len(retained.payload)) {
+			return exportUsage(report, bounded), fmt.Errorf("%w: export sink did not consume stream payload", memory.ErrInvalidResult)
+		}
+		lastID = retained.record.ID
 	}
-	report = exportUsage(report, bounded)
-	report.Completed = true
-	return report, nil
+}
+
+func (p *Provider) nextExportID(ctx context.Context, afterID string) (string, error) {
+	var id string
+	err := p.db.QueryRowContext(ctx, `SELECT memory_id FROM memory_provider_records WHERE doll_id=? AND memory_id>? ORDER BY memory_id LIMIT 1`, p.dollID, afterID).Scan(&id)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", sql.ErrNoRows
+		}
+		return "", operationError(ctx, "iterate export", err)
+	}
+	return id, nil
+}
+
+func (p *Provider) loadExportRecord(ctx context.Context, id string) (retainedMemory, uint64, uint64, error) {
+	var envelope []byte
+	var payloadBytes uint64
+	err := p.db.QueryRowContext(ctx, `SELECT envelope, length(COALESCE(payload,x'')) FROM memory_provider_records WHERE doll_id=? AND memory_id=?`, p.dollID, id).Scan(&envelope, &payloadBytes)
+	if err != nil {
+		return retainedMemory{}, 0, 0, operationError(ctx, "export", err)
+	}
+	record, err := memory.DecodeRecord(envelope)
+	if err != nil {
+		return retainedMemory{}, 0, 0, unavailable("decode export", err)
+	}
+	return retainedMemory{record: record}, uint64(len(envelope)), payloadBytes, nil
+}
+
+func (p *Provider) loadExportPayload(ctx context.Context, id string, expectedRevision uint64) ([]byte, error) {
+	var payload []byte
+	var revision uint64
+	if err := p.db.QueryRowContext(ctx, `SELECT revision,payload FROM memory_provider_records WHERE doll_id=? AND memory_id=?`, p.dollID, id).Scan(&revision, &payload); err != nil {
+		return nil, operationError(ctx, "export payload", err)
+	}
+	if revision != expectedRevision {
+		return nil, unavailable("export record changed during read", memory.ErrConflict)
+	}
+	return payload, nil
+}
+
+type countingReader struct {
+	reader memory.StreamReader
+	bytes  uint64
+}
+
+func (r *countingReader) ReadContext(ctx context.Context, buffer []byte) (int, error) {
+	n, err := r.reader.ReadContext(ctx, buffer)
+	r.bytes += uint64(n)
+	return n, err
 }
 
 func exportUsage(report memory.ExportReport, bounded *memory.BoundedExportSink) memory.ExportReport {
@@ -364,7 +459,7 @@ func (p *Provider) Import(ctx context.Context, request memory.ImportRequest, sou
 		return memory.ImportReport{}, err
 	}
 	report := memory.ImportReport{}
-	transfers := make([]memory.Transfer, 0)
+	transfers := make([]importCandidate, 0)
 	for {
 		transfer, err := bounded.Next(ctx)
 		if errors.Is(err, io.EOF) {
@@ -374,13 +469,21 @@ func (p *Provider) Import(ctx context.Context, request memory.ImportRequest, sou
 			report.Records, report.Bytes = bounded.Usage()
 			return report, err
 		}
-		if transfer.Payload != nil {
-			if _, err := memory.CopyBounded(ctx, memory.Writer(io.Discard), transfer.Payload, request.MaxBytes); err != nil {
-				report.Records, report.Bytes = bounded.Usage()
-				return report, err
-			}
+		payload, reason, prepareErr := p.prepareContent(ctx, transfer.Record, transfer.Payload)
+		if prepareErr != nil {
+			report.Records, report.Bytes = bounded.Usage()
+			return report, prepareErr
 		}
-		transfers = append(transfers, transfer)
+		if reason != "" {
+			if transfer.Payload != nil {
+				if _, drainErr := memory.CopyBounded(ctx, memory.Writer(io.Discard), transfer.Payload, request.MaxBytes); drainErr != nil {
+					report.Records, report.Bytes = bounded.Usage()
+					return report, drainErr
+				}
+			}
+			report.Outcomes = append(report.Outcomes, memory.ImportOutcome{Source: transfer.Record.Reference(), Disposition: memory.ImportRejected, Reason: reason})
+		}
+		transfers = append(transfers, importCandidate{retained: retainedMemory{record: transfer.Record, payload: payload}, rejection: reason})
 	}
 	report.Records, report.Bytes = bounded.Usage()
 	tx, err := p.db.BeginTx(ctx, nil)
@@ -400,28 +503,28 @@ func (p *Provider) Import(ctx context.Context, request memory.ImportRequest, sou
 		report.Outcomes = retained
 		return report, cause
 	}
-	for _, transfer := range transfers {
-		record := transfer.Record
-		if reason := p.unsupportedReason(record); reason != "" {
-			report.Outcomes = append(report.Outcomes, memory.ImportOutcome{Source: record.Reference(), Disposition: memory.ImportRejected, Reason: reason})
+	for _, candidate := range transfers {
+		retained := candidate.retained
+		record := retained.record
+		if candidate.rejection != "" {
 			continue
 		}
 		existing, loadErr := p.loadTx(ctx, tx, record.ID)
 		if loadErr == nil {
-			disposition, compareErr := memory.CompareImportRevision(existing, record)
+			disposition, compareErr := compareRetained(existing, retained)
 			if compareErr != nil {
 				report.Outcomes = append(report.Outcomes, memory.ImportOutcome{Source: record.Reference(), Disposition: memory.ImportRejected, Reason: compareErr.Error()})
 				continue
 			}
 			if disposition == memory.ImportIdempotent {
-				ref := existing.Reference()
+				ref := existing.record.Reference()
 				report.Outcomes = append(report.Outcomes, memory.ImportOutcome{Source: record.Reference(), Retained: &ref, Disposition: memory.ImportIdempotent})
 				continue
 			}
 		} else if !errors.Is(loadErr, sql.ErrNoRows) {
 			return rollback(loadErr)
 		}
-		result, rememberErr := p.rememberTx(ctx, tx, record, "")
+		result, rememberErr := p.rememberTx(ctx, tx, retained, "")
 		if rememberErr != nil {
 			return rollback(rememberErr)
 		}
@@ -447,6 +550,7 @@ func (p *Provider) Capabilities(ctx context.Context) (memory.Capabilities, error
 		ContractVersion: memory.ContractVersion,
 		ContentTypes:    []string{"application/json", "text/plain"},
 		MaxInlineBytes:  p.maxInlineBytes,
+		MaxStreamBytes:  p.maxStreamBytes,
 		SupportsUpdates: true,
 	}, nil
 }
@@ -461,25 +565,56 @@ func (p *Provider) Health(ctx context.Context) (memory.Health, error) {
 	return memory.Health{Status: memory.HealthHealthy, Detail: "SQLite storage is available"}, nil
 }
 
-func (p *Provider) unsupportedReason(record memory.Record) string {
+func (p *Provider) prepareContent(ctx context.Context, record memory.Record, source memory.StreamReader) ([]byte, string, error) {
 	mediaType, _, err := mime.ParseMediaType(record.Content.MediaType)
 	if err != nil {
-		return "invalid content media type"
+		return nil, "invalid content media type", nil
 	}
 	if mediaType != "text/plain" && mediaType != "application/json" {
-		return "unsupported content type: " + mediaType
+		return nil, "unsupported content type: " + mediaType, nil
 	}
-	if record.Content.Transport != memory.TransportInline {
-		return "SQLite provider currently requires inline text or JSON content"
+	var payload []byte
+	switch record.Content.Transport {
+	case memory.TransportInline:
+		if uint64(len(record.Content.Data)) > p.maxInlineBytes {
+			return nil, "inline content exceeds provider limit", nil
+		}
+	case memory.TransportStream:
+		if record.Content.Size != nil && uint64(*record.Content.Size) > p.maxStreamBytes {
+			return nil, "stream content exceeds provider limit", nil
+		}
+		var buffer bytes.Buffer
+		if _, err := memory.CopyBounded(ctx, memory.Writer(&buffer), source, p.maxStreamBytes); err != nil {
+			if errors.Is(err, memory.ErrTransferLimit) {
+				return nil, "stream content exceeds provider limit", nil
+			}
+			return nil, "", err
+		}
+		payload = append([]byte(nil), buffer.Bytes()...)
+		if record.Content.Size != nil && int64(len(payload)) != *record.Content.Size {
+			return nil, "stream content size does not match declaration", nil
+		}
+	default:
+		return nil, "unsupported content transport", nil
 	}
-	if uint64(len(record.Content.Data)) > p.maxInlineBytes {
-		return "inline content exceeds provider limit"
+	content := record.Content.Data
+	if record.Content.Transport == memory.TransportStream {
+		content = payload
 	}
-	return ""
+	if mediaType == "text/plain" && !utf8.Valid(content) {
+		return nil, "streamed text is not valid UTF-8", nil
+	}
+	if mediaType == "application/json" && !json.Valid(content) {
+		return nil, "streamed JSON is invalid", nil
+	}
+	return payload, "", nil
 }
 
-func searchableText(record memory.Record) (string, error) {
+func searchableText(record memory.Record, payload []byte) (string, error) {
 	mediaType, _, _ := mime.ParseMediaType(record.Content.MediaType)
+	if record.Content.Transport == memory.TransportStream {
+		return string(payload), nil
+	}
 	if mediaType == "text/plain" {
 		var text string
 		if err := json.Unmarshal(record.Content.Data, &text); err != nil {
@@ -488,6 +623,25 @@ func searchableText(record memory.Record) (string, error) {
 		return text, nil
 	}
 	return string(record.Content.Data), nil
+}
+
+func retainedDigest(envelope, payload []byte) string {
+	hash := sha256.New()
+	_, _ = hash.Write(envelope)
+	_, _ = hash.Write([]byte{0})
+	_, _ = hash.Write(payload)
+	return hex.EncodeToString(hash.Sum(nil))
+}
+
+func compareRetained(existing, incoming retainedMemory) (memory.ImportDisposition, error) {
+	disposition, err := memory.CompareImportRevision(existing.record, incoming.record)
+	if err != nil {
+		return disposition, err
+	}
+	if disposition == memory.ImportIdempotent && !bytes.Equal(existing.payload, incoming.payload) {
+		return memory.ImportRejected, fmt.Errorf("%w: same revision has different stream payload", memory.ErrConflict)
+	}
+	return disposition, nil
 }
 
 func unavailable(operation string, err error) error {

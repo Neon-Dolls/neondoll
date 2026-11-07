@@ -1,6 +1,7 @@
 package sqlite
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -26,6 +27,19 @@ func testRecord(id string, revision uint64, content string, created time.Time) m
 			Data:      json.RawMessage(strconvQuote(content)),
 		},
 		Metadata: memory.Metadata{Kind: "conversation", Subject: "subject-" + id},
+	}
+}
+
+func streamRecord(id string, revision uint64, mediaType string, payload []byte, created time.Time) memory.Record {
+	size := int64(len(payload))
+	return memory.Record{
+		SchemaVersion: memory.SchemaVersion,
+		ID:            id,
+		Revision:      revision,
+		CreatedAt:     created.UTC(),
+		Source:        memory.Source{Type: "interaction", Ref: "turn-" + id},
+		Content:       memory.Content{MediaType: mediaType, Transport: memory.TransportStream, Size: &size},
+		Metadata:      memory.Metadata{Kind: "conversation", Subject: "subject-" + id},
 	}
 }
 
@@ -139,6 +153,41 @@ func (s *transferSink) Put(_ context.Context, transfer memory.Transfer) error {
 	return nil
 }
 
+type errorSink struct{ err error }
+
+func (s errorSink) Put(context.Context, memory.Transfer) error { return s.err }
+
+type cancellingPayloadSink struct{ cancel context.CancelFunc }
+
+func (s cancellingPayloadSink) Put(ctx context.Context, transfer memory.Transfer) error {
+	buffer := make([]byte, 1)
+	if _, err := transfer.Payload.ReadContext(ctx, buffer); err != nil {
+		return err
+	}
+	s.cancel()
+	_, err := memory.CopyBounded(ctx, memory.Writer(io.Discard), transfer.Payload, 1<<20)
+	return err
+}
+
+type payloadSink struct {
+	records  []memory.Record
+	payloads [][]byte
+}
+
+func (s *payloadSink) Put(ctx context.Context, transfer memory.Transfer) error {
+	s.records = append(s.records, transfer.Record)
+	if transfer.Payload == nil {
+		s.payloads = append(s.payloads, nil)
+		return nil
+	}
+	var payload bytes.Buffer
+	if _, err := memory.CopyBounded(ctx, memory.Writer(&payload), transfer.Payload, 64<<20); err != nil {
+		return err
+	}
+	s.payloads = append(s.payloads, append([]byte(nil), payload.Bytes()...))
+	return nil
+}
+
 type transferSource struct {
 	transfers []memory.Transfer
 	index     int
@@ -179,6 +228,149 @@ func TestExportImportPortableRecords(t *testing.T) {
 	got := recall(t, target, "", 10)
 	if len(got.Matches) != 2 || got.Matches[1].Record.Source != records[0].Source || got.Matches[0].Record.Revision != 2 {
 		t.Fatalf("imported=%+v", got)
+	}
+}
+
+func TestStreamedTextRememberRecallExportImport(t *testing.T) {
+	payload := []byte("streamed neon memory\nwith another line")
+	record := streamRecord("stream-text", 1, "text/plain; charset=utf-8", payload, time.Now().UTC())
+	source := openTestProvider(t, filepath.Join(t.TempDir(), "source.db"), "doll-a")
+	result, err := source.Remember(context.Background(), memory.RememberRequest{Record: record, Payload: memory.Reader(bytes.NewReader(payload))})
+	if err != nil || result.Outcome != memory.RememberStored || result.Retained == nil || result.Retained.Reference() != record.Reference() {
+		t.Fatalf("remember=%+v err=%v", result, err)
+	}
+	recalled := recall(t, source, "another line", 10)
+	if len(recalled.Matches) != 1 || recalled.Matches[0].Record.Content.Transport != memory.TransportStream || recalled.Matches[0].Record.Source != record.Source {
+		t.Fatalf("recall=%+v", recalled)
+	}
+	exported := &payloadSink{}
+	report, err := source.Export(context.Background(), memory.ExportRequest{MaxRecords: 10, MaxBytes: 1 << 20}, exported)
+	if err != nil || !report.Completed || len(exported.records) != 1 || !bytes.Equal(exported.payloads[0], payload) {
+		t.Fatalf("export=%+v payload=%q err=%v", report, exported.payloads, err)
+	}
+	target := openTestProvider(t, filepath.Join(t.TempDir(), "target.db"), "doll-a")
+	transfer := memory.Transfer{Record: exported.records[0], Payload: memory.Reader(bytes.NewReader(exported.payloads[0]))}
+	imported, err := target.Import(context.Background(), memory.ImportRequest{MaxRecords: 10, MaxBytes: 1 << 20}, &transferSource{transfers: []memory.Transfer{transfer}})
+	if err != nil || !imported.Completed || len(imported.Outcomes) != 1 || imported.Outcomes[0].Disposition != memory.ImportStored {
+		t.Fatalf("import=%+v err=%v", imported, err)
+	}
+	secondExport := &payloadSink{}
+	if _, err := target.Export(context.Background(), memory.ExportRequest{MaxRecords: 10, MaxBytes: 1 << 20}, secondExport); err != nil || !bytes.Equal(secondExport.payloads[0], payload) {
+		t.Fatalf("imported payload=%q err=%v", secondExport.payloads, err)
+	}
+}
+
+func TestStreamedJSONPreservesExactBytes(t *testing.T) {
+	payload := []byte("{\n  \"nested\": [1, 2],\n  \"enabled\": true\n}\n")
+	record := streamRecord("stream-json", 1, "application/json", payload, time.Now().UTC())
+	provider := openTestProvider(t, filepath.Join(t.TempDir(), "memory.db"), "doll-a")
+	result, err := provider.Remember(context.Background(), memory.RememberRequest{Record: record, Payload: memory.Reader(bytes.NewReader(payload))})
+	if err != nil || result.Outcome != memory.RememberStored {
+		t.Fatalf("remember=%+v err=%v", result, err)
+	}
+	sink := &payloadSink{}
+	if _, err := provider.Export(context.Background(), memory.ExportRequest{MaxRecords: 2, MaxBytes: 1 << 20}, sink); err != nil {
+		t.Fatal(err)
+	}
+	if len(sink.payloads) != 1 || !bytes.Equal(sink.payloads[0], payload) {
+		t.Fatalf("JSON bytes changed: %q", sink.payloads)
+	}
+}
+
+func TestStreamValidationAndSizeLimits(t *testing.T) {
+	provider, err := Open(Config{Path: filepath.Join(t.TempDir(), "memory.db"), DollID: "doll-a", MaxStreamBytes: 4})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = provider.Close() })
+	oversizedPayload := []byte("12345")
+	oversized := streamRecord("large", 1, "text/plain", oversizedPayload, time.Now().UTC())
+	result, err := provider.Remember(context.Background(), memory.RememberRequest{Record: oversized, Payload: memory.Reader(bytes.NewReader(oversizedPayload))})
+	if err != nil || result.Outcome != memory.RememberRejected || !strings.Contains(result.Reason, "exceeds") {
+		t.Fatalf("oversized=%+v err=%v", result, err)
+	}
+	invalidJSON := []byte(`[`)
+	invalid := streamRecord("invalid-json", 1, "application/json", invalidJSON, time.Now().UTC())
+	result, err = provider.Remember(context.Background(), memory.RememberRequest{Record: invalid, Payload: memory.Reader(bytes.NewReader(invalidJSON))})
+	if err != nil || result.Outcome != memory.RememberRejected || !strings.Contains(result.Reason, "JSON") {
+		t.Fatalf("invalid JSON=%+v err=%v", result, err)
+	}
+	wrongSizePayload := []byte("four")
+	wrongSize := streamRecord("wrong-size", 1, "text/plain", wrongSizePayload, time.Now().UTC())
+	declared := int64(3)
+	wrongSize.Content.Size = &declared
+	result, err = provider.Remember(context.Background(), memory.RememberRequest{Record: wrongSize, Payload: memory.Reader(bytes.NewReader(wrongSizePayload))})
+	if err != nil || result.Outcome != memory.RememberRejected || !strings.Contains(result.Reason, "size") {
+		t.Fatalf("wrong size=%+v err=%v", result, err)
+	}
+}
+
+func TestStreamCancellation(t *testing.T) {
+	provider := openTestProvider(t, filepath.Join(t.TempDir(), "memory.db"), "doll-a")
+	payload := []byte("blocked")
+	record := streamRecord("cancelled", 1, "text/plain", payload, time.Now().UTC())
+	started := make(chan struct{})
+	reader := memory.StreamReaderFunc(func(ctx context.Context, _ []byte) (int, error) {
+		close(started)
+		<-ctx.Done()
+		return 0, ctx.Err()
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := provider.Remember(ctx, memory.RememberRequest{Record: record, Payload: reader})
+		done <- err
+	}()
+	<-started
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("stream cancellation=%v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("stream read did not unblock on cancellation")
+	}
+}
+
+func TestExportCancellationDuringStreamDelivery(t *testing.T) {
+	provider := openTestProvider(t, filepath.Join(t.TempDir(), "memory.db"), "doll-a")
+	payload := []byte("cancel while exporting")
+	record := streamRecord("export-cancel", 1, "text/plain", payload, time.Now().UTC())
+	if result, err := provider.Remember(context.Background(), memory.RememberRequest{Record: record, Payload: memory.Reader(bytes.NewReader(payload))}); err != nil || result.Outcome != memory.RememberStored {
+		t.Fatalf("remember=%+v err=%v", result, err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	report, err := provider.Export(ctx, memory.ExportRequest{MaxRecords: 2, MaxBytes: 1 << 20}, cancellingPayloadSink{cancel: cancel})
+	if !errors.Is(err, context.Canceled) || report.Completed {
+		t.Fatalf("report=%+v err=%v", report, err)
+	}
+}
+
+func TestStreamRevisionAndReplayKeyIncludePayload(t *testing.T) {
+	provider := openTestProvider(t, filepath.Join(t.TempDir(), "memory.db"), "doll-a")
+	firstPayload := []byte("first payload")
+	record := streamRecord("stream-replay", 1, "text/plain", firstPayload, time.Now().UTC())
+	request := memory.RememberRequest{Record: record, Payload: memory.Reader(bytes.NewReader(firstPayload)), ReplayKey: "stream-request"}
+	if result, err := provider.Remember(context.Background(), request); err != nil || result.Outcome != memory.RememberStored {
+		t.Fatalf("first=%+v err=%v", result, err)
+	}
+	request.Payload = memory.Reader(bytes.NewReader(firstPayload))
+	if result, err := provider.Remember(context.Background(), request); err != nil || result.Outcome != memory.RememberStored {
+		t.Fatalf("replay=%+v err=%v", result, err)
+	}
+	different := []byte("other payload")
+	request.Payload = memory.Reader(bytes.NewReader(different))
+	if _, err := provider.Remember(context.Background(), request); !errors.Is(err, memory.ErrConflict) {
+		t.Fatalf("replay accepted different payload: %v", err)
+	}
+	if result, err := provider.Remember(context.Background(), memory.RememberRequest{Record: record, Payload: memory.Reader(bytes.NewReader(different))}); err != nil || result.Outcome != memory.RememberRejected {
+		t.Fatalf("same revision accepted different payload: %+v err=%v", result, err)
+	}
+	newerPayload := []byte("newer payload")
+	newer := streamRecord("stream-replay", 2, "text/plain", newerPayload, record.CreatedAt)
+	if result, err := provider.Remember(context.Background(), memory.RememberRequest{Record: newer, Payload: memory.Reader(bytes.NewReader(newerPayload))}); err != nil || result.Outcome != memory.RememberStored {
+		t.Fatalf("newer=%+v err=%v", result, err)
 	}
 }
 
@@ -285,7 +477,7 @@ func TestHealthCapabilitiesAndUnavailableDatabase(t *testing.T) {
 		t.Fatal(err)
 	}
 	capabilities, err := provider.Capabilities(context.Background())
-	if err != nil || capabilities.ContractVersion != memory.ContractVersion || capabilities.SupportsUpdates != true || capabilities.MaxStreamBytes != 0 {
+	if err != nil || capabilities.ContractVersion != memory.ContractVersion || capabilities.SupportsUpdates != true || capabilities.MaxStreamBytes != DefaultMaxStreamBytes {
 		t.Fatalf("capabilities=%+v err=%v", capabilities, err)
 	}
 	health, err := provider.Health(context.Background())
@@ -309,9 +501,18 @@ func TestExportBoundsAndCancellation(t *testing.T) {
 	created := time.Now().UTC()
 	remember(t, provider, testRecord("one", 1, "one", created))
 	remember(t, provider, testRecord("two", 1, "two", created.Add(time.Second)))
-	report, err := provider.Export(context.Background(), memory.ExportRequest{MaxRecords: 1, MaxBytes: 1 << 20}, &transferSink{})
+	// Corrupt a later row. A genuinely incremental bounded export must stop at
+	// the record limit without loading or decoding that row.
+	if _, err := provider.db.Exec(`UPDATE memory_provider_records SET envelope=x'00' WHERE doll_id='doll-a' AND memory_id='two'`); err != nil {
+		t.Fatal(err)
+	}
+	sink := &transferSink{}
+	report, err := provider.Export(context.Background(), memory.ExportRequest{MaxRecords: 1, MaxBytes: 1 << 20}, sink)
 	if !errors.Is(err, memory.ErrTransferLimit) || report.Completed || report.Records != 1 {
 		t.Fatalf("bounded export=%+v err=%v", report, err)
+	}
+	if len(sink.transfers) != 1 || sink.transfers[0].Record.ID != "one" {
+		t.Fatalf("incremental sink=%+v", sink.transfers)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -320,5 +521,15 @@ func TestExportBoundsAndCancellation(t *testing.T) {
 	}
 	if _, err := provider.Import(ctx, memory.ImportRequest{MaxRecords: 10, MaxBytes: 1 << 20}, &transferSource{}); !errors.Is(err, context.Canceled) {
 		t.Fatalf("cancelled import=%v", err)
+	}
+}
+
+func TestExportPropagatesSinkBackpressureWithIncompleteReport(t *testing.T) {
+	provider := openTestProvider(t, filepath.Join(t.TempDir(), "memory.db"), "doll-a")
+	remember(t, provider, testRecord("one", 1, "one", time.Now().UTC()))
+	backpressure := errors.New("sink unavailable")
+	report, err := provider.Export(context.Background(), memory.ExportRequest{MaxRecords: 10, MaxBytes: 1 << 20}, errorSink{err: backpressure})
+	if !errors.Is(err, backpressure) || report.Completed || report.Records != 1 {
+		t.Fatalf("report=%+v err=%v", report, err)
 	}
 }
