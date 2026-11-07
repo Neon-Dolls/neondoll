@@ -27,9 +27,11 @@ import (
 )
 
 const (
-	DefaultDatabasePath          = "neondoll-memory.sqlite"
-	DefaultMaxInlineBytes uint64 = 4 << 20
-	DefaultMaxStreamBytes uint64 = 16 << 20
+	DefaultDatabasePath               = "neondoll-memory.sqlite"
+	DefaultMaxInlineBytes      uint64 = 4 << 20
+	DefaultMaxStreamBytes      uint64 = 16 << 20
+	replayDigestLegacyEnvelope        = "legacy-envelope-v1"
+	replayDigestRetained              = "retained-v1"
 )
 
 type Config struct {
@@ -115,7 +117,8 @@ func (p *Provider) initialize(ctx context.Context) error {
 			replay_key TEXT NOT NULL,
 			memory_id TEXT NOT NULL,
 			revision INTEGER NOT NULL,
-			retained_sha256 TEXT NOT NULL,
+			digest_scheme TEXT NOT NULL,
+			digest_sha256 TEXT NOT NULL,
 			PRIMARY KEY (doll_id, replay_key)
 		)`,
 	} {
@@ -149,10 +152,16 @@ func (p *Provider) migrateSchema(ctx context.Context) error {
 		return rollback("inspect replay schema", err)
 	}
 	switch {
-	case replayColumns["retained_sha256"]:
+	case replayColumns["digest_scheme"] && replayColumns["digest_sha256"]:
 		// Current schema. Reopening is intentionally a no-op.
 	case replayColumns["envelope_sha256"]:
-		if err := p.migrateReplayDigests(ctx, tx); err != nil {
+		if err := p.migrateReplayDigests(ctx, tx, "envelope_sha256", replayDigestLegacyEnvelope); err != nil {
+			return rollback("migrate replay schema", err)
+		}
+	case replayColumns["retained_sha256"]:
+		// Compatibility with databases created by the reviewed, unmerged
+		// payload-aware schema. These values already use retainedDigest.
+		if err := p.migrateReplayDigests(ctx, tx, "retained_sha256", replayDigestRetained); err != nil {
 			return rollback("migrate replay schema", err)
 		}
 	default:
@@ -184,13 +193,14 @@ func tableColumns(ctx context.Context, tx *sql.Tx, table string) (map[string]boo
 	return columns, rows.Err()
 }
 
-func (p *Provider) migrateReplayDigests(ctx context.Context, tx *sql.Tx) error {
+func (p *Provider) migrateReplayDigests(ctx context.Context, tx *sql.Tx, sourceColumn, scheme string) error {
 	if _, err := tx.ExecContext(ctx, `CREATE TABLE memory_provider_replays_new (
 		doll_id TEXT NOT NULL,
 		replay_key TEXT NOT NULL,
 		memory_id TEXT NOT NULL,
 		revision INTEGER NOT NULL,
-		retained_sha256 TEXT NOT NULL,
+		digest_scheme TEXT NOT NULL,
+		digest_sha256 TEXT NOT NULL,
 		PRIMARY KEY (doll_id, replay_key)
 	)`); err != nil {
 		return err
@@ -199,29 +209,26 @@ func (p *Provider) migrateReplayDigests(ctx context.Context, tx *sql.Tx) error {
 	for {
 		var dollID, replayKey, memoryID string
 		var revision uint64
-		var envelope, payload []byte
-		err := tx.QueryRowContext(ctx, `SELECT r.doll_id,r.replay_key,r.memory_id,r.revision,m.envelope,m.payload
-			FROM memory_provider_replays r
-			LEFT JOIN memory_provider_records m ON m.doll_id=r.doll_id AND m.memory_id=r.memory_id
-			WHERE r.doll_id>? OR (r.doll_id=? AND r.replay_key>?)
-			ORDER BY r.doll_id,r.replay_key LIMIT 1`, lastDollID, lastDollID, lastReplayKey).
-			Scan(&dollID, &replayKey, &memoryID, &revision, &envelope, &payload)
+		var digest string
+		query := fmt.Sprintf(`SELECT doll_id,replay_key,memory_id,revision,%s
+			FROM memory_provider_replays
+			WHERE doll_id>? OR (doll_id=? AND replay_key>?)
+			ORDER BY doll_id,replay_key LIMIT 1`, sourceColumn)
+		// Column names are selected only from the two constants above.
+		err := tx.QueryRowContext(ctx, query, lastDollID, lastDollID, lastReplayKey).
+			Scan(&dollID, &replayKey, &memoryID, &revision, &digest)
 		if errors.Is(err, sql.ErrNoRows) {
 			break
 		}
 		if err != nil {
 			return err
 		}
-		if len(envelope) == 0 {
-			return fmt.Errorf("replay %q for Doll %q has no retained memory", replayKey, dollID)
+		if len(digest) != sha256.Size*2 {
+			return fmt.Errorf("replay %q for Doll %q has invalid digest", replayKey, dollID)
 		}
-		if _, err := memory.DecodeRecord(envelope); err != nil {
-			return fmt.Errorf("replay %q for Doll %q has invalid retained memory: %w", replayKey, dollID, err)
-		}
-		digest := retainedDigest(envelope, payload)
 		if _, err := tx.ExecContext(ctx, `INSERT INTO memory_provider_replays_new
-			(doll_id,replay_key,memory_id,revision,retained_sha256) VALUES(?,?,?,?,?)`,
-			dollID, replayKey, memoryID, revision, digest); err != nil {
+			(doll_id,replay_key,memory_id,revision,digest_scheme,digest_sha256) VALUES(?,?,?,?,?,?)`,
+			dollID, replayKey, memoryID, revision, scheme, digest); err != nil {
 			return err
 		}
 		lastDollID, lastReplayKey = dollID, replayKey
@@ -293,16 +300,28 @@ func (p *Provider) rememberTx(ctx context.Context, tx *sql.Tx, retained retained
 		if strings.TrimSpace(replayKey) == "" {
 			return memory.RememberResult{}, memory.ErrInvalidRequest
 		}
-		var id, hash string
+		var id, scheme, hash string
 		var revision uint64
-		err := tx.QueryRowContext(ctx, `SELECT memory_id, revision, retained_sha256 FROM memory_provider_replays WHERE doll_id=? AND replay_key=?`, p.dollID, replayKey).Scan(&id, &revision, &hash)
+		err := tx.QueryRowContext(ctx, `SELECT memory_id,revision,digest_scheme,digest_sha256 FROM memory_provider_replays WHERE doll_id=? AND replay_key=?`, p.dollID, replayKey).Scan(&id, &revision, &scheme, &hash)
 		if err == nil {
-			if id != record.ID || revision != record.Revision || hash != digestText {
+			expectedDigest := digestText
+			if scheme == replayDigestLegacyEnvelope {
+				expectedDigest = legacyEnvelopeDigest(envelope)
+			} else if scheme != replayDigestRetained {
+				return memory.RememberResult{}, unavailable("read replay", fmt.Errorf("unknown digest scheme %q", scheme))
+			}
+			if id != record.ID || revision != record.Revision || hash != expectedDigest {
 				return memory.RememberResult{}, fmt.Errorf("%w: replay key identifies different content", memory.ErrConflict)
 			}
 			existing, err := p.loadTx(ctx, tx, id)
 			if err != nil {
 				return memory.RememberResult{}, err
+			}
+			if existing.record.Revision > record.Revision {
+				return memory.RememberResult{Outcome: memory.RememberRejected, Reason: fmt.Sprintf("replay recognized; revision %d is superseded by retained revision %d", record.Revision, existing.record.Revision)}, nil
+			}
+			if existing.record.Revision != record.Revision {
+				return memory.RememberResult{}, fmt.Errorf("%w: replay revision is not retained", memory.ErrConflict)
 			}
 			return stored(existing.record), nil
 		}
@@ -361,7 +380,7 @@ func (p *Provider) insertReplay(ctx context.Context, tx *sql.Tx, replayKey strin
 	if replayKey == "" {
 		return nil
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO memory_provider_replays (doll_id,replay_key,memory_id,revision,retained_sha256) VALUES(?,?,?,?,?)`, p.dollID, replayKey, record.ID, record.Revision, digest); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO memory_provider_replays (doll_id,replay_key,memory_id,revision,digest_scheme,digest_sha256) VALUES(?,?,?,?,?,?)`, p.dollID, replayKey, record.ID, record.Revision, replayDigestRetained, digest); err != nil {
 		return operationError(ctx, "store replay", err)
 	}
 	return nil
@@ -731,6 +750,11 @@ func retainedDigest(envelope, payload []byte) string {
 	_, _ = hash.Write([]byte{0})
 	_, _ = hash.Write(payload)
 	return hex.EncodeToString(hash.Sum(nil))
+}
+
+func legacyEnvelopeDigest(envelope []byte) string {
+	digest := sha256.Sum256(envelope)
+	return hex.EncodeToString(digest[:])
 }
 
 func compareRetained(existing, incoming retainedMemory) (memory.ImportDisposition, error) {

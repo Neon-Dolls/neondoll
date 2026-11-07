@@ -26,14 +26,18 @@ private columns used for deterministic text retrieval. Those columns and
 SQLite row details never appear in recall, export, or import records.
 Replay-key bookkeeping is private provider state.
 
-Provider startup transactionally migrates the initial M2.1 replay schema from
-`envelope_sha256` to the payload-aware retained digest. Each legacy replay is
-joined to the retained record within the same Doll scope, its digest is
-recalculated from the canonical envelope plus private stream payload, and its
-original replay key, Memory ID, revision, and Doll ID are retained. The old
-table is replaced only after every row succeeds. Failed migration rolls back
-both replay and payload-column changes, and reopening an already-current
-database performs no schema mutation.
+Provider startup transactionally migrates the initial M2.1 replay schema to a
+versioned digest representation. Existing `envelope_sha256` values are
+preserved verbatim as `legacy-envelope-v1`; they are the only durable identity
+of historical requests whose retained Memory revision may since have changed.
+New replay keys use `retained-v1`, which covers the canonical envelope and
+exact stream payload. The original replay key, Memory ID, revision, and Doll
+ID are retained. A matching historical key for a superseded revision is
+recognized without conflict but returns an explicit rejected/superseded
+outcome rather than claiming the old revision is still retained or restoring
+it. The old table is replaced only after every row succeeds. Failed migration
+rolls back both replay and payload-column changes, and reopening an
+already-current database performs no schema mutation.
 
 `Remember` accepts inline and streamed `text/plain` and `application/json`.
 Stream bytes are copied through the cancellable M1.1 interface under a hard

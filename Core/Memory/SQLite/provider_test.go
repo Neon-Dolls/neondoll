@@ -235,7 +235,7 @@ func TestLegacyReplaySchemaMigrationPreservesRecordsAndDollIsolation(t *testing.
 	}
 
 	columns := databaseColumns(t, path, "memory_provider_replays")
-	if !columns["retained_sha256"] || columns["envelope_sha256"] {
+	if !columns["digest_scheme"] || !columns["digest_sha256"] || columns["envelope_sha256"] || columns["retained_sha256"] {
 		t.Fatalf("replay columns=%v", columns)
 	}
 	db, err := sql.Open("sqlite", path)
@@ -246,12 +246,13 @@ func TestLegacyReplaySchemaMigrationPreservesRecordsAndDollIsolation(t *testing.
 	for dollID, envelope := range envelopes {
 		var retainedEnvelope []byte
 		var digest string
-		if err := db.QueryRow(`SELECT m.envelope,r.retained_sha256 FROM memory_provider_records m
+		var scheme string
+		if err := db.QueryRow(`SELECT m.envelope,r.digest_scheme,r.digest_sha256 FROM memory_provider_records m
 			JOIN memory_provider_replays r ON r.doll_id=m.doll_id AND r.memory_id=m.memory_id
-			WHERE m.doll_id=? AND r.replay_key='legacy-replay'`, dollID).Scan(&retainedEnvelope, &digest); err != nil {
+			WHERE m.doll_id=? AND r.replay_key='legacy-replay'`, dollID).Scan(&retainedEnvelope, &scheme, &digest); err != nil {
 			t.Fatal(err)
 		}
-		if !bytes.Equal(retainedEnvelope, envelope) || digest != retainedDigest(envelope, nil) {
+		if !bytes.Equal(retainedEnvelope, envelope) || scheme != replayDigestLegacyEnvelope || digest != legacyEnvelopeDigest(envelope) {
 			t.Fatalf("Doll %s migration changed record or digest", dollID)
 		}
 	}
@@ -268,6 +269,85 @@ func TestLegacyReplaySchemaMigrationPreservesRecordsAndDollIsolation(t *testing.
 	if err := providerA.Close(); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func TestLegacyMigrationPreservesSupersededReplayIdentity(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "legacy-history.db")
+	created := time.Date(2026, 6, 7, 8, 9, 10, 0, time.UTC)
+	revision1 := map[string]memory.Record{
+		"doll-a": testRecord("memory-a", 1, "alpha revision one", created),
+		"doll-b": testRecord("memory-a", 1, "beta revision one", created),
+	}
+	createLegacyReplayDatabase(t, path, revision1)
+	revision2 := map[string]memory.Record{
+		"doll-a": testRecord("memory-a", 2, "alpha revision two", created),
+		"doll-b": testRecord("memory-a", 2, "beta revision two", created),
+	}
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for dollID, record := range revision2 {
+		envelope, err := memory.EncodeRecord(record)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(`UPDATE memory_provider_replays SET replay_key='request-1' WHERE doll_id=? AND replay_key='legacy-replay'`, dollID); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(`UPDATE memory_provider_records SET revision=?,envelope=?,search_text=? WHERE doll_id=? AND memory_id=?`, record.Revision, envelope, "revision two", dollID, record.ID); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(`INSERT INTO memory_provider_replays
+			(doll_id,replay_key,memory_id,revision,envelope_sha256) VALUES(?,?,?,?,?)`,
+			dollID, "request-2", record.ID, record.Revision, legacyEnvelopeDigest(envelope)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	verify := func(t *testing.T, dollID string) {
+		t.Helper()
+		provider, err := Open(Config{Path: path, DollID: dollID})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer provider.Close()
+		old := revision1[dollID]
+		oldReplay, err := provider.Remember(context.Background(), memory.RememberRequest{Record: old, ReplayKey: "request-1"})
+		if err != nil || oldReplay.Outcome != memory.RememberRejected || oldReplay.Retained != nil || !strings.Contains(oldReplay.Reason, "superseded") {
+			t.Fatalf("historical replay=%+v err=%v", oldReplay, err)
+		}
+		current := revision2[dollID]
+		currentReplay, err := provider.Remember(context.Background(), memory.RememberRequest{Record: current, ReplayKey: "request-2"})
+		if err != nil || currentReplay.Outcome != memory.RememberStored || currentReplay.Retained == nil || currentReplay.Retained.Revision != 2 {
+			t.Fatalf("current replay=%+v err=%v", currentReplay, err)
+		}
+		changedOld := old
+		changedOld.Content.Data = json.RawMessage(`"different old content"`)
+		if _, err := provider.Remember(context.Background(), memory.RememberRequest{Record: changedOld, ReplayKey: "request-1"}); !errors.Is(err, memory.ErrConflict) {
+			t.Fatalf("request-1 accepted different content: %v", err)
+		}
+		changedCurrent := current
+		changedCurrent.Content.Data = json.RawMessage(`"different current content"`)
+		if _, err := provider.Remember(context.Background(), memory.RememberRequest{Record: changedCurrent, ReplayKey: "request-2"}); !errors.Is(err, memory.ErrConflict) {
+			t.Fatalf("request-2 accepted different content: %v", err)
+		}
+		withoutReplay, err := provider.Remember(context.Background(), memory.RememberRequest{Record: old})
+		if err != nil || withoutReplay.Outcome != memory.RememberRejected || !strings.Contains(withoutReplay.Reason, "stale revision") {
+			t.Fatalf("old revision overwrite=%+v err=%v", withoutReplay, err)
+		}
+		retained := recall(t, provider, "", 10)
+		if len(retained.Matches) != 1 || retained.Matches[0].Record.Revision != 2 || !bytes.Equal(retained.Matches[0].Record.Content.Data, current.Content.Data) {
+			t.Fatalf("retained memory=%+v", retained)
+		}
+	}
+
+	t.Run("doll-a first open", func(t *testing.T) { verify(t, "doll-a") })
+	t.Run("doll-b isolated", func(t *testing.T) { verify(t, "doll-b") })
+	t.Run("doll-a reopen", func(t *testing.T) { verify(t, "doll-a") })
 }
 
 func TestLegacyReplayMigrationFailureRollsBack(t *testing.T) {
@@ -290,7 +370,7 @@ func TestLegacyReplayMigrationFailureRollsBack(t *testing.T) {
 	if columns := databaseColumns(t, path, "memory_provider_records"); columns["payload"] {
 		t.Fatalf("payload migration was not rolled back: %v", columns)
 	}
-	if columns := databaseColumns(t, path, "memory_provider_replays"); !columns["envelope_sha256"] || columns["retained_sha256"] {
+	if columns := databaseColumns(t, path, "memory_provider_replays"); !columns["envelope_sha256"] || columns["digest_sha256"] || columns["digest_scheme"] {
 		t.Fatalf("legacy replay table was changed: %v", columns)
 	}
 	db, err = sql.Open("sqlite", path)
@@ -324,7 +404,7 @@ func TestNewReplaySchemaIsCurrentAndReopenDoesNotMutateSchema(t *testing.T) {
 		t.Fatal(err)
 	}
 	columns := databaseColumns(t, path, "memory_provider_replays")
-	if !columns["retained_sha256"] || columns["envelope_sha256"] {
+	if !columns["digest_scheme"] || !columns["digest_sha256"] || columns["envelope_sha256"] || columns["retained_sha256"] {
 		t.Fatalf("new replay columns=%v", columns)
 	}
 	db, err := sql.Open("sqlite", path)
@@ -594,6 +674,17 @@ func TestStreamRevisionAndReplayKeyIncludePayload(t *testing.T) {
 	request := memory.RememberRequest{Record: record, Payload: memory.Reader(bytes.NewReader(firstPayload)), ReplayKey: "stream-request"}
 	if result, err := provider.Remember(context.Background(), request); err != nil || result.Outcome != memory.RememberStored {
 		t.Fatalf("first=%+v err=%v", result, err)
+	}
+	envelope, err := memory.EncodeRecord(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var scheme, digest string
+	if err := provider.db.QueryRow(`SELECT digest_scheme,digest_sha256 FROM memory_provider_replays WHERE doll_id='doll-a' AND replay_key='stream-request'`).Scan(&scheme, &digest); err != nil {
+		t.Fatal(err)
+	}
+	if scheme != replayDigestRetained || digest != retainedDigest(envelope, firstPayload) {
+		t.Fatalf("stream replay identity: scheme=%q digest=%q", scheme, digest)
 	}
 	request.Payload = memory.Reader(bytes.NewReader(firstPayload))
 	if result, err := provider.Remember(context.Background(), request); err != nil || result.Outcome != memory.RememberStored {
