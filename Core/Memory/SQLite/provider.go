@@ -123,14 +123,114 @@ func (p *Provider) initialize(ctx context.Context) error {
 			return unavailable("initialize database", err)
 		}
 	}
-	var payloadColumn int
-	if err := p.db.QueryRowContext(ctx, `SELECT count(*) FROM pragma_table_info('memory_provider_records') WHERE name='payload'`).Scan(&payloadColumn); err != nil {
-		return unavailable("inspect database schema", err)
+	return p.migrateSchema(ctx)
+}
+
+func (p *Provider) migrateSchema(ctx context.Context) error {
+	tx, err := p.db.BeginTx(ctx, nil)
+	if err != nil {
+		return operationError(ctx, "begin schema migration", err)
 	}
-	if payloadColumn == 0 {
-		if _, err := p.db.ExecContext(ctx, `ALTER TABLE memory_provider_records ADD COLUMN payload BLOB`); err != nil {
-			return unavailable("migrate stream payload schema", err)
+	rollback := func(operation string, cause error) error {
+		_ = tx.Rollback()
+		return operationError(ctx, operation, cause)
+	}
+	recordColumns, err := tableColumns(ctx, tx, "memory_provider_records")
+	if err != nil {
+		return rollback("inspect memory schema", err)
+	}
+	if !recordColumns["payload"] {
+		if _, err := tx.ExecContext(ctx, `ALTER TABLE memory_provider_records ADD COLUMN payload BLOB`); err != nil {
+			return rollback("migrate stream payload schema", err)
 		}
+	}
+	replayColumns, err := tableColumns(ctx, tx, "memory_provider_replays")
+	if err != nil {
+		return rollback("inspect replay schema", err)
+	}
+	switch {
+	case replayColumns["retained_sha256"]:
+		// Current schema. Reopening is intentionally a no-op.
+	case replayColumns["envelope_sha256"]:
+		if err := p.migrateReplayDigests(ctx, tx); err != nil {
+			return rollback("migrate replay schema", err)
+		}
+	default:
+		return rollback("inspect replay schema", fmt.Errorf("missing replay digest column"))
+	}
+	if err := tx.Commit(); err != nil {
+		return operationError(ctx, "commit schema migration", err)
+	}
+	return nil
+}
+
+func tableColumns(ctx context.Context, tx *sql.Tx, table string) (map[string]bool, error) {
+	query := fmt.Sprintf("PRAGMA table_info(%s)", table)
+	rows, err := tx.QueryContext(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	columns := map[string]bool{}
+	for rows.Next() {
+		var sequence, notNull, primaryKey int
+		var name, columnType string
+		var defaultValue sql.NullString
+		if err := rows.Scan(&sequence, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
+			return nil, err
+		}
+		columns[name] = true
+	}
+	return columns, rows.Err()
+}
+
+func (p *Provider) migrateReplayDigests(ctx context.Context, tx *sql.Tx) error {
+	if _, err := tx.ExecContext(ctx, `CREATE TABLE memory_provider_replays_new (
+		doll_id TEXT NOT NULL,
+		replay_key TEXT NOT NULL,
+		memory_id TEXT NOT NULL,
+		revision INTEGER NOT NULL,
+		retained_sha256 TEXT NOT NULL,
+		PRIMARY KEY (doll_id, replay_key)
+	)`); err != nil {
+		return err
+	}
+	lastDollID, lastReplayKey := "", ""
+	for {
+		var dollID, replayKey, memoryID string
+		var revision uint64
+		var envelope, payload []byte
+		err := tx.QueryRowContext(ctx, `SELECT r.doll_id,r.replay_key,r.memory_id,r.revision,m.envelope,m.payload
+			FROM memory_provider_replays r
+			LEFT JOIN memory_provider_records m ON m.doll_id=r.doll_id AND m.memory_id=r.memory_id
+			WHERE r.doll_id>? OR (r.doll_id=? AND r.replay_key>?)
+			ORDER BY r.doll_id,r.replay_key LIMIT 1`, lastDollID, lastDollID, lastReplayKey).
+			Scan(&dollID, &replayKey, &memoryID, &revision, &envelope, &payload)
+		if errors.Is(err, sql.ErrNoRows) {
+			break
+		}
+		if err != nil {
+			return err
+		}
+		if len(envelope) == 0 {
+			return fmt.Errorf("replay %q for Doll %q has no retained memory", replayKey, dollID)
+		}
+		if _, err := memory.DecodeRecord(envelope); err != nil {
+			return fmt.Errorf("replay %q for Doll %q has invalid retained memory: %w", replayKey, dollID, err)
+		}
+		digest := retainedDigest(envelope, payload)
+		if _, err := tx.ExecContext(ctx, `INSERT INTO memory_provider_replays_new
+			(doll_id,replay_key,memory_id,revision,retained_sha256) VALUES(?,?,?,?,?)`,
+			dollID, replayKey, memoryID, revision, digest); err != nil {
+			return err
+		}
+		lastDollID, lastReplayKey = dollID, replayKey
+	}
+	if _, err := tx.ExecContext(ctx, `DROP TABLE memory_provider_replays`); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `ALTER TABLE memory_provider_replays_new RENAME TO memory_provider_replays`); err != nil {
+		return err
 	}
 	return nil
 }

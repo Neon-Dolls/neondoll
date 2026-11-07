@@ -3,6 +3,9 @@ package sqlite
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -13,6 +16,76 @@ import (
 
 	memory "github.com/Neon-Dolls/neondoll/Core/Memory"
 )
+
+func createLegacyReplayDatabase(t *testing.T, path string, records map[string]memory.Record) map[string][]byte {
+	t.Helper()
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	for _, statement := range []string{
+		`CREATE TABLE memory_provider_records (
+			doll_id TEXT NOT NULL,memory_id TEXT NOT NULL,revision INTEGER NOT NULL,envelope BLOB NOT NULL,
+			search_text TEXT NOT NULL,metadata_kind TEXT NOT NULL,source_type TEXT NOT NULL,
+			created_at TEXT NOT NULL,experienced_at TEXT,PRIMARY KEY (doll_id,memory_id))`,
+		`CREATE INDEX memory_provider_recall ON memory_provider_records (doll_id, experienced_at DESC, created_at DESC, memory_id)`,
+		`CREATE TABLE memory_provider_replays (
+			doll_id TEXT NOT NULL,replay_key TEXT NOT NULL,memory_id TEXT NOT NULL,revision INTEGER NOT NULL,
+			envelope_sha256 TEXT NOT NULL,PRIMARY KEY (doll_id,replay_key))`,
+	} {
+		if _, err := db.Exec(statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	envelopes := make(map[string][]byte, len(records))
+	for dollID, record := range records {
+		envelope, err := memory.EncodeRecord(record)
+		if err != nil {
+			t.Fatal(err)
+		}
+		digest := sha256.Sum256(envelope)
+		if _, err := db.Exec(`INSERT INTO memory_provider_records
+			(doll_id,memory_id,revision,envelope,search_text,metadata_kind,source_type,created_at,experienced_at)
+			VALUES(?,?,?,?,?,?,?,?,NULL)`, dollID, record.ID, record.Revision, envelope, "legacy text", record.Metadata.Kind, record.Source.Type, record.CreatedAt.Format(time.RFC3339Nano)); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(`INSERT INTO memory_provider_replays
+			(doll_id,replay_key,memory_id,revision,envelope_sha256) VALUES(?,?,?,?,?)`, dollID, "legacy-replay", record.ID, record.Revision, hex.EncodeToString(digest[:])); err != nil {
+			t.Fatal(err)
+		}
+		envelopes[dollID] = envelope
+	}
+	return envelopes
+}
+
+func databaseColumns(t *testing.T, path, table string) map[string]bool {
+	t.Helper()
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	rows, err := db.Query("PRAGMA table_info(" + table + ")")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	columns := map[string]bool{}
+	for rows.Next() {
+		var sequence, notNull, primaryKey int
+		var name, columnType string
+		var defaultValue sql.NullString
+		if err := rows.Scan(&sequence, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
+			t.Fatal(err)
+		}
+		columns[name] = true
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	return columns
+}
 
 func testRecord(id string, revision uint64, content string, created time.Time) memory.Record {
 	return memory.Record{
@@ -117,6 +190,173 @@ func TestPersistenceAcrossCloseAndReopen(t *testing.T) {
 	result := recall(t, second, "restart", 1)
 	if len(result.Matches) != 1 || result.Matches[0].Record.Source != record.Source || result.Matches[0].Record.Revision != 3 {
 		t.Fatalf("reopened=%+v", result)
+	}
+}
+
+func TestLegacyReplaySchemaMigrationPreservesRecordsAndDollIsolation(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "legacy.db")
+	created := time.Date(2026, 5, 6, 7, 8, 9, 0, time.UTC)
+	recordA := testRecord("shared-memory", 1, "legacy alpha", created)
+	recordB := testRecord("shared-memory", 1, "legacy beta", created.Add(time.Second))
+	envelopes := createLegacyReplayDatabase(t, path, map[string]memory.Record{"doll-a": recordA, "doll-b": recordB})
+
+	providerA, err := Open(Config{Path: path, DollID: "doll-a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	requestA := memory.RememberRequest{Record: recordA, ReplayKey: "legacy-replay"}
+	if result, err := providerA.Remember(context.Background(), requestA); err != nil || result.Outcome != memory.RememberStored {
+		t.Fatalf("migrated replay=%+v err=%v", result, err)
+	}
+	different := recordA
+	different.Content.Data = json.RawMessage(`"different"`)
+	if _, err := providerA.Remember(context.Background(), memory.RememberRequest{Record: different, ReplayKey: "legacy-replay"}); !errors.Is(err, memory.ErrConflict) {
+		t.Fatalf("legacy replay accepted different content: %v", err)
+	}
+	if got := recall(t, providerA, "", 10); len(got.Matches) != 1 || string(got.Matches[0].Record.Content.Data) != `"legacy alpha"` {
+		t.Fatalf("Doll A memory changed: %+v", got)
+	}
+	if err := providerA.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	providerB, err := Open(Config{Path: path, DollID: "doll-b"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result, err := providerB.Remember(context.Background(), memory.RememberRequest{Record: recordB, ReplayKey: "legacy-replay"}); err != nil || result.Outcome != memory.RememberStored {
+		t.Fatalf("Doll B migrated replay=%+v err=%v", result, err)
+	}
+	if got := recall(t, providerB, "", 10); len(got.Matches) != 1 || string(got.Matches[0].Record.Content.Data) != `"legacy beta"` {
+		t.Fatalf("Doll B memory changed: %+v", got)
+	}
+	if err := providerB.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	columns := databaseColumns(t, path, "memory_provider_replays")
+	if !columns["retained_sha256"] || columns["envelope_sha256"] {
+		t.Fatalf("replay columns=%v", columns)
+	}
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	for dollID, envelope := range envelopes {
+		var retainedEnvelope []byte
+		var digest string
+		if err := db.QueryRow(`SELECT m.envelope,r.retained_sha256 FROM memory_provider_records m
+			JOIN memory_provider_replays r ON r.doll_id=m.doll_id AND r.memory_id=m.memory_id
+			WHERE m.doll_id=? AND r.replay_key='legacy-replay'`, dollID).Scan(&retainedEnvelope, &digest); err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(retainedEnvelope, envelope) || digest != retainedDigest(envelope, nil) {
+			t.Fatalf("Doll %s migration changed record or digest", dollID)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	providerA, err = Open(Config{Path: path, DollID: "doll-a"})
+	if err != nil {
+		t.Fatalf("idempotent reopen: %v", err)
+	}
+	if result, err := providerA.Remember(context.Background(), requestA); err != nil || result.Outcome != memory.RememberStored {
+		t.Fatalf("reopened replay=%+v err=%v", result, err)
+	}
+	if err := providerA.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestLegacyReplayMigrationFailureRollsBack(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "legacy-failure.db")
+	record := testRecord("legacy", 1, "must remain", time.Now().UTC())
+	createLegacyReplayDatabase(t, path, map[string]memory.Record{"doll-a": record})
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE TABLE memory_provider_replays_new (blocker TEXT)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Open(Config{Path: path, DollID: "doll-a"}); !errors.Is(err, memory.ErrUnavailable) {
+		t.Fatalf("migration unexpectedly succeeded: %v", err)
+	}
+	if columns := databaseColumns(t, path, "memory_provider_records"); columns["payload"] {
+		t.Fatalf("payload migration was not rolled back: %v", columns)
+	}
+	if columns := databaseColumns(t, path, "memory_provider_replays"); !columns["envelope_sha256"] || columns["retained_sha256"] {
+		t.Fatalf("legacy replay table was changed: %v", columns)
+	}
+	db, err = sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var replayCount int
+	if err := db.QueryRow(`SELECT count(*) FROM memory_provider_replays WHERE doll_id='doll-a' AND replay_key='legacy-replay'`).Scan(&replayCount); err != nil || replayCount != 1 {
+		t.Fatalf("legacy replay lost: count=%d err=%v", replayCount, err)
+	}
+	if _, err := db.Exec(`DROP TABLE memory_provider_replays_new`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	provider, err := Open(Config{Path: path, DollID: "doll-a"})
+	if err != nil {
+		t.Fatalf("migration after removing injected failure: %v", err)
+	}
+	_ = provider.Close()
+}
+
+func TestNewReplaySchemaIsCurrentAndReopenDoesNotMutateSchema(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "new.db")
+	provider, err := Open(Config{Path: path, DollID: "doll-a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := provider.Close(); err != nil {
+		t.Fatal(err)
+	}
+	columns := databaseColumns(t, path, "memory_provider_replays")
+	if !columns["retained_sha256"] || columns["envelope_sha256"] {
+		t.Fatalf("new replay columns=%v", columns)
+	}
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var before int
+	if err := db.QueryRow(`PRAGMA schema_version`).Scan(&before); err != nil {
+		t.Fatal(err)
+	}
+	_ = db.Close()
+	provider, err = Open(Config{Path: path, DollID: "doll-a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := provider.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err = sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var after, temporaryTables int
+	if err := db.QueryRow(`PRAGMA schema_version`).Scan(&after); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT count(*) FROM sqlite_master WHERE name='memory_provider_replays_new'`).Scan(&temporaryTables); err != nil {
+		t.Fatal(err)
+	}
+	if before != after || temporaryTables != 0 {
+		t.Fatalf("reopen mutated schema: before=%d after=%d temporary=%d", before, after, temporaryTables)
 	}
 }
 
