@@ -1,10 +1,12 @@
 package dollcard
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"reflect"
 	"testing"
 
 	"github.com/Neon-Dolls/neondoll/Core/Memory"
@@ -107,7 +109,7 @@ func TestVersion2DistinguishesEmptyFromMissingSections(t *testing.T) {
 	}
 }
 
-func TestUnknownIndexFieldsAreExplicitlyNotPreserved(t *testing.T) {
+func TestUnknownFieldsSurviveSemanticRoundTrip(t *testing.T) {
 	data, err := json.Marshal(v2IndexFixture())
 	if err != nil {
 		t.Fatal(err)
@@ -116,9 +118,11 @@ func TestUnknownIndexFieldsAreExplicitlyNotPreserved(t *testing.T) {
 	if err := json.Unmarshal(data, &raw); err != nil {
 		t.Fatal(err)
 	}
-	raw["future_top_level"] = map[string]any{"value": "retained by a future parser"}
+	raw["future_top_level"] = map[string]any{"nested": []any{float64(1), "two", map[string]any{"enabled": true}}}
 	sections := raw["sections"].([]any)
-	sections[0].(map[string]any)["future_section_field"] = []any{"future", "metadata"}
+	sections[0].(map[string]any)["future_section_field"] = map[string]any{"values": []any{"future", "metadata"}}
+	entries := sections[0].(map[string]any)["entries"].([]any)
+	entries[0].(map[string]any)["future_integrity"] = map[string]any{"algorithm": "future-hash", "parameters": []any{float64(4), float64(8)}}
 	data, err = json.Marshal(raw)
 	if err != nil {
 		t.Fatal(err)
@@ -127,15 +131,115 @@ func TestUnknownIndexFieldsAreExplicitlyNotPreserved(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if parsed.Report.Status != CompatibilityDegraded || !hasIssue(parsed.Report, "unknown_index_field_not_preserved", "") || !hasIssue(parsed.Report, "unknown_section_field_not_preserved", "identity") {
-		t.Fatalf("unknown fields not reported accurately: %+v", parsed.Report)
+	if parsed.Report.Status != CompatibilityCompatible {
+		t.Fatalf("preservable unknown fields changed compatibility: %+v", parsed.Report)
 	}
 	roundTrip, err := json.Marshal(parsed.V2)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if stringContains(string(roundTrip), "future_top_level") || stringContains(string(roundTrip), "future_section_field") {
-		t.Fatalf("test expected current parser not to retain unknown fields: %s", roundTrip)
+	reparsed, err := ParseContractIndex(roundTrip, testBounds)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !rawJSONEqual(parsed.V2.UnknownFields["future_top_level"], reparsed.V2.UnknownFields["future_top_level"]) {
+		t.Fatal("unknown top-level JSON changed")
+	}
+	if !rawJSONEqual(parsed.V2.Sections[0].UnknownFields["future_section_field"], reparsed.V2.Sections[0].UnknownFields["future_section_field"]) {
+		t.Fatal("unknown section JSON changed")
+	}
+	if !rawJSONEqual(parsed.V2.Sections[0].Entries[0].UnknownFields["future_integrity"], reparsed.V2.Sections[0].Entries[0].UnknownFields["future_integrity"]) {
+		t.Fatal("unknown entry JSON changed")
+	}
+}
+
+func TestMultipleUnknownSectionsRemainPreservable(t *testing.T) {
+	index := v2IndexFixture()
+	optional := SectionIndex{
+		ID: "future-one", Kind: "future_state", SchemaVersion: 7,
+		Entries:       []ArchiveEntry{contractEntry("future/one.bin", []byte{0, 255, 1})},
+		UnknownFields: UnknownFields{"future_metadata": json.RawMessage(`{"nested":[1,{"two":true}]}`)},
+	}
+	optional.Entries[0].UnknownFields = UnknownFields{"future_hash": json.RawMessage(`{"kind":"opaque"}`)}
+	optionalTwo := SectionIndex{
+		ID: "future-three", Kind: "another_future_state", SchemaVersion: 1,
+		Entries:       []ArchiveEntry{contractEntry("future/three.dat", []byte("another optional section"))},
+		UnknownFields: UnknownFields{"labels": json.RawMessage(`["one","two"]`)},
+	}
+	required := SectionIndex{
+		ID: "future-two", Kind: "future_required", SchemaVersion: 2, Required: true,
+		Entries:       []ArchiveEntry{contractEntry("future/two.dat", []byte("required"))},
+		UnknownFields: UnknownFields{"activation": json.RawMessage(`{"mode":"future"}`)},
+	}
+	index.Sections = append(index.Sections, optional, optionalTwo, required)
+	data, err := json.Marshal(index)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := ParseContractIndex(data, testBounds)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.Report.Status != CompatibilityIncompatible || !hasIssue(parsed.Report, "unknown_optional_section", "future-one") || !hasIssue(parsed.Report, "unknown_optional_section", "future-three") || !hasIssue(parsed.Report, "unknown_required_section", "future-two") {
+		t.Fatalf("report=%+v", parsed.Report)
+	}
+	encoded, err := json.Marshal(parsed.V2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var roundTripped IndexV2
+	if err := json.Unmarshal(encoded, &roundTripped); err != nil {
+		t.Fatal(err)
+	}
+	if len(roundTripped.Sections) != len(index.Sections) || !rawJSONEqual(roundTripped.Sections[len(roundTripped.Sections)-3].UnknownFields["future_metadata"], optional.UnknownFields["future_metadata"]) || !rawJSONEqual(roundTripped.Sections[len(roundTripped.Sections)-2].UnknownFields["labels"], optionalTwo.UnknownFields["labels"]) || !rawJSONEqual(roundTripped.Sections[len(roundTripped.Sections)-1].UnknownFields["activation"], required.UnknownFields["activation"]) {
+		t.Fatal("unknown sections were not retained")
+	}
+}
+
+func TestUnknownPayloadBytesArePreservedExactly(t *testing.T) {
+	one := []byte{0, 1, 2, 0, 255, 128}
+	two := []byte("\x00future\nbytes\xff")
+	index := IndexV2{Sections: []SectionIndex{{
+		ID: "future", Kind: "future_state", SchemaVersion: 1, Required: true,
+		Entries: []ArchiveEntry{contractEntry("future/one.bin", one), contractEntry("future/two.bin", two)},
+	}}}
+	preserved, err := PreserveIndexedPayloads(index, map[string][]byte{"future/one.bin": one, "future/two.bin": two})
+	if err != nil {
+		t.Fatal(err)
+	}
+	one[0] = 99
+	if !bytes.Equal(preserved["future/one.bin"], []byte{0, 1, 2, 0, 255, 128}) || !bytes.Equal(preserved["future/two.bin"], two) {
+		t.Fatalf("payload changed: %#v", preserved)
+	}
+	if _, err := PreserveIndexedPayloads(index, map[string][]byte{"future/one.bin": one, "future/two.bin": two}); !errors.Is(err, ErrInvalidContractIndex) {
+		t.Fatalf("integrity failure not rejected: %v", err)
+	}
+}
+
+func TestDuplicateJSONKeysAreRejectedAtEveryExtensibleLevel(t *testing.T) {
+	fixtures := []string{
+		`{"version":2,"version":2,"doll_id":"d","sections":[]}`,
+		`{"version":2,"doll_id":"d","sections":[{"id":"x","id":"x"}]}`,
+		`{"version":2,"doll_id":"d","sections":[{"id":"x","entries":[{"path":"x","path":"y"}]}]}`,
+		`{"version":2,"doll_id":"d","future":{"nested":1,"nested":2},"sections":[]}`,
+	}
+	for _, fixture := range fixtures {
+		if _, err := ParseContractIndex([]byte(fixture), testBounds); !errors.Is(err, ErrInvalidContractIndex) {
+			t.Fatalf("duplicate key accepted: %s: %v", fixture, err)
+		}
+	}
+}
+
+func TestUnpreservableUnknownFieldsFailExplicitly(t *testing.T) {
+	index := v2IndexFixture()
+	index.UnknownFields = UnknownFields{"version": json.RawMessage(`3`)}
+	if err := index.Validate(testBounds); !errors.Is(err, ErrInvalidContractIndex) {
+		t.Fatalf("known-field collision accepted: %v", err)
+	}
+	index = v2IndexFixture()
+	index.Sections[0].Entries[0].UnknownFields = UnknownFields{"future": json.RawMessage(`{"duplicate":1,"duplicate":2}`)}
+	if _, err := json.Marshal(index); !errors.Is(err, ErrInvalidContractIndex) {
+		t.Fatalf("ambiguous unknown value accepted: %v", err)
 	}
 }
 
@@ -148,13 +252,12 @@ func hasIssue(report CompatibilityReport, code, sectionID string) bool {
 	return false
 }
 
-func stringContains(value, part string) bool {
-	for i := 0; i+len(part) <= len(value); i++ {
-		if value[i:i+len(part)] == part {
-			return true
-		}
+func rawJSONEqual(left, right json.RawMessage) bool {
+	var leftValue, rightValue any
+	if json.Unmarshal(left, &leftValue) != nil || json.Unmarshal(right, &rightValue) != nil {
+		return false
 	}
-	return false
+	return reflect.DeepEqual(leftValue, rightValue)
 }
 
 func TestVersion1CompatibilityTreatsAuthorityAsUnknown(t *testing.T) {
@@ -184,7 +287,7 @@ func TestUnknownSectionsProduceExplicitCompatibilityReport(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if parsed.Report.Status != CompatibilityDegraded || len(parsed.Report.Issues) == 0 {
+	if parsed.Report.Status != CompatibilityCompatible || len(parsed.Report.Issues) == 0 {
 		t.Fatalf("optional report=%+v", parsed.Report)
 	}
 	index.Sections[len(index.Sections)-1].Required = true

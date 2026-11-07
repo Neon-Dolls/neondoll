@@ -1,13 +1,11 @@
 package dollcard
 
 import (
-	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"sort"
 	"strings"
 
 	"github.com/Neon-Dolls/neondoll/Core/Memory"
@@ -40,9 +38,29 @@ const (
 )
 
 type ArchiveEntry struct {
-	Path   string `json:"path"`
-	SHA256 string `json:"sha256"`
-	Size   uint64 `json:"size"`
+	Path          string        `json:"path"`
+	SHA256        string        `json:"sha256"`
+	Size          uint64        `json:"size"`
+	UnknownFields UnknownFields `json:"-"`
+}
+
+func (e *ArchiveEntry) UnmarshalJSON(data []byte) error {
+	type knownEntry ArchiveEntry
+	var known knownEntry
+	unknown, err := decodeExtensibleObject(data, &known, "path", "sha256", "size")
+	if err != nil {
+		return err
+	}
+	*e = ArchiveEntry(known)
+	e.UnknownFields = unknown
+	return nil
+}
+
+func (e ArchiveEntry) MarshalJSON() ([]byte, error) {
+	type knownEntry ArchiveEntry
+	known := knownEntry(e)
+	known.UnknownFields = nil
+	return marshalExtensibleObject(known, e.UnknownFields, "path", "sha256", "size")
 }
 
 type SectionIndex struct {
@@ -55,14 +73,54 @@ type SectionIndex struct {
 	Empty         bool           `json:"empty"`
 	Entries       []ArchiveEntry `json:"entries,omitempty"`
 	Compatibility []string       `json:"compatibility,omitempty"`
+	UnknownFields UnknownFields  `json:"-"`
+}
+
+func (s *SectionIndex) UnmarshalJSON(data []byte) error {
+	type knownSection SectionIndex
+	var known knownSection
+	unknown, err := decodeExtensibleObject(data, &known, "id", "kind", "schema_version", "required", "empty", "entries", "compatibility")
+	if err != nil {
+		return err
+	}
+	*s = SectionIndex(known)
+	s.UnknownFields = unknown
+	return nil
+}
+
+func (s SectionIndex) MarshalJSON() ([]byte, error) {
+	type knownSection SectionIndex
+	known := knownSection(s)
+	known.UnknownFields = nil
+	return marshalExtensibleObject(known, s.UnknownFields, "id", "kind", "schema_version", "required", "empty", "entries", "compatibility")
 }
 
 // IndexV2 is the next DollCard card.json contract. Production v1 encoding and
 // decoding intentionally remain unchanged in this milestone.
 type IndexV2 struct {
-	Version  int            `json:"version"`
-	DollID   string         `json:"doll_id"`
-	Sections []SectionIndex `json:"sections"`
+	Version       int            `json:"version"`
+	DollID        string         `json:"doll_id"`
+	Sections      []SectionIndex `json:"sections"`
+	UnknownFields UnknownFields  `json:"-"`
+}
+
+func (i *IndexV2) UnmarshalJSON(data []byte) error {
+	type knownIndex IndexV2
+	var known knownIndex
+	unknown, err := decodeExtensibleObject(data, &known, "version", "doll_id", "sections")
+	if err != nil {
+		return err
+	}
+	*i = IndexV2(known)
+	i.UnknownFields = unknown
+	return nil
+}
+
+func (i IndexV2) MarshalJSON() ([]byte, error) {
+	type knownIndex IndexV2
+	known := knownIndex(i)
+	known.UnknownFields = nil
+	return marshalExtensibleObject(known, i.UnknownFields, "version", "doll_id", "sections")
 }
 
 type ImportBounds struct {
@@ -75,6 +133,9 @@ func (i IndexV2) Validate(bounds ImportBounds) error {
 	if i.Version != ContractVersion2 || strings.TrimSpace(i.DollID) == "" || bounds.MaxSections == 0 || bounds.MaxEntries == 0 || bounds.MaxDeclaredBytes == 0 || uint64(len(i.Sections)) > bounds.MaxSections {
 		return ErrInvalidContractIndex
 	}
+	if validateUnknownFields(i.UnknownFields, "version", "doll_id", "sections") != nil {
+		return ErrInvalidContractIndex
+	}
 	sections, paths, kinds := map[string]bool{}, map[string]bool{}, map[SectionKind]bool{}
 	var entries, size uint64
 	for _, section := range i.Sections {
@@ -82,6 +143,9 @@ func (i IndexV2) Validate(bounds ImportBounds) error {
 			return ErrInvalidContractIndex
 		}
 		if section.Empty == (len(section.Entries) > 0) {
+			return ErrInvalidContractIndex
+		}
+		if validateUnknownFields(section.UnknownFields, "id", "kind", "schema_version", "required", "empty", "entries", "compatibility") != nil {
 			return ErrInvalidContractIndex
 		}
 		sections[section.ID] = true
@@ -98,6 +162,9 @@ func (i IndexV2) Validate(bounds ImportBounds) error {
 			}
 		}
 		for _, entry := range section.Entries {
+			if validateUnknownFields(entry.UnknownFields, "path", "sha256", "size") != nil {
+				return ErrInvalidContractIndex
+			}
 			if !skill.SafeRelativePath(entry.Path) || paths[entry.Path] || len(entry.SHA256) != 64 {
 				return ErrInvalidContractIndex
 			}
@@ -127,6 +194,23 @@ func ValidateEntryData(entry ArchiveEntry, data []byte) error {
 		return ErrInvalidContractIndex
 	}
 	return nil
+}
+
+// PreserveIndexedPayloads validates and copies every payload referenced by the
+// index. It is the contract-level pass-through primitive used by a future v2
+// archive pipeline; returned bytes do not alias the caller's buffers.
+func PreserveIndexedPayloads(index IndexV2, payloads map[string][]byte) (map[string][]byte, error) {
+	preserved := make(map[string][]byte)
+	for _, section := range index.Sections {
+		for _, entry := range section.Entries {
+			payload, ok := payloads[entry.Path]
+			if !ok || ValidateEntryData(entry, payload) != nil {
+				return nil, ErrInvalidContractIndex
+			}
+			preserved[entry.Path] = append([]byte(nil), payload...)
+		}
+	}
+	return preserved, nil
 }
 
 type CompatibilityStatus string
@@ -168,6 +252,9 @@ var requiredV2Sections = []SectionKind{
 }
 
 func ParseContractIndex(data []byte, bounds ImportBounds) (ParsedIndex, error) {
+	if err := rejectDuplicateJSONKeys(data); err != nil {
+		return ParsedIndex{}, ErrInvalidContractIndex
+	}
 	var header map[string]json.RawMessage
 	if err := json.Unmarshal(data, &header); err != nil {
 		return ParsedIndex{}, ErrInvalidContractIndex
@@ -186,45 +273,11 @@ func ParseContractIndex(data []byte, bounds ImportBounds) (ParsedIndex, error) {
 	if version != ContractVersion2 {
 		return ParsedIndex{}, ErrInvalidContractIndex
 	}
-	decoder := json.NewDecoder(bytes.NewReader(data))
 	var index IndexV2
-	if err := decoder.Decode(&index); err != nil || index.Validate(bounds) != nil {
+	if err := json.Unmarshal(data, &index); err != nil || index.Validate(bounds) != nil {
 		return ParsedIndex{}, ErrInvalidContractIndex
 	}
 	report := assessCompatibility(index)
-	unknownIndexFields := make([]string, 0)
-	for name := range header {
-		if name != "version" && name != "doll_id" && name != "sections" {
-			unknownIndexFields = append(unknownIndexFields, name)
-		}
-	}
-	sort.Strings(unknownIndexFields)
-	for _, name := range unknownIndexFields {
-		report.Issues = append(report.Issues, CompatibilityIssue{Code: "unknown_index_field_not_preserved", Message: "unknown card.json field is not retained by this contract parser: " + name})
-		if report.Status == CompatibilityCompatible {
-			report.Status = CompatibilityDegraded
-		}
-	}
-	var rawSections []map[string]json.RawMessage
-	if err := json.Unmarshal(header["sections"], &rawSections); err != nil || len(rawSections) != len(index.Sections) {
-		return ParsedIndex{}, ErrInvalidContractIndex
-	}
-	knownFields := map[string]bool{"id": true, "kind": true, "schema_version": true, "required": true, "empty": true, "entries": true, "compatibility": true}
-	for sectionIndex, raw := range rawSections {
-		unknownSectionFields := make([]string, 0)
-		for name := range raw {
-			if !knownFields[name] {
-				unknownSectionFields = append(unknownSectionFields, name)
-			}
-		}
-		sort.Strings(unknownSectionFields)
-		for _, name := range unknownSectionFields {
-			report.Issues = append(report.Issues, CompatibilityIssue{Code: "unknown_section_field_not_preserved", SectionID: index.Sections[sectionIndex].ID, Message: "unknown section field is not retained by this contract parser: " + name})
-			if report.Status == CompatibilityCompatible {
-				report.Status = CompatibilityDegraded
-			}
-		}
-	}
 	return ParsedIndex{Version: version, V2: &index, Report: report}, nil
 }
 
@@ -237,10 +290,8 @@ func assessCompatibility(index IndexV2) CompatibilityReport {
 			code := "unknown_optional_section"
 			if section.Required {
 				code, report.Status = "unknown_required_section", CompatibilityIncompatible
-			} else if report.Status == CompatibilityCompatible {
-				report.Status = CompatibilityDegraded
 			}
-			report.Issues = append(report.Issues, CompatibilityIssue{Code: code, SectionID: section.ID, Message: "section semantics are not understood by this contract parser"})
+			report.Issues = append(report.Issues, CompatibilityIssue{Code: code, SectionID: section.ID, Message: "section semantics are not understood; index metadata and referenced payloads remain preservable"})
 			continue
 		}
 		seenKinds[section.Kind] = true

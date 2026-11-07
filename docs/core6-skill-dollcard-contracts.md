@@ -86,13 +86,24 @@ archive pipeline.
 
 - Version 1 remains a legacy input for the existing reader. Missing v2
   authority is reported as `unknown/unrepresented`, never allow or prohibit.
-- Unknown optional sections are reported as degraded compatibility. Unknown
-  required sections are incompatible. This contract parser retains the known
-  section index fields and entry references, but it does not retain unknown
-  top-level or section-level JSON fields in `ParsedIndex`. Such fields are
-  explicitly reported as `*_not_preserved`; M1.3 therefore makes no faithful
-  future round-trip claim. A production v2 archive pipeline must either retain
-  their raw JSON or refuse a round-trip.
+- `IndexV2`, `SectionIndex`, and `ArchiveEntry` retain unknown fields as opaque
+  `json.RawMessage` values. Decode/encode preserves their JSON values,
+  including nested objects and arrays, without assigning semantics. JSON
+  whitespace and object-key ordering may change; the semantic value does not.
+  Duplicate keys at any nesting level are rejected because choosing one value
+  would make preservation ambiguous.
+- Unknown optional sections remain compatible when their complete index and
+  payload can be preserved. Unknown required sections are incompatible with
+  activation or interpretation, but their metadata, entry references, and
+  payloads remain preservable. Unknown data never becomes authority,
+  execution permission, or trusted instructions.
+- `PreserveIndexedPayloads` is the contract-level payload pass-through helper:
+  it verifies every referenced size and digest and returns independent copies
+  under identical archive paths. This proves path-and-byte preservation for
+  in-memory fixtures without implementing the production v2 ZIP pipeline.
+- If an extension field contains invalid or duplicate-key JSON, collides with
+  a known field, or an indexed payload is absent or fails integrity, encoding
+  or pass-through fails explicitly rather than producing a lossy card.
 - Missing dependencies yield an installed, dormant Skill.
 - Skill path conflicts and integrity failures are explicit rejection results.
 - Unverifiable authority records are retained as
@@ -117,7 +128,6 @@ archive round-trip and no-silent-loss tests. M1.3 does not claim v2 cards can
 yet be imported or exported by production Core.
 
 Open decisions for that work include archive streaming implementation,
-section/file size defaults, raw preservation mechanics for unknown fields and
-optional sections, atomic conflict handling, whole-container protection, and
-the exact trusted verification process for imported Peer and authority
-provenance.
+section/file size defaults, atomic conflict handling, whole-container
+protection, and the exact trusted verification process for imported Peer and
+authority provenance.
