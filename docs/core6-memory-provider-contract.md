@@ -3,6 +3,16 @@
 Core 6 M1.1 defines the portable retained-memory boundary in `Core/Memory`.
 It does not implement a provider or change Core 5 cognition.
 
+## Portability boundary
+
+Portable semantics are the record identity, revision/provenance metadata,
+bounded cancellation-aware transfers, honest retained/transformed/rejected
+outcomes, and the rule that a provider must not deliberately restore a known
+superseded revision. Replay uniqueness, transactional compare-and-swap,
+immediate indexing, all-record import transactions, exact retention, ranking,
+and deterministic ordering are optional capabilities. Native indexes,
+consolidation strategies, and consistency mechanisms remain backend details.
+
 ## Contract
 
 `MemoryRecord v1` follows `memory-record-v1.md`: required envelope fields,
@@ -13,10 +23,12 @@ and JSON. Other media is transferred as a bounded, cancellable stream.
 Providers implement `Remember`, `Recall`, `Export`, `Import`, `Capabilities`,
 and `Health`. Recall is bounded and returns stable ID/revision references;
 ranking remains provider-native. Remember and import explicitly report
-storage, transformation, idempotence, rejection, and partial failure. Exact
-same-revision replay is idempotent only when the envelope is identical. A
-different same revision or an older revision is a conflict. Newer revisions
-may be stored or transformed by the provider.
+storage, transformation, idempotence, rejection, and partial failure. Stable
+IDs and revisions remain portable metadata, but conflict detection, replay
+scope, consistency, import atomicity, ordering, and search behavior are
+provider capabilities rather than universal transactional guarantees.
+`CompareImportRevision` is a reusable strict policy for providers that
+advertise it; it is not imposed on every backend.
 
 A transformed remember result contains both the complete retained
 representation and explicit transformation metadata (`kind`, description,
@@ -43,6 +55,27 @@ authority, Interaction Session history, and operational state remain outside
 the provider. Provider unavailability therefore cannot invalidate those
 Core-owned records.
 
+`Capabilities.Consistency` reports only guarantees a provider actually makes:
+replay scope/durability, revision-conflict strength, read-after-write
+consistency, import atomicity, and retrieval semantics. Zero values mean
+unspecified and must never be interpreted as a stronger guarantee. Recall can
+be semantic or approximate, and export always describes the representation
+currently retained—not necessarily the originally submitted experience.
+
+The initial values have deliberately narrow meanings:
+
+- replay scope is `none`, `record`, or `doll`; durability is reported
+  separately because an in-process replay cache is not durable;
+- revision conflicts are `none`, `single_writer`, or `atomic`;
+- read-after-write is `eventual` or `immediate`;
+- import atomicity is `none`, `per_record`, or `all_records`; and
+- retrieval is `provider_native` or `exact`, with deterministic ordering as a
+  separate guarantee.
+
+These declarations do not weaken a backend. A transactional provider may
+continue enforcing stronger revision and replay rules even when another
+provider cannot.
+
 ## Configuration and extensions
 
 `memory.active` selects one named provider installation while
@@ -51,11 +84,14 @@ shape leaves future routing possible without changing cognitive interfaces.
 SQLite, OpenViking, and Hindsight are equal implementation targets; no
 provider-specific option appears in the contract.
 
-`memory-provider/v1` is reserved as a distinct, stateful Extension contract.
-It is intentionally rejected as unsupported by the current Gateway-only WASM
-runtime. A later adapter must define bounded stream framing, lifecycle, and
-least-privilege host grants. It must not disguise a Memory Provider as a
-Gateway, Body, Capability, or inference provider.
+Memory Providers are NeonDoll modules. SQLite, OpenViking, and Hindsight must
+ultimately be independently installable, configurable, and loadable through
+the common module system; the current Go adapters are intermediate
+implementations, not a permanent compiled-in registry. `memory-provider/v1`
+is the reserved stateful module contract. A later adapter must define bounded
+stream framing, lifecycle, and least-privilege host grants. It must not
+disguise a Memory Provider as a Gateway, Body, Capability, or inference
+provider or create a second plugin architecture.
 
 ## Deliberately unresolved
 
