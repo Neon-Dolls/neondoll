@@ -72,11 +72,11 @@ func OpenActive(ctx context.Context, cfg memory.Configuration, dollID string, op
 	switch ref.Implementation {
 	case memory.ImplementationSQLite:
 		settings := ref.SQLite
-		path := settings.Path
-		if !filepath.IsAbs(path) && opts.DataRoot != "" {
-			path = filepath.Join(opts.DataRoot, path)
+		var path string
+		path, err = resolveSQLitePath(opts.DataRoot, settings.Path)
+		if err == nil {
+			provider, err = sqlite.Open(sqlite.Config{Path: path, DollID: dollID, MaxInlineBytes: settings.MaxInlineBytes, MaxStreamBytes: settings.MaxStreamBytes})
 		}
-		provider, err = sqlite.Open(sqlite.Config{Path: path, DollID: dollID, MaxInlineBytes: settings.MaxInlineBytes, MaxStreamBytes: settings.MaxStreamBytes})
 	case memory.ImplementationOpenViking:
 		settings := ref.OpenViking
 		var key string
@@ -106,6 +106,59 @@ func OpenActive(ctx context.Context, cfg memory.Configuration, dollID string, op
 		return nil, fmt.Errorf("memory runtime: health %q: %s", resolved.Name, health.Detail)
 	}
 	return &Managed{Provider: provider, closer: provider, name: resolved.Name}, nil
+}
+
+func resolveSQLitePath(dataRoot, configured string) (string, error) {
+	if filepath.IsAbs(configured) {
+		return filepath.Clean(configured), nil
+	}
+	if strings.TrimSpace(dataRoot) == "" {
+		return "", fmt.Errorf("%w: data root is required for a relative SQLite path", memory.ErrInvalidConfiguration)
+	}
+	root, err := filepath.Abs(dataRoot)
+	if err != nil {
+		return "", fmt.Errorf("%w: resolve data root: %v", memory.ErrInvalidConfiguration, err)
+	}
+	root, err = filepath.EvalSymlinks(root)
+	if err != nil {
+		return "", fmt.Errorf("%w: resolve data root: %v", memory.ErrInvalidConfiguration, err)
+	}
+	target, err := filepath.Abs(filepath.Join(root, filepath.Clean(configured)))
+	if err != nil || !within(root, target) {
+		return "", fmt.Errorf("%w: SQLite path escapes data root", memory.ErrInvalidConfiguration)
+	}
+
+	// The database may not exist yet. Resolve the nearest existing ancestor so
+	// symlinked directories cannot move the eventual file outside dataRoot.
+	ancestor := target
+	for {
+		_, statErr := os.Lstat(ancestor)
+		if statErr == nil {
+			break
+		}
+		if !errors.Is(statErr, os.ErrNotExist) {
+			return "", fmt.Errorf("%w: inspect SQLite path: %v", memory.ErrInvalidConfiguration, statErr)
+		}
+		parent := filepath.Dir(ancestor)
+		if parent == ancestor {
+			return "", fmt.Errorf("%w: SQLite path has no existing parent", memory.ErrInvalidConfiguration)
+		}
+		ancestor = parent
+	}
+	resolvedAncestor, err := filepath.EvalSymlinks(ancestor)
+	if err != nil || !within(root, resolvedAncestor) {
+		return "", fmt.Errorf("%w: SQLite path symlink escapes data root", memory.ErrInvalidConfiguration)
+	}
+	remainder, err := filepath.Rel(ancestor, target)
+	if err != nil {
+		return "", fmt.Errorf("%w: resolve SQLite path: %v", memory.ErrInvalidConfiguration, err)
+	}
+	return filepath.Join(resolvedAncestor, remainder), nil
+}
+
+func within(root, path string) bool {
+	rel, err := filepath.Rel(root, path)
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 // An empty secret reference means that the backend is configured without

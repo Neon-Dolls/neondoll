@@ -136,14 +136,24 @@ func loadProductionDoll(ctx context.Context, store persistence.Store, dollID str
 }
 
 func main() {
+	os.Exit(run())
+}
+
+// run owns the daemon startup and runtime resources. Returning to main ensures
+// deferred cleanup runs before the process exits after any failure.
+func run() int {
 	log := logger.New(logger.InfoLevel, os.Stdout)
+	cleanup := newDaemonCleanup(func(err error) {
+		log.Error("daemon resource shutdown error", map[string]any{"error": err.Error()})
+	})
+	defer cleanup.Close()
 	log.Info(fmt.Sprintf("neondoll v%s starting — Core 1", version.String()))
 
 	// Load config (optional — use defaults if not found).
 	cfg, err := config.Load("config.json")
 	if err != nil && !os.IsNotExist(err) {
 		log.Error("config load error", map[string]any{"error": err.Error()})
-		os.Exit(1)
+		return 1
 	}
 
 	// If config didn't load, use defaults.
@@ -154,39 +164,39 @@ func main() {
 	externalIdentityResolver, err := config.NewExternalIdentityResolver(cfg.Core)
 	if err != nil {
 		log.Error("external identity resolver setup error", map[string]any{"error": err.Error()})
-		os.Exit(1)
+		return 1
 	}
 
 	modelResolver, err := config.NewModelResolver(cfg.Inference)
 	if err != nil {
 		log.Error("invalid model configuration", map[string]any{"error": err.Error()})
-		os.Exit(1)
+		return 1
 	}
 	interactionModel, interactionProvider, err := resolveTaskProvider(modelResolver, config.InferenceTaskInteraction)
 	if err != nil {
 		log.Error("Interaction model setup error", map[string]any{"error": err.Error()})
-		os.Exit(1)
+		return 1
 	}
 	orientModel, orientProvider, err := resolveTaskProvider(modelResolver, config.InferenceTaskOrient)
 	if err != nil {
 		log.Error("Orient model setup error", map[string]any{"error": err.Error()})
-		os.Exit(1)
+		return 1
 	}
 	planModel, planProvider, err := resolveTaskProvider(modelResolver, config.InferenceTaskPlan)
 	if err != nil {
 		log.Error("Plan model setup error", map[string]any{"error": err.Error()})
-		os.Exit(1)
+		return 1
 	}
 	directModel, directProvider, err := resolveTaskProvider(modelResolver, config.InferenceTaskDirectCognition)
 	if err != nil {
 		log.Error("direct cognition model setup error", map[string]any{"error": err.Error()})
-		os.Exit(1)
+		return 1
 	}
 
 	// Ensure database directory exists.
 	if err := os.MkdirAll(cfg.Paths.DataDir, 0o755); err != nil {
 		log.Error("mkdir error", map[string]any{"error": err.Error()})
-		os.Exit(1)
+		return 1
 	}
 
 	// Determine listen address.
@@ -200,7 +210,7 @@ func main() {
 	store, err := persistence.NewStore(dbPath)
 	if err != nil {
 		log.Error("persistence open error", map[string]any{"error": err.Error(), "path": dbPath})
-		os.Exit(1)
+		return 1
 	}
 	defer store.Close()
 	log.Info("persistence opened", map[string]any{"path": dbPath})
@@ -215,17 +225,17 @@ func main() {
 	sessionStore, ok := store.(session.Store)
 	if !ok {
 		log.Error("store does not implement Interaction Session Store")
-		os.Exit(1)
+		return 1
 	}
 	coreServices, err := runtime.NewServices(ctx, sessionStore, runtime.WithExternalIdentityResolver(externalIdentityResolver))
 	if err != nil {
 		log.Error("Core runtime services setup error", map[string]any{"error": err.Error()})
-		os.Exit(1)
+		return 1
 	}
 	trustedParticipants, ok := coreServices.Sessions().(session.TrustedParticipantService)
 	if !ok {
 		log.Error("external identity reconciliation error", map[string]any{"error": "trusted participant service unavailable"})
-		os.Exit(1)
+		return 1
 	}
 	configuredSources := make([]session.ParticipantSource, 0, len(cfg.Core.ExternalIdentities))
 	for _, mapping := range cfg.Core.ExternalIdentities {
@@ -233,12 +243,12 @@ func main() {
 	}
 	if err = trustedParticipants.ReconcileParticipantSources(ctx, configuredSources); err != nil {
 		log.Error("external identity reconciliation error", map[string]any{"error": err.Error()})
-		os.Exit(1)
+		return 1
 	}
 	activeSessions, err := coreServices.Sessions().ListActive(ctx, nil)
 	if err != nil {
 		log.Error("Interaction Session reconstruction error", map[string]any{"error": err.Error()})
-		os.Exit(1)
+		return 1
 	}
 	log.Info("Interaction Session service ready", map[string]any{"active_sessions": len(activeSessions)})
 
@@ -246,22 +256,22 @@ func main() {
 	ns, ok := store.(network.NetworkStore)
 	if !ok {
 		log.Error("store does not implement NetworkStore")
-		os.Exit(1)
+		return 1
 	}
 	nw, err := ns.LoadNetwork(ctx)
 	if err != nil {
 		log.Error("load network error", map[string]any{"error": err.Error()})
-		os.Exit(1)
+		return 1
 	}
 	if nw == nil {
 		nw, err = network.NewNetwork(network.GenerateNetworkID())
 		if err != nil {
 			log.Error("create network error", map[string]any{"error": err.Error()})
-			os.Exit(1)
+			return 1
 		}
 		if err := ns.SaveNetwork(ctx, nw); err != nil {
 			log.Error("save new network error", map[string]any{"error": err.Error()})
-			os.Exit(1)
+			return 1
 		}
 		log.Info("new network created", map[string]any{"network_id": string(nw.NetworkID)})
 	}
@@ -274,7 +284,7 @@ func main() {
 	rt, err := runtime.Reconstruct(ctx, nw, ns, nil, runtime.WithListenPort(wireguardListenPort))
 	if err != nil {
 		log.Error("network runtime reconstruct error", map[string]any{"error": err.Error()})
-		os.Exit(1)
+		return 1
 	}
 	log.Info("network runtime reconstructed", map[string]any{
 		"overlay_addr": nw.Core.OverlayAddress.String(),
@@ -302,48 +312,44 @@ func main() {
 	dollState, err := loadProductionDoll(ctx, store, dollID)
 	if err != nil {
 		log.Error("production Doll state setup error", map[string]any{"doll_id": dollID, "error": err.Error()})
-		os.Exit(1)
+		return 1
 	}
 	memoryProvider, err := memoryruntime.OpenActive(ctx, cfg.Memory, dollState.Identity.DollID, memoryruntime.Options{SecretsRoot: cfg.Paths.SecretsDir, DataRoot: cfg.Paths.DataDir})
 	if err != nil {
 		log.Error("Memory Provider startup error", map[string]any{"error": err.Error()})
-		os.Exit(1)
+		return 1
 	}
 	if memoryProvider != nil {
-		defer func() {
-			if err := memoryProvider.Close(); err != nil {
-				log.Error("Memory Provider shutdown error", map[string]any{"error": err.Error()})
-			}
-		}()
+		cleanup.Add(memoryProvider.Close)
 		log.Info("Memory Provider ready", map[string]any{"provider": memoryProvider.Name(), "doll_id": dollState.Identity.DollID})
 	}
 	actionPolicy, err := actionpolicy.New(cfg.Core.ActionPolicy)
 	if err != nil {
 		log.Error("Gateway permission policy setup error", map[string]any{"error": err.Error()})
-		os.Exit(1)
+		return 1
 	}
 	permissionStore, ok := store.(permissionrequest.Store)
 	if !ok {
 		log.Error("store does not implement Permission Request Store")
-		os.Exit(1)
+		return 1
 	}
 	permissionManager := permissionrequest.New(permissionStore, actionPolicy)
 	for _, rule := range cfg.Core.ActionPolicy {
 		if rule.Decision == actionpolicy.DecisionRequireApproval && strings.TrimSpace(dollState.Owner.OwnerID) == "" {
 			log.Error("approval-required action policy has no configured Doll Owner", map[string]any{"doll_id": dollState.Identity.DollID})
-			os.Exit(1)
+			return 1
 		}
 	}
 	cognitionToolExecutor, err := newProductionToolExecutor(bodyRegistry, dollState.Identity.DollID, cfg.Core.ActionPolicy, cfg.Core.BodyAuthorization, cfg.Core.BodyPreferences,
 		dollmind.WithPermissionRequests(permissionManager, dollState.Owner.OwnerID, 15*time.Minute))
 	if err != nil {
 		log.Error("cognition tool executor setup error", map[string]any{"error": err.Error()})
-		os.Exit(1)
+		return 1
 	}
 	acceptanceControl, err := startAcceptanceControl(bodyRegistry)
 	if err != nil {
 		log.Error("acceptance control setup error", map[string]any{"error": err.Error()})
-		os.Exit(1)
+		return 1
 	}
 	defer acceptanceControl()
 	directCognitionProvider := inference.NewToolEnabledProvider(directProvider)
@@ -358,7 +364,7 @@ func main() {
 	cognitionLifecycle, err := dollmind.NewLifecycle(scheduler)
 	if err != nil {
 		log.Error("cognition lifecycle setup error", map[string]any{"error": err.Error()})
-		os.Exit(1)
+		return 1
 	}
 	cognitionToolExecutor.SetPermissionResolutionNotifier(cognitionLifecycle)
 
@@ -370,42 +376,42 @@ func main() {
 	interactionRouter, err := coreServices.InteractionRouter(interactionSvc)
 	if err != nil {
 		log.Error("Interaction Session router setup error", map[string]any{"error": err.Error()})
-		os.Exit(1)
+		return 1
 	}
 	bodyIngress, err := interaction.NewBodyIngress(coreServices.Sessions(), interactionRouter)
 	if err != nil {
 		log.Error("authenticated Body interaction ingress setup error", map[string]any{"error": err.Error()})
-		os.Exit(1)
+		return 1
 	}
 	eventStore, ok := store.(sessionevent.Store)
 	if !ok {
 		log.Error("store does not implement Session Event Store")
-		os.Exit(1)
+		return 1
 	}
 	gatewayRuntime, err := runtime.NewGatewayRuntime(ctx, coreServices, eventStore, permissionStore,
 		externalIdentityResolver, interactionRouter, actionPolicy,
 		runtime.WithPermissionManager(permissionManager), runtime.WithPermissionResolutionHandler(cognitionToolExecutor))
 	if err != nil {
 		log.Error("Gateway runtime setup error", map[string]any{"error": err.Error()})
-		os.Exit(1)
+		return 1
 	}
 	defer gatewayRuntime.Shutdown(context.Background())
 	participants, ok := coreServices.Sessions().(session.ParticipantService)
 	if !ok {
 		log.Error("communication setup error", map[string]any{"error": "Session participant service unavailable"})
-		os.Exit(1)
+		return 1
 	}
 	communicationService, err := communication.New(externalIdentityResolver, coreServices.Sessions(), participants, gatewayRuntime.Events())
 	if err != nil {
 		log.Error("communication setup error", map[string]any{"error": err.Error()})
-		os.Exit(1)
+		return 1
 	}
 	cognitionToolExecutor.SetCommunicationSender(communicationService)
 	extensionState := extension.NewFileStateStore(filepath.Join(cfg.Paths.DataDir, "extensions", "state"))
 	extensionRuntime, err := extension.NewWASMRuntime(ctx, extensionState, cfg.Paths.SecretsDir)
 	if err != nil {
 		log.Error("extension runtime setup error", map[string]any{"error": err.Error()})
-		os.Exit(1)
+		return 1
 	}
 	manifestJSON, err := json.Marshal(cfg.Extensions)
 	var extensionManifests []extension.Manifest
@@ -414,7 +420,7 @@ func main() {
 	}
 	if err != nil {
 		log.Error("extension manifest setup error", map[string]any{"error": err.Error()})
-		os.Exit(1)
+		return 1
 	}
 	extensionManager, err := extension.NewManager(extensionRuntime, gatewayRuntime, cfg.Paths.DataDir, extensionManifests)
 	if err == nil {
@@ -422,7 +428,7 @@ func main() {
 	}
 	if err != nil {
 		log.Error("extension manager startup error", map[string]any{"error": fmt.Sprint(err)})
-		os.Exit(1)
+		return 1
 	}
 	defer extensionManager.Shutdown(context.Background())
 	log.Info("Gateway runtime ready")
@@ -433,19 +439,19 @@ func main() {
 	invitationStore, ok := store.(invitation.Store)
 	if !ok {
 		log.Error("store does not implement Invitation Store")
-		os.Exit(1)
+		return 1
 	}
 	enrollmentStore, ok := store.(enrollment.Store)
 	if !ok {
 		log.Error("store does not implement Enrollment Store")
-		os.Exit(1)
+		return 1
 	}
 	invitationService := invitation.NewService(invitationStore, invitation.RealClock{})
 	ownerBoundary := ownercontrol.NewBoundary()
 	enrollmentService, err := enrollment.NewService(ctx, enrollmentStore, nw, invitationService, ownerBoundary, nil, enrollment.DefaultConfig())
 	if err != nil {
 		log.Error("Body enrollment service setup error", map[string]any{"error": err.Error()})
-		os.Exit(1)
+		return 1
 	}
 	enrollment.RegisterBodyEndpoints(wsServer, enrollmentService)
 	wsServer.SetBodyAuthenticator(enrollmentService)
@@ -453,7 +459,7 @@ func main() {
 	remoteRegistrar, err := body.NewRemoteRegistrar(bodyRegistry, ns, wsServer)
 	if err != nil {
 		log.Error("remote Body registrar setup error", map[string]any{"error": err.Error()})
-		os.Exit(1)
+		return 1
 	}
 	wsServer.SetExecutionSessionLifecycle(remoteRegistrar)
 	enrollmentService.SetRevocationLifecycle(wsServer, rt)
@@ -464,7 +470,7 @@ func main() {
 	ownerServer, err := ownercontrol.NewServer(adminSocket, ownerService)
 	if err != nil {
 		log.Error("owner control setup error", map[string]any{"error": err.Error()})
-		os.Exit(1)
+		return 1
 	}
 	go func() {
 		if err := ownerServer.Serve(); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -495,7 +501,7 @@ func main() {
 		})
 		if listenErr != nil {
 			log.Error("netstack ws listen error", map[string]any{"error": listenErr.Error()})
-			os.Exit(1)
+			return 1
 		}
 		wsServer.SetListener(listener)
 		log.Info("ws server listening through wireguard overlay",
@@ -536,7 +542,7 @@ func main() {
 					"doll_id": dollID,
 					"error":   cpErr.Error(),
 				})
-				os.Exit(1)
+				return 1
 			}
 			pulseRunner.RestoreFromCheckpoint(cp)
 			log.Info("pulse checkpoint restored", map[string]any{"doll_id": dollID})
@@ -550,7 +556,7 @@ func main() {
 				"doll_id": dollID,
 				"error":   cpLoadErr.Error(),
 			})
-			os.Exit(1)
+			return 1
 		}
 
 		// ── Wire durable checkpoint writer ───────────────────────────
@@ -569,7 +575,7 @@ func main() {
 	}
 	if err := pulseRunner.Start(ctx); err != nil {
 		log.Error("pulse runner start error", map[string]any{"error": err.Error()})
-		os.Exit(1)
+		return 1
 	}
 	defer pulseRunner.Stop()
 	log.Info("cognition lifecycle runner started", map[string]any{
@@ -614,8 +620,9 @@ func main() {
 	// Start the WS server (blocking).
 	if err := wsServer.Start(ctx); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Error("ws server error", map[string]any{"error": err.Error()})
-		os.Exit(1)
+		return 1
 	}
 
 	log.Info("neondoll stopped")
+	return 0
 }

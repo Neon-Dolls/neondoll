@@ -27,9 +27,11 @@ never migrates memories when selection changes.
 }
 ```
 
-Relative SQLite paths are resolved beneath `paths.data_dir`. SQLite creates
-and maintains its private schema, while every record remains scoped by the
-persisted Doll ID supplied by Core.
+Relative SQLite paths are resolved and confined beneath `paths.data_dir`.
+Traversal and symlink escapes fail startup before a database is opened or
+created. Explicit absolute paths remain supported for operator-managed storage.
+SQLite creates and maintains its private schema, while every record remains
+scoped by the persisted Doll ID supplied by Core.
 
 ## OpenViking
 
@@ -82,9 +84,11 @@ without authentication. Core does not log secret values.
 
 At startup Core validates configuration, constructs the selected provider with
 the persisted Doll ID, and requires a successful health check. Any failure is
-fatal and partial resources are closed. Shutdown closes the provider
-idempotently. OpenViking and Hindsight banks must already be provisioned; Core
-does not implicitly create or destroy remote memory stores.
+fatal and partial resources are closed. If any later daemon component fails to
+start, normal function unwinding closes the already initialized provider before
+the process exits. Normal shutdown also closes the provider idempotently.
+OpenViking and Hindsight banks must already be provisioned; Core does not
+implicitly create or destroy remote memory stores.
 
 Changing `active`, an endpoint, namespace, or database path only changes which
 store is opened. It does not transfer memories. Migration is an explicit,
