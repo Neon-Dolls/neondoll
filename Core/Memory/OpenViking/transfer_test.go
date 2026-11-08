@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"sort"
 	"testing"
 
 	memory "github.com/Neon-Dolls/neondoll/Core/Memory"
@@ -91,5 +92,29 @@ func TestImportMalformedUpstreamProtocolTerminates(t *testing.T) {
 	report, err := p.Import(context.Background(), memory.ImportRequest{MaxRecords: 2, MaxBytes: 1 << 20}, &sliceSource{transfers: []memory.Transfer{{Record: record("m", 1, "x")}}})
 	if !errors.Is(err, memory.ErrInvalidResult) || report.Completed || report.Records != 1 {
 		t.Fatalf("malformed protocol became rejection: %#v %v", report, err)
+	}
+}
+
+func TestExportReadFailurePreservesPartialAccounting(t *testing.T) {
+	f, server := newFake(t)
+	p := openTest(t, server.URL, "d")
+	var uris []string
+	for _, id := range []string{"one", "two", "three"} {
+		if _, err := p.Remember(context.Background(), memory.RememberRequest{Record: record(id, 1, id)}); err != nil {
+			t.Fatal(err)
+		}
+		uris = append(uris, p.recordURI(id))
+	}
+	sort.Strings(uris)
+	f.mu.Lock()
+	f.failReadURI = uris[1]
+	f.mu.Unlock()
+	sink := &collectSink{}
+	report, err := p.Export(context.Background(), memory.ExportRequest{MaxRecords: 10, MaxBytes: 1 << 20}, sink)
+	if err == nil || report.Completed {
+		t.Fatalf("read failure reported success: %#v %v", report, err)
+	}
+	if report.Records != 1 || report.Bytes == 0 || len(sink.transfers) != 1 {
+		t.Fatalf("partial accounting lost: %#v sink=%d", report, len(sink.transfers))
 	}
 }

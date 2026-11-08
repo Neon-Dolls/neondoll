@@ -100,9 +100,14 @@ func (p *Provider) Remember(ctx context.Context, req memory.RememberRequest) (me
 }
 
 func replayResult(submitted memory.Record, payload []byte, retained retainedDocument) (memory.RememberResult, error) {
-	// A historical replay confirms that the original request was accepted. It
-	// returns the current retained representation and never restores or claims
-	// that the superseded revision remains current.
+	if submitted.Revision != retained.Record.Revision {
+		return rejected(fmt.Sprintf(
+			"replay recognized for revision %d, but retained revision %d has superseded it",
+			submitted.Revision, retained.Record.Revision,
+		)), nil
+	}
+	// The replay identifies the currently retained revision. Preserve honest
+	// transformation reporting if OpenViking retained a different representation.
 	return retainedResult(submitted, payload, retained)
 }
 

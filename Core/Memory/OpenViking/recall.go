@@ -21,11 +21,11 @@ func (p *Provider) Recall(ctx context.Context, req memory.RecallRequest) (memory
 		return memory.RecallResult{}, err
 	}
 	candidateLimit := req.Limit
+	if candidateLimit > p.maxRecallCandidates {
+		candidateLimit = p.maxRecallCandidates
+	}
 	if len(req.Kinds) > 0 || len(req.SourceTypes) > 0 {
 		candidateLimit = p.maxRecallCandidates
-		if candidateLimit < req.Limit {
-			candidateLimit = req.Limit
-		}
 	}
 	query := req.Query
 	if strings.TrimSpace(query) == "" {

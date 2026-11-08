@@ -3,6 +3,7 @@ package openviking
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	memory "github.com/Neon-Dolls/neondoll/Core/Memory"
@@ -16,12 +17,20 @@ func TestRecordScopedReplaySurvivesUpdatesAndRestart(t *testing.T) {
 	if _, err := p.Remember(ctx, memory.RememberRequest{Record: v1, ReplayKey: "request-1"}); err != nil {
 		t.Fatal(err)
 	}
+	current, err := p.Remember(ctx, memory.RememberRequest{Record: v1, ReplayKey: "request-1"})
+	if err != nil || current.Outcome != memory.RememberStored || current.Retained.Revision != 1 {
+		t.Fatalf("current replay: %#v %v", current, err)
+	}
 	v2 := record("m1", 2, "two")
 	if _, err := p.Remember(ctx, memory.RememberRequest{Record: v2, ReplayKey: "request-2"}); err != nil {
 		t.Fatal(err)
 	}
+	current, err = p.Remember(ctx, memory.RememberRequest{Record: v2, ReplayKey: "request-2"})
+	if err != nil || current.Outcome != memory.RememberStored || current.Retained.Revision != 2 {
+		t.Fatalf("latest replay: %#v %v", current, err)
+	}
 	replayed, err := p.Remember(ctx, memory.RememberRequest{Record: v1, ReplayKey: "request-1"})
-	if err != nil || replayed.Retained.Revision != 2 || replayed.Outcome != memory.RememberTransformed {
+	if err != nil || replayed.Outcome != memory.RememberRejected || !strings.Contains(replayed.Reason, "superseded") {
 		t.Fatalf("historical replay: %#v %v", replayed, err)
 	}
 	if _, err = p.Remember(ctx, memory.RememberRequest{Record: record("m1", 1, "changed"), ReplayKey: "request-1"}); !errors.Is(err, memory.ErrConflict) {
@@ -30,8 +39,12 @@ func TestRecordScopedReplaySurvivesUpdatesAndRestart(t *testing.T) {
 	_ = p.Close()
 	reopened := openTest(t, server.URL, "doll-a")
 	replayed, err = reopened.Remember(ctx, memory.RememberRequest{Record: v1, ReplayKey: "request-1"})
-	if err != nil || replayed.Retained.Revision != 2 {
+	if err != nil || replayed.Outcome != memory.RememberRejected || !strings.Contains(replayed.Reason, "superseded") {
 		t.Fatalf("restart replay: %#v %v", replayed, err)
+	}
+	latest, err := reopened.Recall(ctx, memory.RecallRequest{Query: "two", Limit: 1})
+	if err != nil || len(latest.Matches) != 1 || latest.Matches[0].Reference.Revision != 2 {
+		t.Fatalf("historical replay changed retained revision: %#v %v", latest, err)
 	}
 }
 

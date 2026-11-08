@@ -2,6 +2,7 @@ package openviking
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	memory "github.com/Neon-Dolls/neondoll/Core/Memory"
@@ -62,5 +63,35 @@ func TestRecallCandidateBoundIsExplicit(t *testing.T) {
 	got, err := p.Recall(context.Background(), memory.RecallRequest{Query: "text", Limit: 1, Kinds: []string{"observation"}})
 	if err != nil || len(got.Matches) != 0 {
 		t.Fatalf("bounded semantic candidate set: %#v %v", got, err)
+	}
+}
+
+func TestRecallLimitCannotExceedCandidateCeiling(t *testing.T) {
+	f, server := newFake(t)
+	for _, filtered := range []bool{false, true} {
+		p, err := Open(Config{Endpoint: server.URL, APIKey: "secret", UserID: "u", DollID: fmt.Sprintf("d-%t", filtered), MaxRecallCandidates: 2})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, id := range []string{"one", "two", "three"} {
+			if _, err := p.Remember(context.Background(), memory.RememberRequest{Record: record(id, 1, id)}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		req := memory.RecallRequest{Query: "text", Limit: 5}
+		if filtered {
+			req.Kinds = []string{"observation"}
+		}
+		got, err := p.Recall(context.Background(), req)
+		if err != nil || len(got.Matches) != 2 {
+			t.Fatalf("filtered=%t: %#v %v", filtered, got, err)
+		}
+		f.mu.Lock()
+		limit := f.lastSearchLimit
+		f.mu.Unlock()
+		if limit != 2 {
+			t.Fatalf("filtered=%t bypassed ceiling: %d", filtered, limit)
+		}
+		_ = p.Close()
 	}
 }

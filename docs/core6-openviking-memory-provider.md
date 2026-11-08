@@ -50,7 +50,9 @@ record/replay key is safe; recall can lag until indexing catches up.
 - Replay keys are durable within one memory record and survive ordinary
   updates and reconnects because historical digests remain in that retained
   OpenViking document. Identical retries are idempotent; conflicting reuse for
-  that record fails. Cross-record replay-key uniqueness is not provided.
+  that record fails. A recognized replay of a superseded revision is rejected
+  explicitly and never described as a transformation or restored. Cross-record
+  replay-key uniqueness is not provided.
 - The public OpenViking write API does not expose compare-and-swap. A Provider
   instance serializes read/check/write operations, but separate writers aimed
   at the same Doll namespace can race. Deploy exactly one writer per namespace.
@@ -67,6 +69,9 @@ record/replay key is safe; recall can lag until indexing catches up.
   up to `MaxRecallCandidates` before applying portable metadata/source filters.
   OpenViking's documented search endpoint has a limit but no offset cursor, so
   matches outside that bounded candidate set are not guaranteed exhaustive.
+  This ceiling is authoritative for filtered and unfiltered Recall; when a
+  caller requests more results, the adapter returns at most the matches found
+  in that capped candidate set.
 
 ## Configuration
 

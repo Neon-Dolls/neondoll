@@ -28,6 +28,7 @@ type fakeViking struct {
 	searchOrder             []string
 	lastSearchLimit         int
 	malformed               bool
+	failReadURI             string
 }
 
 func newFake(t *testing.T) (*fakeViking, *httptest.Server) {
@@ -106,9 +107,15 @@ func (f *fakeViking) write(w http.ResponseWriter, r *http.Request, transform fun
 }
 
 func (f *fakeViking) read(w http.ResponseWriter, r *http.Request) {
+	uri := r.URL.Query().Get("uri")
 	f.mu.Lock()
-	content, ok := f.docs[r.URL.Query().Get("uri")]
+	content, ok := f.docs[uri]
+	fail := f.failReadURI == uri
 	f.mu.Unlock()
+	if fail {
+		writeErr(w, http.StatusServiceUnavailable, "UNAVAILABLE", "read failed")
+		return
+	}
 	if !ok {
 		writeErr(w, 404, "NOT_FOUND", "missing")
 		return

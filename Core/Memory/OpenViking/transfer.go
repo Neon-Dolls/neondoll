@@ -22,17 +22,16 @@ func (p *Provider) Export(ctx context.Context, req memory.ExportRequest, sink me
 	if err != nil {
 		return memory.ExportReport{}, err
 	}
-	report := memory.ExportReport{Completed: true}
+	report := memory.ExportReport{}
 	for offset := 0; ; {
 		var entries []listEntry
 		query := url.Values{"uri": {p.root}, "offset": {fmt.Sprint(offset)}, "limit": {"100"}, "sort_by": {"name"}, "sort_order": {"asc"}}
 		var more bool
 		if err := p.call(ctx, http.MethodGet, "/api/v1/fs/ls", query, nil, &entries, &more); err != nil {
 			if isNotFound(err) {
-				return report, nil
+				return completeExport(report, bounded)
 			}
-			report.Completed = false
-			return report, err
+			return incompleteExport(report, bounded, err)
 		}
 		for _, entry := range entries {
 			if entry.IsDir || !p.isRecordURI(entry.URI) {
@@ -40,8 +39,7 @@ func (p *Provider) Export(ctx context.Context, req memory.ExportRequest, sink me
 			}
 			doc, ok, err := p.readDocument(ctx, entry.URI)
 			if err != nil {
-				report.Completed = false
-				return report, err
+				return incompleteExport(report, bounded, err)
 			}
 			if !ok {
 				continue
@@ -51,10 +49,8 @@ func (p *Provider) Export(ctx context.Context, req memory.ExportRequest, sink me
 				transfer.Payload = memory.Reader(bytes.NewReader(doc.payload()))
 			}
 			if err := bounded.Put(ctx, transfer); err != nil {
-				report.Completed = false
 				report.Failures = append(report.Failures, memory.TransferFailure{Reference: doc.Record.Reference(), Reason: err.Error()})
-				report.Records, report.Bytes = bounded.Usage()
-				return report, err
+				return incompleteExport(report, bounded, err)
 			}
 		}
 		if !more || len(entries) == 0 {
@@ -62,8 +58,19 @@ func (p *Provider) Export(ctx context.Context, req memory.ExportRequest, sink me
 		}
 		offset += len(entries)
 	}
+	return completeExport(report, bounded)
+}
+
+func completeExport(report memory.ExportReport, bounded *memory.BoundedExportSink) (memory.ExportReport, error) {
+	report.Completed = true
 	report.Records, report.Bytes = bounded.Usage()
 	return report, nil
+}
+
+func incompleteExport(report memory.ExportReport, bounded *memory.BoundedExportSink, err error) (memory.ExportReport, error) {
+	report.Completed = false
+	report.Records, report.Bytes = bounded.Usage()
+	return report, err
 }
 
 func (p *Provider) Import(ctx context.Context, req memory.ImportRequest, source memory.ImportSource) (memory.ImportReport, error) {
