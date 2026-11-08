@@ -32,6 +32,25 @@ installable NeonDoll modules, and no compiled-in provider registry is added.
 Supported submitted content is UTF-8 `text/plain` and valid
 `application/json`, using inline or bounded stream transport.
 
+## Memory portability, not database replication
+
+Export describes the information the source provider retained at export time.
+Import submits that portable representation to the destination provider's
+normal native retention process. Hindsight may extract different facts,
+consolidate them, reinterpret the representation, retain nothing, or reject it.
+Repeated migrations may therefore produce different retained representations.
+
+Portable record identity, revision, and provenance remain distinct from the
+provider's internal memory representation and are preserved where Hindsight's
+document metadata supports them. A successful destination transformation is
+reported as `ImportTransformed`; a subjective refusal is `ImportRejected`;
+authentication, timeout, cancellation, protocol, and storage failures stop the
+import as operational errors with an incomplete partial report.
+
+This is memory portability: remembered information is transferred for another
+provider to assimilate. It is not database replication and promises neither
+byte-for-byte restoration nor semantic equivalence with the source bank.
+
 ## Consistency and limitations
 
 - Replay identity is durable and record-scoped while its Hindsight document

@@ -36,9 +36,24 @@ func TestStreamRememberExportImportAndBounds(t *testing.T) {
 	}
 
 	target := openTestProvider(t, fake, "target")
+	fake.nextContext = "destination assimilation"
 	importReport, err := target.Import(context.Background(), memory.ImportRequest{MaxRecords: 10, MaxBytes: 1 << 20}, &sliceSource{transfers: sink.transfers, payloads: sink.payloads})
 	if err != nil || !importReport.Completed || len(importReport.Outcomes) != 1 || importReport.Outcomes[0].Disposition != memory.ImportTransformed {
 		t.Fatalf("import = %#v, %v", importReport, err)
+	}
+	if importReport.Outcomes[0].Retained == nil || *importReport.Outcomes[0].Retained != record.Reference() {
+		t.Fatalf("imported identity = %#v, want %#v", importReport.Outcomes[0].Retained, record.Reference())
+	}
+	destination, err := target.Recall(context.Background(), memory.RecallRequest{Query: "Neon", Limit: 1})
+	if err != nil || len(destination.Matches) != 1 {
+		t.Fatalf("destination Recall = %#v, %v", destination, err)
+	}
+	destinationRecord := destination.Matches[0].Record
+	if destinationRecord.ID != record.ID || destinationRecord.Revision != record.Revision || destinationRecord.Source != record.Source {
+		t.Fatalf("destination identity/provenance = %#v, want %#v", destinationRecord, record)
+	}
+	if bytes.Equal(destinationRecord.Content.Data, sink.transfers[0].Record.Content.Data) {
+		t.Fatal("destination unexpectedly claimed an identical retained representation")
 	}
 
 	limited := &collectSink{}
@@ -55,12 +70,28 @@ func TestImportOperationalFailureStopsWithPartialReport(t *testing.T) {
 	source := &sliceSource{transfers: []memory.Transfer{{Record: testRecord("one", 1, "one")}, {Record: testRecord("two", 1, "two")}}}
 	fake.failRetainAfter = 1
 	report, err := provider.Import(context.Background(), memory.ImportRequest{MaxRecords: 10, MaxBytes: 1 << 20}, source)
-	if err == nil || report.Completed || report.Records != 2 || len(report.Outcomes) != 1 {
+	if err == nil || report.Completed || report.Records != 2 || len(report.Outcomes) != 1 || report.Outcomes[0].Disposition != memory.ImportTransformed {
 		t.Fatalf("partial import = %#v, %v", report, err)
 	}
 	result, recallErr := provider.Recall(context.Background(), memory.RecallRequest{Query: "one", Limit: 10})
 	if recallErr != nil || len(result.Matches) != 1 {
 		t.Fatalf("retained prefix = %#v, %v", result, recallErr)
+	}
+}
+
+func TestImportSubjectiveRejectionIsNotOperationalFailure(t *testing.T) {
+	fake := newFakeHindsight("")
+	defer fake.close()
+	provider := openTestProvider(t, fake, "doll")
+	record := testRecord("image", 1, "unused")
+	record.Content = memory.Content{MediaType: "image/png", Transport: memory.TransportStream}
+	payload := []byte{0x89, 'P', 'N', 'G'}
+	size := int64(len(payload))
+	record.Content.Size = &size
+	report, err := provider.Import(context.Background(), memory.ImportRequest{MaxRecords: 2, MaxBytes: 1 << 20},
+		&sliceSource{transfers: []memory.Transfer{{Record: record}}, payloads: [][]byte{payload}})
+	if err != nil || !report.Completed || len(report.Outcomes) != 1 || report.Outcomes[0].Disposition != memory.ImportRejected {
+		t.Fatalf("rejected import = %#v, %v", report, err)
 	}
 }
 
