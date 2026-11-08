@@ -352,6 +352,7 @@ func (executor *ToolExecutor) HandlePermissionResolution(ctx context.Context, re
 	tool := &inference.Tool{Name: claimed.Action, CapabilityID: claimed.Capability, OperationID: claimed.Operation}
 	result := executor.executeCall(ctx, cognitiveexecution.ToolCorrelation{
 		SessionID: session.ID(claimed.Correlation.SessionID), TurnID: session.TurnID(claimed.Correlation.TurnID), CognitiveRunID: claimed.Correlation.CognitiveRunID, IntentionID: claimed.Correlation.IntentionID,
+		OperationStartedAt: claimed.CreatedAt,
 	}, inference.ToolCall{ID: callID, Name: tool.Name, Arguments: arguments}, tool, true)
 	if result.Error != nil && (result.Error.Code == "no_eligible_body" || result.Error.Code == "unavailable") {
 		_, releaseErr := executor.requests.ReleaseContinuation(ctx, claimed.ID)

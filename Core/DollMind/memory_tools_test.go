@@ -14,6 +14,7 @@ import (
 	"github.com/Neon-Dolls/neondoll/Core/Config"
 	"github.com/Neon-Dolls/neondoll/Core/Inference"
 	memory "github.com/Neon-Dolls/neondoll/Core/Memory"
+	sqlitememory "github.com/Neon-Dolls/neondoll/Core/Memory/SQLite"
 	"github.com/Neon-Dolls/neondoll/Core/Pulse"
 	"github.com/Neon-Dolls/neondoll/DollLink/Events"
 	dollstate "github.com/Neon-Dolls/neondoll/DollState"
@@ -122,7 +123,7 @@ func TestMemoryRememberReportsStoredTransformedAndRejected(t *testing.T) {
 				return memory.RememberResult{Outcome: memory.RememberStored, Retained: &retained}, nil
 			}}
 			executor := memoryExecutor(provider)
-			result := executor.ExecuteCorrelatedCall(context.Background(), cognitiveexecution.ToolCorrelation{CognitiveRunID: "run-1", IntentionID: "intention-1"}, inference.ToolCall{ID: "remember-1", Name: "core.memory__remember", Arguments: map[string]any{"content": "I prefer jasmine tea", "media_type": "text/plain", "kind": "preference", "subject": "tea"}}, memoryTool(t, executor, memoryOperationRemember))
+			result := executor.ExecuteCorrelatedCall(context.Background(), cognitiveexecution.ToolCorrelation{CognitiveRunID: "run-1", IntentionID: "intention-1", OperationStartedAt: time.Unix(200, 0).UTC()}, inference.ToolCall{ID: "remember-1", Name: "core.memory__remember", Arguments: map[string]any{"content": "I prefer jasmine tea", "media_type": "text/plain", "kind": "preference", "subject": "tea"}}, memoryTool(t, executor, memoryOperationRemember))
 			if result.Status != inference.ToolResultSuccess || result.Result["outcome"] != test.want {
 				t.Fatalf("result = %+v", result)
 			}
@@ -130,6 +131,64 @@ func TestMemoryRememberReportsStoredTransformedAndRejected(t *testing.T) {
 				t.Fatalf("remember request = %+v", provider.remembered)
 			}
 		})
+	}
+}
+
+func TestRememberCorrelationProducesStableReplayEnvelope(t *testing.T) {
+	provider := &fakeMemoryProvider{}
+	executor := memoryExecutor(provider)
+	startedAt := time.Unix(500, 123).UTC()
+	correlation := cognitiveexecution.ToolCorrelation{SessionID: "session", TurnID: "turn", CognitiveRunID: "run", OperationStartedAt: startedAt}
+	call := inference.ToolCall{ID: "remember-one", Arguments: map[string]any{"content": "stable memory", "media_type": "text/plain", "kind": "experience"}}
+	tool := memoryTool(t, executor, memoryOperationRemember)
+	first := executor.ExecuteCorrelatedCall(context.Background(), correlation, call, tool)
+	second := executor.ExecuteCorrelatedCall(context.Background(), correlation, call, tool)
+	if first.Status != inference.ToolResultSuccess || second.Status != inference.ToolResultSuccess || len(provider.remembered) != 2 {
+		t.Fatalf("first=%+v second=%+v requests=%d", first, second, len(provider.remembered))
+	}
+	firstEnvelope, _ := memory.EncodeRecord(provider.remembered[0].Record)
+	secondEnvelope, _ := memory.EncodeRecord(provider.remembered[1].Record)
+	if string(firstEnvelope) != string(secondEnvelope) || provider.remembered[0].ReplayKey != provider.remembered[1].ReplayKey {
+		t.Fatalf("replay changed:\n%s\n%s", firstEnvelope, secondEnvelope)
+	}
+	if !provider.remembered[0].Record.CreatedAt.Equal(startedAt) {
+		t.Fatalf("created_at = %v, want %v", provider.remembered[0].Record.CreatedAt, startedAt)
+	}
+
+	distinct := call
+	distinct.ID = "remember-two"
+	executor.ExecuteCorrelatedCall(context.Background(), correlation, distinct, tool)
+	if provider.remembered[2].Record.ID == provider.remembered[0].Record.ID || provider.remembered[2].ReplayKey == provider.remembered[0].ReplayKey {
+		t.Fatalf("distinct operation reused identity: %+v", provider.remembered)
+	}
+	laterCorrelation := correlation
+	laterCorrelation.OperationStartedAt = startedAt.Add(time.Second)
+	executor.ExecuteCorrelatedCall(context.Background(), laterCorrelation, call, tool)
+	if provider.remembered[3].Record.ID == provider.remembered[0].Record.ID || provider.remembered[3].ReplayKey == provider.remembered[0].ReplayKey {
+		t.Fatalf("separate execution reused identity: %+v", provider.remembered)
+	}
+}
+
+func TestRememberReplayAgainstSQLiteAndChangedPayloadConflict(t *testing.T) {
+	provider, err := sqlitememory.Open(sqlitememory.Config{Path: t.TempDir() + "/memory.db", DollID: "doll"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = provider.Close() })
+	executor := memoryExecutor(provider)
+	correlation := cognitiveexecution.ToolCorrelation{CognitiveRunID: "run", OperationStartedAt: time.Unix(900, 0).UTC()}
+	tool := memoryTool(t, executor, memoryOperationRemember)
+	call := inference.ToolCall{ID: "remember", Arguments: map[string]any{"content": "original", "media_type": "text/plain", "kind": "experience"}}
+	if result := executor.ExecuteCorrelatedCall(context.Background(), correlation, call, tool); result.Status != inference.ToolResultSuccess {
+		t.Fatalf("first = %+v", result)
+	}
+	if result := executor.ExecuteCorrelatedCall(context.Background(), correlation, call, tool); result.Status != inference.ToolResultSuccess {
+		t.Fatalf("replay = %+v", result)
+	}
+	call.Arguments = map[string]any{"content": "changed", "media_type": "text/plain", "kind": "experience"}
+	result := executor.ExecuteCorrelatedCall(context.Background(), correlation, call, tool)
+	if result.Status != inference.ToolResultFailure || result.Error == nil || !strings.Contains(result.Error.Message, memory.ErrConflict.Error()) {
+		t.Fatalf("changed replay = %+v", result)
 	}
 }
 

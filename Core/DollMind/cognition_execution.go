@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/Neon-Dolls/neondoll/Core/CognitiveExecution"
 	contextbuilder "github.com/Neon-Dolls/neondoll/Core/ContextBuilder"
@@ -58,6 +59,7 @@ func (s *Scheduler) NotifyPermissionResolution(ctx context.Context, notification
 // multi-step execution engine. The selected task model remains fixed, while
 // messages are reconstructed from the run before every provider invocation.
 func (s *Scheduler) executeCognition(ctx context.Context, run *cognitionRunExecution, selected taskModel, purpose inference.Purpose, temperature float64, instructions ...string) (*inference.Response, error) {
+	operationStartedAt := time.Now().UTC()
 	baseWorking := run.snapshotWorking()
 	baseExchanges := run.snapshotToolExchanges()
 	var toolExecutor cognitiveexecution.ToolExecutor
@@ -71,6 +73,7 @@ func (s *Scheduler) executeCognition(ctx context.Context, run *cognitionRunExecu
 		Temperature:        temperature,
 		CognitiveRunID:     run.id,
 		IntentionID:        run.intention(),
+		OperationStartedAt: operationStartedAt,
 		ToolExecutor:       toolExecutor,
 		MaxToolCalls:       ToolCallLimit,
 		BuildContext: func(ctx context.Context, state cognitiveexecution.ContextState) ([]inference.Message, error) {

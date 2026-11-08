@@ -163,10 +163,12 @@ func (executor *ToolExecutor) memoryRecord(correlation cognitiveexecution.ToolCo
 		parsed = parsed.UTC()
 		experiencedAt = &parsed
 	}
+	if correlation.OperationStartedAt.IsZero() {
+		return memory.Record{}, "", errors.New("cognitive operation timestamp is unavailable")
+	}
 	provenance := memoryProvenance(correlation, call.ID)
 	digest := sha256.Sum256([]byte(executor.dollID + "\x00" + provenance))
-	now := time.Now().UTC()
-	record := memory.Record{SchemaVersion: memory.SchemaVersion, ID: "memory-" + hex.EncodeToString(digest[:16]), Revision: 1, CreatedAt: now,
+	record := memory.Record{SchemaVersion: memory.SchemaVersion, ID: "memory-" + hex.EncodeToString(digest[:16]), Revision: 1, CreatedAt: correlation.OperationStartedAt.UTC(),
 		ExperiencedAt: experiencedAt, Source: memory.Source{Type: "cognition", Ref: provenance},
 		Content:  memory.Content{MediaType: mediaType, Transport: memory.TransportInline, Data: encoded},
 		Metadata: memory.Metadata{Kind: kind, Subject: stringArgument(call.Arguments["subject"]), Tags: tags}}
@@ -177,7 +179,7 @@ func (executor *ToolExecutor) memoryRecord(correlation cognitiveexecution.ToolCo
 }
 
 func memoryProvenance(correlation cognitiveexecution.ToolCorrelation, callID string) string {
-	return fmt.Sprintf("session:%s/turn:%s/run:%s/intention:%s/tool:%s", correlation.SessionID, correlation.TurnID, correlation.CognitiveRunID, correlation.IntentionID, callID)
+	return fmt.Sprintf("session:%s/turn:%s/run:%s/intention:%s/operation:%s/tool:%s", correlation.SessionID, correlation.TurnID, correlation.CognitiveRunID, correlation.IntentionID, correlation.OperationStartedAt.UTC().Format(time.RFC3339Nano), callID)
 }
 
 func memoryLimit(value any) (uint32, error) {

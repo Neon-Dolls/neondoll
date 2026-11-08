@@ -87,6 +87,7 @@ func New(store persistence.Store, provider inference.Provider, log *logger.Logge
 }
 
 func (s *Service) handleInteraction(ctx context.Context, sessionID session.ID, turnID session.TurnID, event *events.Event) (*events.Event, error) {
+	operationStartedAt := time.Now().UTC()
 	if event == nil {
 		return nil, fmt.Errorf("interaction turn %s: nil event", turnID)
 	}
@@ -126,6 +127,7 @@ func (s *Service) handleInteraction(ctx context.Context, sessionID session.ID, t
 		Temperature:        0.7,
 		TurnID:             turnID,
 		SessionID:          sessionID,
+		OperationStartedAt: operationStartedAt,
 		ToolExecutor:       s.toolExecutor,
 		MaxToolCalls:       cognitiveexecution.DefaultToolCallLimit,
 		BuildContext: func(ctx context.Context, execution cognitiveexecution.ContextState) ([]inference.Message, error) {

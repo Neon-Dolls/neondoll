@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/Neon-Dolls/neondoll/Core/Config"
 	"github.com/Neon-Dolls/neondoll/Core/Inference"
@@ -44,10 +45,11 @@ type ToolExecutor interface {
 }
 
 type ToolCorrelation struct {
-	SessionID      session.ID
-	TurnID         session.TurnID
-	CognitiveRunID string
-	IntentionID    string
+	SessionID          session.ID
+	TurnID             session.TurnID
+	CognitiveRunID     string
+	IntentionID        string
+	OperationStartedAt time.Time
 }
 
 // CorrelatedToolExecutor receives explicit Core lifecycle identities. The
@@ -66,6 +68,7 @@ type Request struct {
 	SessionID          session.ID
 	CognitiveRunID     string
 	IntentionID        string
+	OperationStartedAt time.Time
 	BuildContext       ContextBuilder
 	ToolExecutor       ToolExecutor
 	MaxToolCalls       int
@@ -109,6 +112,12 @@ func Execute(ctx context.Context, request Request) (*Result, error) {
 		for index := range tools {
 			toolMap[tools[index].Name] = &tools[index]
 		}
+	}
+	operationStartedAt := request.OperationStartedAt
+	if operationStartedAt.IsZero() {
+		operationStartedAt = time.Now().UTC()
+	} else {
+		operationStartedAt = operationStartedAt.UTC()
 	}
 
 	for {
@@ -160,6 +169,7 @@ func Execute(ctx context.Context, request Request) (*Result, error) {
 			if correlated, ok := request.ToolExecutor.(CorrelatedToolExecutor); ok {
 				result = correlated.ExecuteCorrelatedCall(ctx, ToolCorrelation{
 					SessionID: request.SessionID, TurnID: request.TurnID, CognitiveRunID: request.CognitiveRunID, IntentionID: request.IntentionID,
+					OperationStartedAt: operationStartedAt,
 				}, call, toolMap[call.Name])
 			} else {
 				result = request.ToolExecutor.ExecuteCall(ctx, call, toolMap[call.Name])

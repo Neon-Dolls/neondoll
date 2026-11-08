@@ -16,7 +16,10 @@ content, source, and metadata when the provider supplies them.
 
 `core.memory__remember` lets the Doll offer text or JSON information that it
 considers meaningful. Core supplies a stable correlation-derived record ID,
-revision 1, creation time, and cognition provenance. The model supplies the
+revision 1, creation time, and cognition provenance. The real start time of the
+bounded cognitive execution is carried with its tool correlation, so retrying
+the same logical call reproduces the same record envelope and replay key while
+separate executions remain distinct. The model supplies the
 content and subjective metadata. The provider may report `stored`,
 `transformed`, or `rejected`; all three are successful subjective decisions,
 while transport and provider failures are tool failures. Core never claims
