@@ -13,12 +13,18 @@ installable NeonDoll modules, and no compiled-in provider registry is added.
 - A portable record is retained as a Hindsight document with a stable,
   record-derived `document_id`. Its portable identity, revision, provenance,
   digest, and record-scoped replay history live in Hindsight document metadata.
-- Hindsight's extracted memory units are authoritative. If they differ from the
-  submitted content, `Remember` returns `transformed` with a portable JSON view
-  of those units. It does not claim the original was retained unchanged.
+- Hindsight's extracted memory units are authoritative. `Remember`
+  conservatively returns `transformed` with a portable JSON view of those
+  units, even when one unit has identical text: the public API does not prove
+  that context, tags, classification, temporal fields, and extraction state
+  are all equivalent to the submitted portable representation.
 - `Recall` uses Hindsight's native semantic/keyword/graph/temporal retrieval.
-  Portable kind and source filters are applied to the bounded returned set, so
-  filtered recall is approximate rather than exhaustive.
+  It resolves each unique native document at most once, preserves first-match
+  relevance order, and returns one portable record with the original NeonDoll
+  identity and provenance for all matching units from that document. Portable
+  kind and source filters are applied to this bounded set, so filtered recall
+  is approximate rather than exhaustive. Missing identity metadata is an
+  explicit error and is never replaced with fabricated identity.
 - `Export` pages through tagged Hindsight documents and exports the current
   native retained view. It does not export a Core-side copy. Import uses normal
   retain semantics and may transform records again.
@@ -29,7 +35,12 @@ Supported submitted content is UTF-8 `text/plain` and valid
 ## Consistency and limitations
 
 - Replay identity is durable and record-scoped while its Hindsight document
-  metadata remains available. There is no cross-record replay uniqueness.
+  metadata remains available. At most 128 replay keys are retained per record
+  by default. Existing keys are never evicted; a new key is explicitly rejected
+  at the configured limit before the document is changed. Hindsight does not
+  document an upstream byte limit for item metadata, so the adapter uses this
+  conservative count bound in addition to its HTTP/payload limits. There is no
+  cross-record replay uniqueness.
 - Revision checks are serialized only within one adapter instance. Deploy one
   active writer per Doll bank; Hindsight's public document upsert API does not
   expose compare-and-swap.
@@ -46,8 +57,8 @@ portable reflection method nor cognition wiring.
 ## Configuration and live test
 
 Configure an endpoint, optional bearer token, Doll ID, namespace, request
-timeout, payload bounds, recall token bound, listing page size, and a
-per-document memory-unit bound. The bank
+timeout, payload bounds, recall token and document-lookup bounds, listing page
+size, per-document memory-unit bound, and replay-key bound. The bank
 must already exist and be configured by the operator; the adapter never changes
 its mission or extraction mode.
 

@@ -28,6 +28,8 @@ const (
 	DefaultRecallTokens               = 4096
 	DefaultPageSize                   = 100
 	DefaultMaxDocumentMemories        = 1000
+	DefaultMaxReplayKeys              = 128
+	DefaultMaxRecallDocuments         = 100
 )
 
 type Config struct {
@@ -36,6 +38,7 @@ type Config struct {
 	MaxInlineBytes, MaxStreamBytes     uint64
 	MaxRecallTokens, PageSize          int
 	MaxDocumentMemories                int
+	MaxReplayKeys, MaxRecallDocuments  int
 	HTTPClient                         *http.Client
 }
 
@@ -46,6 +49,8 @@ type Provider struct {
 	maxInline, maxStream      uint64
 	maxRecallTokens, pageSize int
 	maxDocumentMemories       int
+	maxReplayKeys             int
+	maxRecallDocuments        int
 	mu                        sync.Mutex
 	closeOnce                 sync.Once
 	closed                    atomic.Bool
@@ -69,7 +74,7 @@ func Open(cfg Config) (*Provider, error) {
 		return nil, fmt.Errorf("%w: invalid namespace", memory.ErrInvalidRequest)
 	}
 	applyDefaults(&cfg)
-	if cfg.MaxRecallTokens <= 0 || cfg.PageSize <= 0 || cfg.MaxDocumentMemories <= 0 {
+	if cfg.MaxRecallTokens <= 0 || cfg.PageSize <= 0 || cfg.MaxDocumentMemories <= 0 || cfg.MaxReplayKeys < 0 || cfg.MaxRecallDocuments <= 0 {
 		return nil, fmt.Errorf("%w: provider resource limits must be positive", memory.ErrInvalidRequest)
 	}
 	sum := sha256.Sum256([]byte(cfg.DollID))
@@ -81,7 +86,8 @@ func Open(cfg Config) (*Provider, error) {
 	return &Provider{endpoint: cfg.Endpoint, token: cfg.Token, bankID: bankID,
 		client: client, timeout: cfg.Timeout, maxInline: cfg.MaxInlineBytes,
 		maxStream: cfg.MaxStreamBytes, maxRecallTokens: cfg.MaxRecallTokens,
-		pageSize: cfg.PageSize, maxDocumentMemories: cfg.MaxDocumentMemories}, nil
+		pageSize: cfg.PageSize, maxDocumentMemories: cfg.MaxDocumentMemories,
+		maxReplayKeys: cfg.MaxReplayKeys, maxRecallDocuments: cfg.MaxRecallDocuments}, nil
 }
 
 func applyDefaults(cfg *Config) {
@@ -102,6 +108,12 @@ func applyDefaults(cfg *Config) {
 	}
 	if cfg.MaxDocumentMemories == 0 {
 		cfg.MaxDocumentMemories = DefaultMaxDocumentMemories
+	}
+	if cfg.MaxReplayKeys == 0 {
+		cfg.MaxReplayKeys = DefaultMaxReplayKeys
+	}
+	if cfg.MaxRecallDocuments == 0 {
+		cfg.MaxRecallDocuments = DefaultMaxRecallDocuments
 	}
 }
 

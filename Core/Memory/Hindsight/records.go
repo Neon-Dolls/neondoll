@@ -30,17 +30,28 @@ type document struct {
 	DocumentMetadata map[string]any `json:"document_metadata"`
 }
 type memoryUnit struct {
-	ID            string         `json:"id"`
-	Text          string         `json:"text"`
-	Context       string         `json:"context"`
-	FactType      string         `json:"fact_type"`
-	DocumentID    string         `json:"document_id"`
-	MentionedAt   string         `json:"mentioned_at"`
-	OccurredStart string         `json:"occurred_start"`
-	OccurredEnd   string         `json:"occurred_end"`
-	UpdatedAt     string         `json:"updated_at"`
-	Tags          []string       `json:"tags"`
-	Metadata      map[string]any `json:"metadata"`
+	ID                    string         `json:"id"`
+	Text                  string         `json:"text"`
+	Context               string         `json:"context"`
+	Date                  string         `json:"date"`
+	FactType              string         `json:"fact_type"`
+	DocumentID            string         `json:"document_id"`
+	Entities              string         `json:"entities"`
+	ChunkID               string         `json:"chunk_id"`
+	ProofCount            int            `json:"proof_count"`
+	MentionedAt           string         `json:"mentioned_at"`
+	OccurredStart         string         `json:"occurred_start"`
+	OccurredEnd           string         `json:"occurred_end"`
+	ConsolidatedAt        string         `json:"consolidated_at"`
+	ConsolidationFailedAt string         `json:"consolidation_failed_at"`
+	State                 string         `json:"state"`
+	InvalidationReason    string         `json:"invalidation_reason"`
+	InvalidatedAt         string         `json:"invalidated_at"`
+	EditedAt              string         `json:"edited_at"`
+	UpdatedAt             string         `json:"updated_at"`
+	Tags                  []string       `json:"tags"`
+	SourceMemoryIDs       []string       `json:"source_memory_ids"`
+	Metadata              map[string]any `json:"metadata"`
 }
 type listMemories struct {
 	Items  []memoryUnit `json:"items"`
@@ -83,6 +94,9 @@ func (p *Provider) Remember(ctx context.Context, req memory.RememberRequest) (me
 			}
 			return p.replayResult(ctx, doc, state, req.Record)
 		}
+		if req.ReplayKey != "" && len(state.Replays) >= p.maxReplayKeys {
+			return rejected(fmt.Sprintf("replay-key limit of %d reached", p.maxReplayKeys)), nil
+		}
 		disposition, compareErr := memory.CompareImportRevision(state.Record, req.Record)
 		if compareErr != nil {
 			return memory.RememberResult{}, compareErr
@@ -91,7 +105,12 @@ func (p *Provider) Remember(ctx context.Context, req memory.RememberRequest) (me
 			if state.Digest != digest {
 				return memory.RememberResult{}, memory.ErrConflict
 			}
-			return p.retainedResult(ctx, doc, state, req.Record, content)
+			if req.ReplayKey == "" {
+				return p.retainedResult(ctx, doc, state, req.Record)
+			}
+			// Hindsight does not expose a metadata-only document update. Re-retain
+			// the identical source through its native document upsert so the new
+			// replay identity is durable rather than acknowledging an ephemeral key.
 		}
 	}
 	state.Record, state.Digest = req.Record, digest
@@ -104,6 +123,9 @@ func (p *Provider) Remember(ctx context.Context, req memory.RememberRequest) (me
 	encodedState, err := encodeState(state)
 	if err != nil {
 		return memory.RememberResult{}, err
+	}
+	if uint64(len(encodedState)) > p.maxInline {
+		return rejected("retained replay metadata exceeds the configured provider limit"), nil
 	}
 	metadata := map[string]string{stateKey: string(encodedState), "neondoll_source_type": req.Record.Source.Type,
 		"neondoll_kind": req.Record.Metadata.Kind}
@@ -131,39 +153,33 @@ func (p *Provider) Remember(ctx context.Context, req memory.RememberRequest) (me
 	if !found {
 		return memory.RememberResult{}, fmt.Errorf("%w: retained document missing", memory.ErrUnavailable)
 	}
-	return p.retainedResult(ctx, doc, state, req.Record, content)
+	return p.retainedResult(ctx, doc, state, req.Record)
 }
 
 func (p *Provider) replayResult(ctx context.Context, doc document, state retainedState, submitted memory.Record) (memory.RememberResult, error) {
 	if submitted.Revision != state.Record.Revision {
 		return rejected(fmt.Sprintf("replay recognized for revision %d, but retained revision %d has superseded it", submitted.Revision, state.Record.Revision)), nil
 	}
-	return p.retainedResult(ctx, doc, state, submitted, doc.OriginalText)
+	return p.retainedResult(ctx, doc, state, submitted)
 }
 
-func (p *Provider) retainedResult(ctx context.Context, doc document, state retainedState, submitted memory.Record, submittedText string) (memory.RememberResult, error) {
+func (p *Provider) retainedResult(ctx context.Context, doc document, state retainedState, submitted memory.Record) (memory.RememberResult, error) {
 	units, err := p.listDocumentMemories(ctx, doc.ID)
 	if err != nil {
 		return memory.RememberResult{}, err
 	}
-	retained, exact, err := retainedRecord(state.Record, submittedText, units)
+	retained, err := retainedRecord(state.Record, units)
 	if err != nil {
 		return memory.RememberResult{}, err
 	}
-	result := memory.RememberResult{Outcome: memory.RememberStored, Retained: &retained}
-	if !exact {
-		result.Outcome = memory.RememberTransformed
-		result.Transformation = &memory.Transformation{Kind: "hindsight-native-extraction",
-			Description:   "Hindsight retained extracted memory units rather than the submitted representation",
-			FromMediaType: submitted.Content.MediaType, ToMediaType: retained.Content.MediaType}
-	}
+	result := memory.RememberResult{Outcome: memory.RememberTransformed, Retained: &retained,
+		Transformation: &memory.Transformation{Kind: "hindsight-native-extraction",
+			Description:   "Hindsight retained a provider-native extracted representation; exact portable equivalence cannot be established",
+			FromMediaType: submitted.Content.MediaType, ToMediaType: retained.Content.MediaType}}
 	return result, result.Validate()
 }
 
-func retainedRecord(base memory.Record, submittedText string, units []memoryUnit) (memory.Record, bool, error) {
-	if len(units) == 1 && units[0].Text == submittedText {
-		return base, true, nil
-	}
+func retainedRecord(base memory.Record, units []memoryUnit) (memory.Record, error) {
 	portable := make([]memoryUnit, len(units))
 	for index, unit := range units {
 		portable[index] = unit
@@ -180,14 +196,14 @@ func retainedRecord(base memory.Record, submittedText string, units []memoryUnit
 	}{"hindsight", portable}
 	data, err := json.Marshal(view)
 	if err != nil {
-		return memory.Record{}, false, err
+		return memory.Record{}, err
 	}
 	base.Content = memory.Content{MediaType: "application/json", Transport: memory.TransportInline, Data: data}
 	if base.Metadata.Extensions == nil {
 		base.Metadata.Extensions = map[string]json.RawMessage{}
 	}
 	base.Metadata.Extensions["hindsight.retained"] = json.RawMessage(`true`)
-	return base, false, base.Validate()
+	return base, base.Validate()
 }
 
 func documentID(id string) string {

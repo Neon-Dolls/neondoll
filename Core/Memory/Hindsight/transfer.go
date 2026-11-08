@@ -1,7 +1,6 @@
 package hindsight
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -50,15 +49,11 @@ func (p *Provider) Export(ctx context.Context, req memory.ExportRequest, sink me
 			if err != nil {
 				return exportFailed(report, bounded, err)
 			}
-			retained, _, err := retainedRecord(state.Record, doc.OriginalText, units)
+			retained, err := retainedRecord(state.Record, units)
 			if err != nil {
 				return exportFailed(report, bounded, err)
 			}
-			transfer := memory.Transfer{Record: retained}
-			if retained.Content.Transport == memory.TransportStream {
-				transfer.Payload = memory.Reader(bytes.NewReader([]byte(doc.OriginalText)))
-			}
-			if err := bounded.Put(ctx, transfer); err != nil {
+			if err := bounded.Put(ctx, memory.Transfer{Record: retained}); err != nil {
 				report.Failures = append(report.Failures, memory.TransferFailure{Reference: retained.Reference(), Reason: err.Error()})
 				return exportFailed(report, bounded, err)
 			}

@@ -2,10 +2,9 @@ package hindsight
 
 import (
 	"context"
-	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
-	"time"
 
 	memory "github.com/Neon-Dolls/neondoll/Core/Memory"
 )
@@ -39,10 +38,39 @@ func (p *Provider) Recall(ctx context.Context, req memory.RecallRequest) (memory
 		return memory.RecallResult{}, err
 	}
 	result := memory.RecallResult{}
+	seenDocuments := make(map[string]struct{})
 	for _, item := range response.Results {
-		record := recallRecord(item)
-		if !kindAllowed(req.Kinds, record.Metadata.Kind) || !sourceAllowed(req.SourceTypes, record.Source.Type) {
+		if item.DocumentID == "" {
+			return memory.RecallResult{}, fmt.Errorf("%w: recalled Hindsight unit lacks document identity", memory.ErrInvalidResult)
+		}
+		if _, duplicate := seenDocuments[item.DocumentID]; duplicate {
 			continue
+		}
+		if len(seenDocuments) == p.maxRecallDocuments {
+			return memory.RecallResult{}, fmt.Errorf("%w: recall document lookup limit", memory.ErrTransferLimit)
+		}
+		seenDocuments[item.DocumentID] = struct{}{}
+		doc, found, err := p.getDocument(ctx, item.DocumentID)
+		if err != nil {
+			return memory.RecallResult{}, err
+		}
+		if !found {
+			return memory.RecallResult{}, fmt.Errorf("%w: recalled Hindsight document is unavailable", memory.ErrInvalidResult)
+		}
+		state, err := decodeState(doc)
+		if err != nil {
+			return memory.RecallResult{}, err
+		}
+		if !kindAllowed(req.Kinds, state.Record.Metadata.Kind) || !sourceAllowed(req.SourceTypes, state.Record.Source.Type) {
+			continue
+		}
+		units, err := p.listDocumentMemories(ctx, item.DocumentID)
+		if err != nil {
+			return memory.RecallResult{}, err
+		}
+		record, err := retainedRecord(state.Record, units)
+		if err != nil {
+			return memory.RecallResult{}, err
 		}
 		result.Matches = append(result.Matches, memory.RecallMatch{Reference: record.Reference(), Record: &record})
 		if len(result.Matches) == int(req.Limit) {
@@ -50,44 +78,6 @@ func (p *Provider) Recall(ctx context.Context, req memory.RecallRequest) (memory
 		}
 	}
 	return result, result.Validate(req)
-}
-
-func recallRecord(item recallItem) memory.Record {
-	created := parseTime(item.MentionedAt, item.OccurredStart, item.OccurredEnd)
-	sourceType := "hindsight"
-	if value := item.Metadata["neondoll_source_type"]; value != "" {
-		sourceType = value
-	}
-	kind := item.Type
-	if value := item.Metadata["neondoll_kind"]; value != "" {
-		kind = value
-	}
-	if kind == "" {
-		kind = "retained-memory"
-	}
-	data, _ := json.Marshal(item.Text)
-	extensions := map[string]json.RawMessage{}
-	if item.DocumentID != "" {
-		encoded, _ := json.Marshal(item.DocumentID)
-		extensions["hindsight.document_id"] = encoded
-	}
-	sourceRef := item.DocumentID
-	if sourceType == "unknown" {
-		sourceRef = ""
-	}
-	return memory.Record{SchemaVersion: memory.SchemaVersion, ID: item.ID, Revision: 1,
-		CreatedAt: created, Source: memory.Source{Type: sourceType, Ref: sourceRef},
-		Content:  memory.Content{MediaType: "text/plain", Transport: memory.TransportInline, Data: data},
-		Metadata: memory.Metadata{Kind: kind, Tags: item.Tags, Extensions: extensions}}
-}
-
-func parseTime(values ...string) time.Time {
-	for _, value := range values {
-		if parsed, err := time.Parse(time.RFC3339Nano, value); err == nil {
-			return parsed
-		}
-	}
-	return time.Unix(0, 0).UTC()
 }
 func sourceAllowed(filters []string, value string) bool {
 	return len(filters) == 0 || contains(filters, value)

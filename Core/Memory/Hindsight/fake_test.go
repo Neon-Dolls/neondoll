@@ -22,6 +22,10 @@ type fakeHindsight struct {
 	failRetainAfter      int
 	retainCount          int
 	malformedRecall      bool
+	nextContext          string
+	nextTags             []string
+	zeroUnits            bool
+	delayDocument        time.Duration
 	delay                time.Duration
 }
 
@@ -102,11 +106,21 @@ func (f *fakeHindsight) memories(w http.ResponseWriter, r *http.Request, bank st
 		if strings.HasPrefix(item.Content, "transform:") {
 			texts = []string{"extracted one", "extracted two"}
 		}
+		if f.zeroUnits {
+			texts = nil
+		}
+		contextValue, tags := item.Context, item.Tags
+		if f.nextContext != "" {
+			contextValue = f.nextContext
+		}
+		if f.nextTags != nil {
+			tags = append([]string(nil), f.nextTags...)
+		}
 		units := make([]memoryUnit, 0, len(texts))
 		for index, text := range texts {
 			units = append(units, memoryUnit{ID: fmt.Sprintf("%s-%d", item.DocumentID, index), Text: text,
-				Context: item.Context, FactType: "experience", DocumentID: item.DocumentID, MentionedAt: now,
-				Tags: item.Tags, Metadata: metadata})
+				Context: contextValue, FactType: "experience", DocumentID: item.DocumentID, MentionedAt: now,
+				Tags: tags, Metadata: metadata})
 		}
 		f.units[bank][item.DocumentID] = units
 		doc := f.docs[bank][item.DocumentID]
@@ -161,6 +175,13 @@ func (f *fakeHindsight) memories(w http.ResponseWriter, r *http.Request, bank st
 
 func (f *fakeHindsight) documents(w http.ResponseWriter, r *http.Request, bank string, rest []string) {
 	if len(rest) == 1 && r.Method == http.MethodGet {
+		if f.delayDocument > 0 {
+			select {
+			case <-time.After(f.delayDocument):
+			case <-r.Context().Done():
+				return
+			}
+		}
 		doc, ok := f.docs[bank][rest[0]]
 		if !ok {
 			http.NotFound(w, r)

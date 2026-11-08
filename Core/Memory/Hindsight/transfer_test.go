@@ -21,7 +21,7 @@ func TestStreamRememberExportImportAndBounds(t *testing.T) {
 	size := int64(len(payload))
 	record.Content.Size = &size
 	result, err := sourceProvider.Remember(context.Background(), memory.RememberRequest{Record: record, Payload: memory.Reader(bytes.NewReader(payload))})
-	if err != nil || result.Outcome != memory.RememberStored {
+	if err != nil || result.Outcome != memory.RememberTransformed {
 		t.Fatalf("stream remember = %#v, %v", result, err)
 	}
 
@@ -30,13 +30,14 @@ func TestStreamRememberExportImportAndBounds(t *testing.T) {
 	if err != nil || !report.Completed || report.Records != 1 || len(sink.transfers) != 1 {
 		t.Fatalf("export = %#v, %v", report, err)
 	}
-	if !bytes.Equal(sink.payloads[0], payload) {
-		t.Fatalf("payload = %q", sink.payloads[0])
+	if sink.transfers[0].Record.ID != record.ID || sink.transfers[0].Record.Revision != record.Revision ||
+		!bytes.Equal(sink.transfers[0].Record.Content.Data, result.Retained.Content.Data) {
+		t.Fatalf("exported retained record does not match Remember result")
 	}
 
 	target := openTestProvider(t, fake, "target")
 	importReport, err := target.Import(context.Background(), memory.ImportRequest{MaxRecords: 10, MaxBytes: 1 << 20}, &sliceSource{transfers: sink.transfers, payloads: sink.payloads})
-	if err != nil || !importReport.Completed || len(importReport.Outcomes) != 1 {
+	if err != nil || !importReport.Completed || len(importReport.Outcomes) != 1 || importReport.Outcomes[0].Disposition != memory.ImportTransformed {
 		t.Fatalf("import = %#v, %v", importReport, err)
 	}
 
