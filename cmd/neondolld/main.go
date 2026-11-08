@@ -340,8 +340,11 @@ func run() int {
 			return 1
 		}
 	}
-	cognitionToolExecutor, err := newProductionToolExecutor(bodyRegistry, dollState.Identity.DollID, cfg.Core.ActionPolicy, cfg.Core.BodyAuthorization, cfg.Core.BodyPreferences,
-		dollmind.WithPermissionRequests(permissionManager, dollState.Owner.OwnerID, 15*time.Minute))
+	toolExecutorOptions := []dollmind.ToolExecutorOption{dollmind.WithPermissionRequests(permissionManager, dollState.Owner.OwnerID, 15*time.Minute)}
+	if memoryProvider != nil {
+		toolExecutorOptions = append(toolExecutorOptions, dollmind.WithMemoryProvider(memoryProvider))
+	}
+	cognitionToolExecutor, err := newProductionToolExecutor(bodyRegistry, dollState.Identity.DollID, cfg.Core.ActionPolicy, cfg.Core.BodyAuthorization, cfg.Core.BodyPreferences, toolExecutorOptions...)
 	if err != nil {
 		log.Error("cognition tool executor setup error", map[string]any{"error": err.Error()})
 		return 1

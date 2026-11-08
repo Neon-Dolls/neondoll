@@ -3,6 +3,7 @@ package interaction
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"path/filepath"
@@ -19,6 +20,7 @@ import (
 	contextbuilder "github.com/Neon-Dolls/neondoll/Core/ContextBuilder"
 	"github.com/Neon-Dolls/neondoll/Core/DollMind"
 	"github.com/Neon-Dolls/neondoll/Core/Inference"
+	memory "github.com/Neon-Dolls/neondoll/Core/Memory"
 	"github.com/Neon-Dolls/neondoll/Core/Persistence"
 	"github.com/Neon-Dolls/neondoll/Core/Session"
 	"github.com/Neon-Dolls/neondoll/DollLink/Events"
@@ -43,6 +45,27 @@ type interactionToolProvider struct {
 }
 
 type sizedInteractionTools struct{ output string }
+
+type interactionMemory struct{ record memory.Record }
+
+func (m *interactionMemory) Remember(context.Context, memory.RememberRequest) (memory.RememberResult, error) {
+	return memory.RememberResult{Outcome: memory.RememberRejected, Reason: "unused"}, nil
+}
+func (m *interactionMemory) Recall(context.Context, memory.RecallRequest) (memory.RecallResult, error) {
+	return memory.RecallResult{Matches: []memory.RecallMatch{{Reference: m.record.Reference(), Record: &m.record}}}, nil
+}
+func (*interactionMemory) Export(context.Context, memory.ExportRequest, memory.ExportSink) (memory.ExportReport, error) {
+	return memory.ExportReport{}, errors.New("unused")
+}
+func (*interactionMemory) Import(context.Context, memory.ImportRequest, memory.ImportSource) (memory.ImportReport, error) {
+	return memory.ImportReport{}, errors.New("unused")
+}
+func (*interactionMemory) Capabilities(context.Context) (memory.Capabilities, error) {
+	return memory.Capabilities{ContractVersion: 1}, nil
+}
+func (*interactionMemory) Health(context.Context) (memory.Health, error) {
+	return memory.Health{Status: memory.HealthHealthy}, nil
+}
 
 func (tools sizedInteractionTools) Tools() []inference.Tool {
 	return []inference.Tool{
@@ -93,6 +116,30 @@ func (provider *sessionContextProvider) Infer(_ context.Context, request inferen
 		content = provider.responses[index]
 	}
 	return &inference.Response{Content: content, ProviderID: provider.ID()}, nil
+}
+
+func TestInteractionCanRecallMemoryThroughSharedExecution(t *testing.T) {
+	store := openStore(t)
+	seedDoll(t, store, "memory-doll", "MemoryDoll")
+	sessions, _ := interactionSessionStores(t, store)
+	created := createInteractionSession(t, sessions, "body-one")
+	data, _ := json.Marshal("prefers jasmine tea")
+	retained := memory.Record{SchemaVersion: 1, ID: "memory-a", Revision: 1, CreatedAt: time.Unix(100, 0).UTC(), Source: memory.Source{Type: "interaction", Ref: "old-turn"}, Content: memory.Content{MediaType: "text/plain", Transport: memory.TransportInline, Data: data}, Metadata: memory.Metadata{Kind: "preference"}}
+	provider := &interactionToolProvider{responses: []*inference.Response{
+		{ToolCalls: []inference.ToolCall{{ID: "recall", Name: "core.memory__recall", Arguments: map[string]any{"query": "tea"}}}},
+		{Content: "You prefer jasmine tea."},
+	}}
+	registry := body.NewRegistry()
+	executor := dollmind.NewToolExecutor(registry, body.NewGuard(registry, body.NewRuleEvaluator()), actionpolicy.Default(), "memory-doll", dollmind.WithMemoryProvider(&interactionMemory{record: retained}))
+	service := New(store, provider, logger.New(logger.ErrorLevel, io.Discard), WithModelConfiguration(testModelConfiguration), WithToolExecutor(executor))
+	event := newResponse("memory-doll", "What tea do I prefer?")
+	response, err := service.HandleInteraction(context.Background(), created, &event)
+	if err != nil || response == nil || len(provider.requests) != 2 {
+		t.Fatalf("response=%+v requests=%d err=%v", response, len(provider.requests), err)
+	}
+	if !strings.Contains(strings.Join(messageContents(provider.requests[1].Messages), "\n"), "jasmine tea") {
+		t.Fatalf("recalled content missing from second inference: %+v", provider.requests[1].Messages)
+	}
 }
 
 func TestSessionInteractionBuildsFreshMultiTurnContext(t *testing.T) {
