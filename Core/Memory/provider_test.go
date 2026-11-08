@@ -218,6 +218,13 @@ func TestConfigurationSelection(t *testing.T) {
 	}
 }
 
+func TestUnspecifiedCapabilitiesDoNotImplyGuarantees(t *testing.T) {
+	var capabilities Capabilities
+	if capabilities.Consistency.ReplayScope != "" || capabilities.Consistency.ReplayDurable || capabilities.Consistency.RevisionConflicts != "" || capabilities.Consistency.ReadAfterWrite != "" || capabilities.Consistency.ImportAtomicity != "" || capabilities.Consistency.RetrievalSemantics != "" || capabilities.Consistency.DeterministicOrdering {
+		t.Fatalf("zero capabilities imply guarantees: %#v", capabilities.Consistency)
+	}
+}
+
 func TestCopyBounded(t *testing.T) {
 	var out bytes.Buffer
 	if n, err := CopyBounded(context.Background(), Writer(&out), Reader(strings.NewReader("1234")), 4); err != nil || n != 4 || out.String() != "1234" {

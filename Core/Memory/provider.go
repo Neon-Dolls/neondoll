@@ -231,14 +231,6 @@ func validateBounds(records, bytes uint64) error {
 	return nil
 }
 
-type Capabilities struct {
-	ContractVersion       int
-	ContentTypes          []string
-	MaxInlineBytes        uint64
-	MaxStreamBytes        uint64
-	SupportsUpdates       bool
-	SupportsConsolidation bool
-}
 type HealthStatus string
 
 const (
@@ -261,9 +253,9 @@ type Provider interface {
 	Health(context.Context) (Health, error)
 }
 
-// CompareImportRevision defines the portable conflict rule. Providers may
-// transform a newer revision, but equal conflicting and stale revisions are
-// rejected; exact equal replay is idempotent.
+// CompareImportRevision is an optional deterministic policy for providers that
+// advertise strict revision conflict handling. The Memory Provider contract
+// does not require every backend to offer compare-and-swap semantics.
 func CompareImportRevision(existing, incoming Record) (ImportDisposition, error) {
 	if existing.ID != incoming.ID {
 		return "", ErrInvalidRequest
