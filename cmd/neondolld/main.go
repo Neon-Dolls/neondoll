@@ -25,6 +25,7 @@ import (
 	"github.com/Neon-Dolls/neondoll/Core/Inference"
 	"github.com/Neon-Dolls/neondoll/Core/Interaction"
 	"github.com/Neon-Dolls/neondoll/Core/Invitation"
+	memoryruntime "github.com/Neon-Dolls/neondoll/Core/Memory/Runtime"
 	"github.com/Neon-Dolls/neondoll/Core/Network"
 	"github.com/Neon-Dolls/neondoll/Core/OwnerControl"
 	"github.com/Neon-Dolls/neondoll/Core/PermissionRequest"
@@ -302,6 +303,19 @@ func main() {
 	if err != nil {
 		log.Error("production Doll state setup error", map[string]any{"doll_id": dollID, "error": err.Error()})
 		os.Exit(1)
+	}
+	memoryProvider, err := memoryruntime.OpenActive(ctx, cfg.Memory, dollState.Identity.DollID, memoryruntime.Options{SecretsRoot: cfg.Paths.SecretsDir, DataRoot: cfg.Paths.DataDir})
+	if err != nil {
+		log.Error("Memory Provider startup error", map[string]any{"error": err.Error()})
+		os.Exit(1)
+	}
+	if memoryProvider != nil {
+		defer func() {
+			if err := memoryProvider.Close(); err != nil {
+				log.Error("Memory Provider shutdown error", map[string]any{"error": err.Error()})
+			}
+		}()
+		log.Info("Memory Provider ready", map[string]any{"provider": memoryProvider.Name(), "doll_id": dollState.Identity.DollID})
 	}
 	actionPolicy, err := actionpolicy.New(cfg.Core.ActionPolicy)
 	if err != nil {
