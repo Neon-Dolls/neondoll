@@ -3,6 +3,7 @@ package cognitiveexecution_test
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/Neon-Dolls/neondoll/Core/CognitiveExecution"
 	"github.com/Neon-Dolls/neondoll/Core/Config"
@@ -53,9 +54,11 @@ func TestExecuteRebuildsContextAndPinsModelAcrossToolIterations(t *testing.T) {
 		Budget: inference.ModelContextBudget{ContextTokens: 1600, OutputTokens: 200, RequiredOverheadTokens: 100},
 	}
 	var builds []cognitiveexecution.ContextState
+	operationStartedAt := time.Unix(123, 456).UTC()
 	result, err := cognitiveexecution.Execute(context.Background(), cognitiveexecution.Request{
 		Provider: provider, ModelConfiguration: model, Purpose: inference.PurposePlan,
 		Temperature: 0.3, ToolExecutor: tools, SessionID: "session-1", TurnID: "turn-1", CognitiveRunID: "run-1",
+		OperationStartedAt: operationStartedAt,
 		BuildContext: func(_ context.Context, state cognitiveexecution.ContextState) ([]inference.Message, error) {
 			builds = append(builds, state)
 			return []inference.Message{{Role: "system", Content: "bounded context"}}, nil
@@ -84,7 +87,7 @@ func TestExecuteRebuildsContextAndPinsModelAcrossToolIterations(t *testing.T) {
 	if tools.calls[0].ID != "call-one" || tools.calls[1].ID != "call-two" {
 		t.Fatalf("tool correlation = %+v", tools.calls)
 	}
-	wantCorrelation := cognitiveexecution.ToolCorrelation{SessionID: session.ID("session-1"), TurnID: session.TurnID("turn-1"), CognitiveRunID: "run-1"}
+	wantCorrelation := cognitiveexecution.ToolCorrelation{SessionID: session.ID("session-1"), TurnID: session.TurnID("turn-1"), CognitiveRunID: "run-1", OperationStartedAt: operationStartedAt}
 	if len(tools.correlations) != 2 || tools.correlations[0] != wantCorrelation || tools.correlations[1] != wantCorrelation {
 		t.Fatalf("execution correlations=%+v", tools.correlations)
 	}

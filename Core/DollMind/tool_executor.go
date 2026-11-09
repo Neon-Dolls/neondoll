@@ -15,6 +15,7 @@ import (
 	"github.com/Neon-Dolls/neondoll/Core/CognitiveExecution"
 	"github.com/Neon-Dolls/neondoll/Core/Communication"
 	"github.com/Neon-Dolls/neondoll/Core/Inference"
+	"github.com/Neon-Dolls/neondoll/Core/Memory"
 	"github.com/Neon-Dolls/neondoll/Core/PermissionRequest"
 	"github.com/Neon-Dolls/neondoll/Core/Session"
 	"github.com/Neon-Dolls/neondoll/Core/SessionEvent"
@@ -35,6 +36,7 @@ type ToolExecutor struct {
 	approvalTTL         time.Duration
 	notifier            PermissionResolutionNotifier
 	communication       communication.Sender
+	memory              memory.Provider
 	recoveryMu          sync.Mutex
 	recoveryInitialized bool
 }
@@ -64,6 +66,12 @@ func WithPermissionRequests(requests *permissionrequest.Manager, ownerID string,
 		executor.ownerID = strings.TrimSpace(ownerID)
 		executor.approvalTTL = ttl
 	}
+}
+
+// WithMemoryProvider exposes provider-neutral, model-directed Recall and
+// Remember operations through the shared cognitive tool loop.
+func WithMemoryProvider(provider memory.Provider) ToolExecutorOption {
+	return func(executor *ToolExecutor) { executor.memory = provider }
 }
 
 func (executor *ToolExecutor) SetPermissionResolutionNotifier(notifier PermissionResolutionNotifier) {
@@ -98,7 +106,7 @@ func NewToolExecutor(registry *body.Registry, guard *body.Guard, actionPolicy ac
 // Tools projects each currently available semantic capability/operation once.
 // Body selection stays internal; provider-visible names never encode identity.
 func (executor *ToolExecutor) Tools() []inference.Tool {
-	if executor.registry == nil && executor.communication == nil {
+	if executor.registry == nil && executor.communication == nil && executor.memory == nil {
 		return nil
 	}
 	var bodies []body.Body
@@ -121,6 +129,9 @@ func (executor *ToolExecutor) Tools() []inference.Tool {
 	}
 	if executor.communication != nil {
 		tools = append(tools, communicationTool(), communicationPeersTool())
+	}
+	if executor.memory != nil {
+		tools = append(tools, memoryRecallTool(), memoryRememberTool())
 	}
 	sort.Slice(tools, func(i, j int) bool { return tools[i].Name < tools[j].Name })
 	return tools
@@ -146,7 +157,7 @@ func (executor *ToolExecutor) executeCall(ctx context.Context, correlation cogni
 	if err := ctx.Err(); err != nil {
 		return failureResult(call.ID, "cancelled", err.Error())
 	}
-	if executor.registry == nil || executor.actionPolicy == nil || executor.coordinator == nil || executor.dollID == "" {
+	if executor.actionPolicy == nil || executor.dollID == "" {
 		return failureResult(call.ID, "invalid_configuration", "tool execution boundaries are unavailable")
 	}
 
@@ -171,6 +182,17 @@ func (executor *ToolExecutor) executeCall(ctx context.Context, correlation cogni
 		case communication.OperationListPeers:
 			return executor.listCommunicationPeers(ctx, call)
 		}
+	}
+	if tool.CapabilityID == memoryCapability {
+		switch tool.OperationID {
+		case memoryOperationRecall:
+			return executor.recallMemory(ctx, call)
+		case memoryOperationRemember:
+			return executor.rememberMemory(ctx, correlation, call)
+		}
+	}
+	if executor.registry == nil || executor.coordinator == nil {
+		return failureResult(call.ID, "invalid_configuration", "Body execution boundaries are unavailable")
 	}
 
 	constraints := bodyresolver.TaskConstraints{}
@@ -330,6 +352,7 @@ func (executor *ToolExecutor) HandlePermissionResolution(ctx context.Context, re
 	tool := &inference.Tool{Name: claimed.Action, CapabilityID: claimed.Capability, OperationID: claimed.Operation}
 	result := executor.executeCall(ctx, cognitiveexecution.ToolCorrelation{
 		SessionID: session.ID(claimed.Correlation.SessionID), TurnID: session.TurnID(claimed.Correlation.TurnID), CognitiveRunID: claimed.Correlation.CognitiveRunID, IntentionID: claimed.Correlation.IntentionID,
+		OperationStartedAt: claimed.CreatedAt,
 	}, inference.ToolCall{ID: callID, Name: tool.Name, Arguments: arguments}, tool, true)
 	if result.Error != nil && (result.Error.Code == "no_eligible_body" || result.Error.Code == "unavailable") {
 		_, releaseErr := executor.requests.ReleaseContinuation(ctx, claimed.ID)
