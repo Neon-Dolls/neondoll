@@ -29,9 +29,10 @@ type ToolExchange struct {
 
 // ContextState is the immutable input supplied for one fresh context build.
 type ContextState struct {
-	InputTokenBudget int
-	Tools            []inference.Tool
-	Exchanges        []ToolExchange
+	InputTokenBudget   int
+	Tools              []inference.Tool
+	Exchanges          []ToolExchange
+	SharedInstructions []string
 }
 
 // ContextBuilder reconstructs bounded provider messages for one iteration.
@@ -125,9 +126,10 @@ func Execute(ctx context.Context, request Request) (*Result, error) {
 			return nil, fmt.Errorf("cognitive execution cancelled: %w", err)
 		}
 		state := ContextState{
-			InputTokenBudget: inputTokenBudget,
-			Tools:            append([]inference.Tool(nil), tools...),
-			Exchanges:        append([]ToolExchange(nil), exchanges...),
+			InputTokenBudget:   inputTokenBudget,
+			Tools:              append([]inference.Tool(nil), tools...),
+			Exchanges:          append([]ToolExchange(nil), exchanges...),
+			SharedInstructions: SharedInstructions(tools),
 		}
 		messages, err := request.BuildContext(ctx, state)
 		if err != nil {
