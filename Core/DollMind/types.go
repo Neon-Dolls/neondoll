@@ -3,6 +3,7 @@ package dollmind
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/Neon-Dolls/neondoll/Core/CognitiveExecution"
@@ -62,6 +63,7 @@ type Result struct {
 	StateDirty  bool
 	Orientation *Orientation // set when Level is LevelOrient
 	Plan        *Plan        // set when Level is LevelPlan
+	Reflection  *ReflectionOutcome
 }
 
 // Action represents something the Doll should do.
@@ -114,6 +116,8 @@ type Scheduler struct {
 	toolExecutor       *ToolExecutor
 	modelConfiguration config.ModelConfiguration
 	taskModels         map[config.InferenceTask]taskModel
+	reflectionMu       sync.Mutex
+	activeReflections  map[string]struct{}
 }
 
 type taskModel struct {
@@ -131,7 +135,8 @@ func New(provider inference.Provider, log *logger.Logger, mindAPI MindAPI, opts 
 			Name: "default", Provider: "openai", Model: "default", Endpoint: inference.DefaultBaseURL,
 			Budget: inference.DefaultModelContextBudget(),
 		},
-		taskModels: make(map[config.InferenceTask]taskModel),
+		taskModels:        make(map[config.InferenceTask]taskModel),
+		activeReflections: make(map[string]struct{}),
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -233,6 +238,21 @@ func (s *Scheduler) Enter(ctx context.Context, eventType events.Type, input stri
 			return nil, fmt.Errorf("enter plan: %w", err)
 		}
 		result := &Result{Level: LevelPlan, Orientation: orient, Plan: plan, StateDirty: dirty}
+		if plan.RequestReflection {
+			signal, signalErr := NewReflectionSignal(ReflectionSourcePlan, plan.ReflectionReason, plan.Summary, s.timeProvider())
+			if signalErr != nil {
+				return nil, fmt.Errorf("enter reflection signal: %w", signalErr)
+			}
+			if run := cognitionRunFromContext(ctx); run != nil {
+				signal.IntentionID = run.intention()
+			}
+			outcome, reflectErr := s.Reflect(ctx, signal)
+			if reflectErr != nil {
+				return nil, fmt.Errorf("enter reflection: %w", reflectErr)
+			}
+			result.Level = LevelReflect
+			result.Reflection = outcome
+		}
 
 		// Dispatch outbound action if present.
 		// A dispatcher failure must be surfaced through the normal error
@@ -478,6 +498,9 @@ func FormatWakeEvidence(wake pulse.PulseWake) string {
 		"  Effective pressure:    " + fmt.Sprintf("%.4f", wake.EffectivePressure) + "\n"
 	if len(wake.ActivationSignals) > 0 {
 		text += "  Activation signals:    " + fmt.Sprintf("%v", wake.ActivationSignals) + "\n"
+	}
+	if wake.ReflectivePressure > 0 {
+		text += "  Reflective pressure:   " + fmt.Sprintf("%.4f", wake.ReflectivePressure) + "\n"
 	}
 	if wake.Inhibition.Cooldown > 0 || wake.Inhibition.Budget > 0 {
 		text += "  Inhibition (cooldown/budget): " +

@@ -43,20 +43,22 @@ injects each complete model configuration into the corresponding runtime path.
 Unsupported providers fail startup explicitly.
 
 Core does not dynamically discover models. Runtime selection is limited to the
-four statically configured Core tasks and their explicit default fallback.
+five statically configured Core tasks and their explicit default fallback.
 
 ## Task assignments
 
-Core defines four inference tasks: `interaction`, `orient`, `plan`, and
-`direct_cognition`. Each optional `tasks` entry names one configured model.
+Core defines five inference tasks: `interaction`, `orient`, `plan`,
+`reflection`, and `direct_cognition`. Each optional `tasks` entry names one
+configured model.
 Assignments are validated together with model configuration, so an unknown
 model or task prevents startup. `ResolveTask` returns the complete resolved
 `ModelConfiguration`; an unassigned known task returns the explicit default.
 
-At runtime Core resolves all four task configurations before starting its
+At runtime Core resolves all five task configurations before starting its
 services and constructs each selected provider at its configured endpoint.
-Interaction uses `interaction`; DollMind direct runs use `direct_cognition`;
-Orient and Plan use their corresponding tasks. Pulse and intention wakes flow
+Interaction uses `interaction`; Reflection signals use `reflection`; DollMind
+direct runs use `direct_cognition`; Orient and Plan use their corresponding
+tasks. Pulse and intention wakes flow
 through those Orient/Plan selections, and every tool continuation retains the
 Plan model and budget. Any unmapped task receives the explicit default through
 the same resolver path.

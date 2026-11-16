@@ -46,6 +46,7 @@ type Runner struct {
 	lastTickAt            time.Time
 	lastCognitionAt       time.Time
 	lastSpontaneousWakeAt time.Time
+	reflectivePressure    float64
 
 	// Subjects observed by Pulse. Core calls UpdateSubjects to push changes;
 	// evaluate() reads the latest snapshot under the lock.
@@ -176,6 +177,7 @@ func (r *Runner) Snapshot() PulseSnapshot {
 		LastTickAt:            r.lastTickAt,
 		LastCognitionAt:       r.lastCognitionAt,
 		LastSpontaneousWakeAt: r.lastSpontaneousWakeAt,
+		ReflectivePressure:    r.reflectivePressure,
 	}
 }
 
@@ -277,6 +279,25 @@ func (r *Runner) RecordCognition(at time.Time) {
 	}
 }
 
+// AddReflectivePressure records deterministic operational evidence that may
+// make a future wake worthwhile. It does not force Reflection or interpret
+// the evidence. Contributions combine as a bounded saturating union.
+func (r *Runner) AddReflectivePressure(contribution float64) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	contribution = clampSignal(contribution)
+	r.reflectivePressure = 1 - (1-r.reflectivePressure)*(1-contribution)
+}
+
+// SettleReflectivePressure diminishes pressure only after the component that
+// owns the evidence knows it was processed. A wake alone must not clear it,
+// because DollMind may legitimately decline Reflection.
+func (r *Runner) SettleReflectivePressure(amount float64) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.reflectivePressure = clampSignal(r.reflectivePressure - clampSignal(amount))
+}
+
 func (r *Runner) run(ctx context.Context) {
 	defer r.wg.Done()
 
@@ -362,6 +383,7 @@ func (r *Runner) evaluate() {
 		LastTickAt:            r.lastTickAt,
 		LastCognitionAt:       r.lastCognitionAt,
 		LastSpontaneousWakeAt: r.lastSpontaneousWakeAt,
+		ReflectivePressure:    r.reflectivePressure,
 	}
 
 	sigSnap := EvaluateSignals(now, r.cfg, sigPulseState, subjects, inhibition)
@@ -454,13 +476,14 @@ func (r *Runner) admitPulseWake(now time.Time, opp OpportunitySnapshot) error {
 	}
 
 	wake := PulseWake{
-		AdmittedAt:        now,
-		Pressure:          opp.Pressure,
-		EffectivePressure: opp.EffectivePressure,
-		ActivationSignals: opp.ActivationSignals,
-		Inhibition:        opp.Inhibition,
-		Subjects:          ensureSubjects(opp.Subjects),
-		RandomSample:      sample,
+		AdmittedAt:         now,
+		Pressure:           opp.Pressure,
+		EffectivePressure:  opp.EffectivePressure,
+		ActivationSignals:  opp.ActivationSignals,
+		ReflectivePressure: opp.ReflectivePressure,
+		Inhibition:         opp.Inhibition,
+		Subjects:           ensureSubjects(opp.Subjects),
+		RandomSample:       sample,
 	}
 
 	// === ADMISSION: mark subjects presented + set lastSpontaneousWakeAt ===

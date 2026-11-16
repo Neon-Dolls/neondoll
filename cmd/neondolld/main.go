@@ -187,6 +187,11 @@ func run() int {
 		log.Error("Plan model setup error", map[string]any{"error": err.Error()})
 		return 1
 	}
+	reflectionModel, reflectionProvider, err := resolveTaskProvider(modelResolver, config.InferenceTaskReflection)
+	if err != nil {
+		log.Error("Reflection model setup error", map[string]any{"error": err.Error()})
+		return 1
+	}
 	directModel, directProvider, err := resolveTaskProvider(modelResolver, config.InferenceTaskDirectCognition)
 	if err != nil {
 		log.Error("direct cognition model setup error", map[string]any{"error": err.Error()})
@@ -362,6 +367,7 @@ func run() int {
 		dollmind.WithModelConfiguration(directModel),
 		dollmind.WithTaskModelConfiguration(config.InferenceTaskOrient, orientCognitionProvider, orientModel),
 		dollmind.WithTaskModelConfiguration(config.InferenceTaskPlan, inference.NewToolEnabledProvider(planProvider), planModel),
+		dollmind.WithTaskModelConfiguration(config.InferenceTaskReflection, inference.NewToolEnabledProvider(reflectionProvider), reflectionModel),
 		dollmind.WithToolExecutor(cognitionToolExecutor),
 	)
 	cognitionLifecycle, err := dollmind.NewLifecycle(scheduler)

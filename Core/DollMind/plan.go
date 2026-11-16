@@ -51,6 +51,11 @@ type Plan struct {
 	FutureReason           string `json:"future_reason,omitempty"`
 	FutureWakeTime         string `json:"future_wake_time,omitempty"`
 
+	// Reflection is an immediate, optional escalation within this cognition.
+	// It is distinct from durable future cognition and creates no Intention.
+	RequestReflection bool   `json:"request_reflection,omitempty"`
+	ReflectionReason  string `json:"reflection_reason,omitempty"`
+
 	// OutboundAction is an optional semantic proposal of an action Spark
 	// wants to take. nil means no action is proposed. When set, the Core
 	// validates the action kind and maps it to a deterministic Doll Link
@@ -73,6 +78,8 @@ type planJSON struct {
 	FutureSubject          string `json:"future_subject,omitempty"`
 	FutureReason           string `json:"future_reason,omitempty"`
 	FutureWakeTime         string `json:"future_wake_time,omitempty"`
+	RequestReflection      bool   `json:"request_reflection,omitempty"`
+	ReflectionReason       string `json:"reflection_reason,omitempty"`
 
 	OutboundAction *outboundActionJSON `json:"outbound_action,omitempty"`
 }
@@ -174,10 +181,12 @@ func buildPlanPrompt(state *dollstate.DollState, eventType events.Type, input st
   "future_subject": "",
   "future_reason": "",
   "future_wake_time": "",
+  "request_reflection": false,
+  "reflection_reason": "",
   "outbound_action": null
 }
 
-All fields are optional except "summary". "observations" may be empty — these are ephemeral and available only to this cognition run. "retain_experience" is an optional field for explicitly marking observations or semantic experience that should become durable Doll Memory, surviving Doll Card export/import. Only include entries in "retain_experience" when Spark genuinely wants to remember them across cognitive episodes. "should_reorient" indicates whether you want to re-evaluate this situation later. "request_future_cognition" indicates whether future cognitive attention is warranted — set to true only when the Doll should specifically reconsider something at a future time. When true, "future_subject" describes what to reconsider, "future_reason" explains why, and "future_wake_time" is the RFC 3339 UTC timestamp when this cognition should occur.
+All fields are optional except "summary". "observations" may be empty — these are ephemeral and available only to this cognition run. "retain_experience" is an optional field for explicitly marking observations or semantic experience that should become durable Doll Memory, surviving Doll Card export/import. Only include entries in "retain_experience" when Spark genuinely wants to remember them across cognitive episodes. "should_reorient" indicates whether you want to re-evaluate this situation later. "request_future_cognition" indicates whether future cognitive attention is warranted — set to true only when the Doll should specifically reconsider something at a future time. When true, "future_subject" describes what to reconsider, "future_reason" explains why, and "future_wake_time" is the RFC 3339 UTC timestamp when this cognition should occur. "request_reflection" asks for immediate open-ended reconsideration only when this situation genuinely warrants it; it is never required after an interaction or action. When true, "reflection_reason" must explain why. Use future cognition instead when reconsideration should survive restart or happen later.
 
 "outbound_action" is an optional field used when you want to initiate an outbound action to your connected Body/client. When set, it must be an object with:
   - "kind": the action type, currently only "send_text" is supported
@@ -240,6 +249,11 @@ func parsePlan(raw string) (*Plan, error) {
 		FutureSubject:          parsed.FutureSubject,
 		FutureReason:           parsed.FutureReason,
 		FutureWakeTime:         parsed.FutureWakeTime,
+		RequestReflection:      parsed.RequestReflection,
+		ReflectionReason:       strings.TrimSpace(parsed.ReflectionReason),
+	}
+	if plan.RequestReflection && plan.ReflectionReason == "" {
+		return nil, fmt.Errorf("plan requests reflection without reflection_reason")
 	}
 
 	// Validate outbound_action if present

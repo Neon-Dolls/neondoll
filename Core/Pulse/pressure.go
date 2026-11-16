@@ -74,6 +74,9 @@ func activationSignalsFromSnapshot(snap SignalSnapshot) (signals []float64, acti
 	if snap.Idle > 0 {
 		signals = append(signals, clampSignal(snap.Idle))
 	}
+	if snap.Reflective > 0 {
+		signals = append(signals, clampSignal(snap.Reflective))
+	}
 
 	// Collect every non-zero activation signal from each subject individually.
 	// Do NOT collapse a subject's signals to a single max — each signal

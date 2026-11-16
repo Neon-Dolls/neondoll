@@ -77,11 +77,12 @@ func EvaluateOpportunity(now time.Time, snap SignalSnapshot, ps PulseSnapshot, c
 	}
 
 	return OpportunitySnapshot{
-		EvaluatedAt:       now,
-		Type:              "spontaneous",
-		Pressure:          pressure,
-		EffectivePressure: effectivePressure,
-		ActivationSignals: signals,
+		EvaluatedAt:        now,
+		Type:               "spontaneous",
+		Pressure:           pressure,
+		EffectivePressure:  effectivePressure,
+		ActivationSignals:  signals,
+		ReflectivePressure: snap.Reflective,
 		Inhibition: InhibitionBreakdown{
 			Cooldown: snap.Cooldown,
 			Budget:   snap.Budget,
