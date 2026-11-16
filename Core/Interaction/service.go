@@ -132,6 +132,7 @@ func (s *Service) handleInteraction(ctx context.Context, sessionID session.ID, t
 		MaxToolCalls:       cognitiveexecution.DefaultToolCallLimit,
 		BuildContext: func(ctx context.Context, execution cognitiveexecution.ContextState) ([]inference.Message, error) {
 			instructions := interactionInstructions(state)
+			instructions = append(instructions, execution.SharedInstructions...)
 			if len(execution.Tools) > 0 {
 				instructions = append(instructions, inference.FormatToolsForPrompt(execution.Tools))
 			}

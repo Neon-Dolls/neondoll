@@ -306,6 +306,7 @@ func TestMemoryRecallIsAvailableAcrossOrientPlanAndPulse(t *testing.T) {
 		if mem.recalls != 1 || len(provider.requests) != 2 {
 			t.Fatalf("recalls=%d requests=%d", mem.recalls, len(provider.requests))
 		}
+		assertMemoryGuidance(t, provider.requests, "ORIENTATION")
 	})
 	t.Run("plan", func(t *testing.T) {
 		mem := newMemory()
@@ -319,6 +320,7 @@ func TestMemoryRecallIsAvailableAcrossOrientPlanAndPulse(t *testing.T) {
 		if mem.recalls != 1 || len(provider.requests) != 2 {
 			t.Fatalf("recalls=%d requests=%d", mem.recalls, len(provider.requests))
 		}
+		assertMemoryGuidance(t, provider.requests, "PLANNING")
 	})
 	t.Run("pulse", func(t *testing.T) {
 		mem := newMemory()
@@ -333,7 +335,35 @@ func TestMemoryRecallIsAvailableAcrossOrientPlanAndPulse(t *testing.T) {
 		if mem.recalls != 1 || len(provider.requests) != 3 {
 			t.Fatalf("recalls=%d requests=%d", mem.recalls, len(provider.requests))
 		}
+		assertMemoryGuidance(t, provider.requests, "")
 	})
+	t.Run("direct without automatic memory operation", func(t *testing.T) {
+		mem := newMemory()
+		provider := &toolContextProvider{responses: []*inference.Response{{Content: "thought complete"}}}
+		if _, err := memoryToolScheduler(provider, mem).Run(context.Background(), LevelReflect, "think about today"); err != nil {
+			t.Fatal(err)
+		}
+		if mem.recalls != 0 || len(mem.remembered) != 0 || len(provider.requests) != 1 {
+			t.Fatalf("guidance triggered memory operation: recalls=%d remembers=%d requests=%d", mem.recalls, len(mem.remembered), len(provider.requests))
+		}
+		assertMemoryGuidance(t, provider.requests, "think about today")
+	})
+}
+
+func assertMemoryGuidance(t *testing.T, requests []inference.Request, taskEvidence string) {
+	t.Helper()
+	for index, request := range requests {
+		content := joinedInferenceContent(request.Messages)
+		if !strings.Contains(content, cognitiveexecution.MemoryGuidance) {
+			t.Fatalf("request %d missing shared memory guidance: %s", index, content)
+		}
+		if tokens := estimatedInferenceTokens(request.Messages); tokens > defaultCognitiveInputBudget {
+			t.Fatalf("request %d exceeds input budget: %d", index, tokens)
+		}
+	}
+	if taskEvidence != "" && !strings.Contains(joinedInferenceContent(requests[0].Messages), taskEvidence) {
+		t.Fatalf("existing task instruction %q missing", taskEvidence)
+	}
 }
 
 func memoryToolScheduler(provider inference.Provider, mem memory.Provider) *Scheduler {
@@ -350,5 +380,16 @@ func TestMemoryDisabledDoesNotExposeTools(t *testing.T) {
 		if tool.CapabilityID == memoryCapability {
 			t.Fatalf("memory tool exposed while disabled: %+v", tool)
 		}
+	}
+}
+
+func TestMemoryDisabledDoesNotInjectGuidance(t *testing.T) {
+	provider := &toolContextProvider{responses: []*inference.Response{{Content: "ordinary cognition"}}}
+	scheduler := newPulseToolScheduler(provider, nil)
+	if _, err := scheduler.Run(context.Background(), LevelReflect, "think normally"); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(joinedInferenceContent(provider.requests[0].Messages), cognitiveexecution.MemoryGuidance) {
+		t.Fatal("memory guidance present while memory is disabled")
 	}
 }

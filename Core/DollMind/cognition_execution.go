@@ -89,6 +89,7 @@ func (s *Scheduler) executeCognition(ctx context.Context, run *cognitionRunExecu
 				return nil, fmt.Errorf("context working state: %w", err)
 			}
 			iterationInstructions := append([]string(nil), instructions...)
+			iterationInstructions = append(iterationInstructions, state.SharedInstructions...)
 			if len(state.Tools) > 0 {
 				iterationInstructions = append(iterationInstructions, inference.FormatToolsForPrompt(state.Tools))
 			}

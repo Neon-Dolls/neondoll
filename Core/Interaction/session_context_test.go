@@ -140,6 +140,12 @@ func TestInteractionCanRecallMemoryThroughSharedExecution(t *testing.T) {
 	if !strings.Contains(strings.Join(messageContents(provider.requests[1].Messages), "\n"), "jasmine tea") {
 		t.Fatalf("recalled content missing from second inference: %+v", provider.requests[1].Messages)
 	}
+	for index, request := range provider.requests {
+		content := strings.Join(messageContents(request.Messages), "\n")
+		if !strings.Contains(content, cognitiveexecution.MemoryGuidance) || !strings.Contains(content, "MemoryDoll") {
+			t.Fatalf("request %d missing shared guidance or existing Interaction instructions: %s", index, content)
+		}
+	}
 }
 
 func TestSessionInteractionBuildsFreshMultiTurnContext(t *testing.T) {
@@ -158,6 +164,9 @@ func TestSessionInteractionBuildsFreshMultiTurnContext(t *testing.T) {
 	}
 	if len(provider.requests) != 2 {
 		t.Fatalf("provider requests = %d, want 2", len(provider.requests))
+	}
+	if strings.Contains(strings.Join(messageContents(provider.requests[0].Messages), "\n"), cognitiveexecution.MemoryGuidance) {
+		t.Fatal("memory guidance present without configured memory tools")
 	}
 	second := messageContents(provider.requests[1].Messages)
 	for _, expected := range []string{"question one", "answer one", "question two"} {
