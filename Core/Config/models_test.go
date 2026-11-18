@@ -163,6 +163,7 @@ func TestModelResolverResolvesExplicitTaskMappings(t *testing.T) {
 			InferenceTaskInteraction: "fast",
 			InferenceTaskOrient:      "fast",
 			InferenceTaskPlan:        "balanced",
+			InferenceTaskReflection:  "balanced",
 		},
 	})
 	if err != nil {
@@ -172,6 +173,7 @@ func TestModelResolverResolvesExplicitTaskMappings(t *testing.T) {
 		InferenceTaskInteraction: "fast",
 		InferenceTaskOrient:      "fast",
 		InferenceTaskPlan:        "balanced",
+		InferenceTaskReflection:  "balanced",
 	} {
 		resolved, err := resolver.ResolveTask(task)
 		if err != nil || resolved.Name != want {

@@ -20,6 +20,7 @@ type PulseSnapshot struct {
 	LastTickAt            time.Time `json:"last_tick_at"`
 	LastCognitionAt       time.Time `json:"last_cognition_at"`
 	LastSpontaneousWakeAt time.Time `json:"last_spontaneous_wake_at"`
+	ReflectivePressure    float64   `json:"reflective_pressure,omitempty"`
 }
 
 // PulseResult records what one Pulse evaluation produced.
@@ -93,11 +94,12 @@ type SubjectSignal struct {
 // at one point in time. Activation signals (idle, neglect, change, unfinished)
 // and inhibition signals (cooldown, budget) are kept separate.
 type SignalSnapshot struct {
-	At       time.Time       `json:"at"`
-	Idle     float64         `json:"idle"`
-	Subjects []SubjectSignal `json:"subjects"`
-	Cooldown float64         `json:"cooldown"`
-	Budget   float64         `json:"budget"`
+	At         time.Time       `json:"at"`
+	Idle       float64         `json:"idle"`
+	Reflective float64         `json:"reflective"`
+	Subjects   []SubjectSignal `json:"subjects"`
+	Cooldown   float64         `json:"cooldown"`
+	Budget     float64         `json:"budget"`
 }
 
 // SubjectActivation records which signals from a specific subject contributed
@@ -132,17 +134,18 @@ type GuardResult struct {
 // opportunity evaluation by Pulse. It captures pressure calculation, soft
 // inhibition, hard guard checks, and the stochastic sample.
 type OpportunitySnapshot struct {
-	EvaluatedAt       time.Time           `json:"evaluated_at"`
-	Type              string              `json:"type"` // always "spontaneous"
-	Pressure          float64             `json:"pressure"`
-	EffectivePressure float64             `json:"effective_pressure"`
-	ActivationSignals []float64           `json:"activation_signals"`
-	Inhibition        InhibitionBreakdown `json:"inhibition"`
-	Subjects          []SubjectActivation `json:"subjects"`
-	Eligible          bool                `json:"eligible"`
-	Guards            []GuardResult       `json:"guards"`
-	RandomSample      *float64            `json:"random_sample,omitempty"`
-	Opportunity       bool                `json:"opportunity"`
+	EvaluatedAt        time.Time           `json:"evaluated_at"`
+	Type               string              `json:"type"` // always "spontaneous"
+	Pressure           float64             `json:"pressure"`
+	EffectivePressure  float64             `json:"effective_pressure"`
+	ActivationSignals  []float64           `json:"activation_signals"`
+	ReflectivePressure float64             `json:"reflective_pressure,omitempty"`
+	Inhibition         InhibitionBreakdown `json:"inhibition"`
+	Subjects           []SubjectActivation `json:"subjects"`
+	Eligible           bool                `json:"eligible"`
+	Guards             []GuardResult       `json:"guards"`
+	RandomSample       *float64            `json:"random_sample,omitempty"`
+	Opportunity        bool                `json:"opportunity"`
 }
 
 // InhibitionBreakdown records the soft-inhibition factors applied to pressure.
@@ -162,13 +165,14 @@ type RNG interface {
 // PulseWake is produced by the Runner and consumed by DollMind via the
 // MindEntrance interface.
 type PulseWake struct {
-	AdmittedAt        time.Time           `json:"admitted_at"`
-	Pressure          float64             `json:"pressure"`
-	EffectivePressure float64             `json:"effective_pressure"`
-	ActivationSignals []float64           `json:"activation_signals"`
-	Inhibition        InhibitionBreakdown `json:"inhibition"`
-	Subjects          []SubjectActivation `json:"subjects"`
-	RandomSample      float64             `json:"random_sample"`
+	AdmittedAt         time.Time           `json:"admitted_at"`
+	Pressure           float64             `json:"pressure"`
+	EffectivePressure  float64             `json:"effective_pressure"`
+	ActivationSignals  []float64           `json:"activation_signals"`
+	ReflectivePressure float64             `json:"reflective_pressure,omitempty"`
+	Inhibition         InhibitionBreakdown `json:"inhibition"`
+	Subjects           []SubjectActivation `json:"subjects"`
+	RandomSample       float64             `json:"random_sample"`
 }
 
 // MindEntrance is the interface Pulse uses to admit a spontaneous cognition

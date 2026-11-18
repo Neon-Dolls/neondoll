@@ -3,6 +3,7 @@ package dollmind
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/Neon-Dolls/neondoll/Core/CognitiveExecution"
@@ -62,6 +63,11 @@ type Result struct {
 	StateDirty  bool
 	Orientation *Orientation // set when Level is LevelOrient
 	Plan        *Plan        // set when Level is LevelPlan
+	Reflection  *ReflectionOutcome
+	// ReflectionError reports failure of an optional Reflection follow-on.
+	// A non-nil value does not invalidate the completed Plan or dispatched
+	// action and must not cause the Plan to be replayed.
+	ReflectionError error
 }
 
 // Action represents something the Doll should do.
@@ -114,6 +120,8 @@ type Scheduler struct {
 	toolExecutor       *ToolExecutor
 	modelConfiguration config.ModelConfiguration
 	taskModels         map[config.InferenceTask]taskModel
+	reflectionMu       sync.Mutex
+	activeReflections  map[string]struct{}
 }
 
 type taskModel struct {
@@ -131,7 +139,8 @@ func New(provider inference.Provider, log *logger.Logger, mindAPI MindAPI, opts 
 			Name: "default", Provider: "openai", Model: "default", Endpoint: inference.DefaultBaseURL,
 			Budget: inference.DefaultModelContextBudget(),
 		},
-		taskModels: make(map[config.InferenceTask]taskModel),
+		taskModels:        make(map[config.InferenceTask]taskModel),
+		activeReflections: make(map[string]struct{}),
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -234,14 +243,36 @@ func (s *Scheduler) Enter(ctx context.Context, eventType events.Type, input stri
 		}
 		result := &Result{Level: LevelPlan, Orientation: orient, Plan: plan, StateDirty: dirty}
 
-		// Dispatch outbound action if present.
-		// A dispatcher failure must be surfaced through the normal error
-		// boundary — not buried in a nil-error result.
+		// Dispatch an independently planned action before optional Reflection.
+		// Reflection is cognition about the completed plan, not an execution
+		// gate. Preserve the established dispatch failure boundary: when the
+		// dispatcher fails, return that error and do not obscure it with a
+		// second inference attempt.
 		if plan.OutboundAction != nil && s.dispatcher != nil {
 			if err := s.dispatcher.Dispatch(ctx, *plan.OutboundAction); err != nil {
 				s.log.Warn("outbound action dispatch failed", map[string]any{"error": err.Error()})
 				return nil, fmt.Errorf("enter dispatch: %w", err)
 			}
+		}
+
+		if plan.RequestReflection {
+			signal, signalErr := NewReflectionSignal(ReflectionSourcePlan, plan.ReflectionReason, plan.Summary, s.timeProvider())
+			if signalErr != nil {
+				result.ReflectionError = fmt.Errorf("enter reflection signal after plan execution: %w", signalErr)
+				s.log.Warn("optional reflection signal failed after plan execution", map[string]any{"error": signalErr.Error()})
+				return result, nil
+			}
+			if run := cognitionRunFromContext(ctx); run != nil {
+				signal.IntentionID = run.intention()
+			}
+			outcome, reflectErr := s.Reflect(ctx, signal)
+			if reflectErr != nil {
+				s.log.Warn("optional reflection failed after plan execution", map[string]any{"error": reflectErr.Error()})
+				result.ReflectionError = fmt.Errorf("enter reflection after plan execution: %w", reflectErr)
+				return result, nil
+			}
+			result.Level = LevelReflect
+			result.Reflection = outcome
 		}
 
 		return result, nil
@@ -478,6 +509,9 @@ func FormatWakeEvidence(wake pulse.PulseWake) string {
 		"  Effective pressure:    " + fmt.Sprintf("%.4f", wake.EffectivePressure) + "\n"
 	if len(wake.ActivationSignals) > 0 {
 		text += "  Activation signals:    " + fmt.Sprintf("%v", wake.ActivationSignals) + "\n"
+	}
+	if wake.ReflectivePressure > 0 {
+		text += "  Reflective pressure:   " + fmt.Sprintf("%.4f", wake.ReflectivePressure) + "\n"
 	}
 	if wake.Inhibition.Cooldown > 0 || wake.Inhibition.Budget > 0 {
 		text += "  Inhibition (cooldown/budget): " +

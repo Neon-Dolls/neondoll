@@ -23,6 +23,7 @@ const (
 	InferenceTaskInteraction     InferenceTask = "interaction"
 	InferenceTaskOrient          InferenceTask = "orient"
 	InferenceTaskPlan            InferenceTask = "plan"
+	InferenceTaskReflection      InferenceTask = "reflection"
 	InferenceTaskDirectCognition InferenceTask = "direct_cognition"
 )
 
@@ -111,7 +112,7 @@ func NewModelResolver(config InferenceConfig) (*ModelResolver, error) {
 
 func validInferenceTask(task InferenceTask) bool {
 	switch task {
-	case InferenceTaskInteraction, InferenceTaskOrient, InferenceTaskPlan, InferenceTaskDirectCognition:
+	case InferenceTaskInteraction, InferenceTaskOrient, InferenceTaskPlan, InferenceTaskReflection, InferenceTaskDirectCognition:
 		return true
 	default:
 		return false

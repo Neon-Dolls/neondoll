@@ -70,11 +70,12 @@ func EvaluateSignals(now time.Time, cfg config.PulseConfig, pulseState PulseSnap
 	budget := clampInhibition(inhibition.Budget)
 
 	return SignalSnapshot{
-		At:       now,
-		Idle:     idle,
-		Subjects: sigSubjects,
-		Cooldown: cooldown,
-		Budget:   budget,
+		At:         now,
+		Idle:       idle,
+		Reflective: clampSignal(pulseState.ReflectivePressure),
+		Subjects:   sigSubjects,
+		Cooldown:   cooldown,
+		Budget:     budget,
 	}
 }
 

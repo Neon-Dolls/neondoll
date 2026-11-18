@@ -744,6 +744,7 @@ func TestM7_ScenarioE_IntentionSeparation(t *testing.T) {
 		"DollID":                true,
 		"LastCognitionAt":       true,
 		"LastSpontaneousWakeAt": true,
+		"ReflectivePressure":    true,
 		"Subjects":              true,
 	}
 	for _, f := range cpFields {

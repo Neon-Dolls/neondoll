@@ -32,6 +32,7 @@ type PulseCheckpoint struct {
 	DollID                string                   `json:"doll_id"`
 	LastCognitionAt       time.Time                `json:"last_cognition_at,omitempty"`
 	LastSpontaneousWakeAt time.Time                `json:"last_spontaneous_wake_at,omitempty"`
+	ReflectivePressure    float64                  `json:"reflective_pressure,omitempty"`
 	Subjects              []PulseSubjectCheckpoint `json:"subjects,omitempty"`
 }
 
@@ -46,6 +47,7 @@ func (r *Runner) ToCheckpoint() PulseCheckpoint {
 	cp := PulseCheckpoint{
 		LastCognitionAt:       r.lastCognitionAt,
 		LastSpontaneousWakeAt: r.lastSpontaneousWakeAt,
+		ReflectivePressure:    r.reflectivePressure,
 	}
 
 	subjs := make([]PulseSubjectCheckpoint, len(r.subjects))
@@ -78,6 +80,7 @@ func (r *Runner) RestoreFromCheckpoint(cp PulseCheckpoint) {
 
 	r.lastCognitionAt = cp.LastCognitionAt
 	r.lastSpontaneousWakeAt = cp.LastSpontaneousWakeAt
+	r.reflectivePressure = clampSignal(cp.ReflectivePressure)
 
 	// Build a lookup from checkpoint subjects.
 	restored := make(map[string]PulseSubjectCheckpoint, len(cp.Subjects))

@@ -33,6 +33,14 @@ func (l *Lifecycle) EnterPulseWake(ctx context.Context, wake pulse.PulseWake) er
 	return l.scheduler.EnterPulseWake(ctx, wake)
 }
 
+// EnterReflection admits an independently initiated Reflection through the
+// same process-local cognition serialization used by Pulse and Intentions.
+func (l *Lifecycle) EnterReflection(ctx context.Context, signal ReflectionSignal) (*ReflectionOutcome, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.scheduler.Reflect(ctx, signal)
+}
+
 // EnterDueIntentions discovers and dispatches all currently due durable
 // intentions. Failed wakes remain pending through Scheduler.EnterWake and are
 // retried on a later lifecycle tick. Other due intentions are still given a
