@@ -86,6 +86,145 @@ type blockingReflectionProvider struct {
 	once    sync.Once
 }
 
+type lifecycleDispatcher struct {
+	mu       sync.Mutex
+	calls    int
+	actions  []OutboundAction
+	err      error
+	afterRun func()
+}
+
+func (dispatcher *lifecycleDispatcher) Dispatch(_ context.Context, action OutboundAction) error {
+	dispatcher.mu.Lock()
+	dispatcher.calls++
+	dispatcher.actions = append(dispatcher.actions, action)
+	err := dispatcher.err
+	after := dispatcher.afterRun
+	dispatcher.mu.Unlock()
+	if after != nil {
+		after()
+	}
+	return err
+}
+
+func (dispatcher *lifecycleDispatcher) callCount() int {
+	dispatcher.mu.Lock()
+	defer dispatcher.mu.Unlock()
+	return dispatcher.calls
+}
+
+type failingReflectionProvider struct {
+	mu    sync.Mutex
+	calls int
+	err   error
+}
+
+func (provider *failingReflectionProvider) ID() inference.ProviderID { return "failing-reflection" }
+func (provider *failingReflectionProvider) Infer(_ context.Context, _ inference.Request) (*inference.Response, error) {
+	provider.mu.Lock()
+	provider.calls++
+	provider.mu.Unlock()
+	return nil, provider.err
+}
+
+func (provider *failingReflectionProvider) callCount() int {
+	provider.mu.Lock()
+	defer provider.mu.Unlock()
+	return provider.calls
+}
+
+func reflectionActionScheduler(reflectionProvider inference.Provider, dispatcher Dispatcher, requestReflection bool) *Scheduler {
+	orientProvider := &universalContextProvider{responses: []string{`{"summary":"act","matters":true,"reason":"requested"}`}}
+	plan := `{"summary":"send","outbound_action":{"kind":"send_text","content":"hello"}}`
+	if requestReflection {
+		plan = `{"summary":"send then reconsider","outbound_action":{"kind":"send_text","content":"hello"},"request_reflection":true,"reflection_reason":"the result matters"}`
+	}
+	planProvider := &universalContextProvider{responses: []string{plan}}
+	return New(reflectionProvider, logger.New(logger.ErrorLevel, io.Discard), &orientMockAPI{state: &dollstate.DollState{}},
+		WithDispatcher(dispatcher),
+		WithTaskModelConfiguration(config.InferenceTaskOrient, orientProvider, testModelConfiguration("orient", inference.DefaultModelContextBudget())),
+		WithTaskModelConfiguration(config.InferenceTaskPlan, planProvider, testModelConfiguration("plan", inference.DefaultModelContextBudget())),
+		WithTaskModelConfiguration(config.InferenceTaskReflection, reflectionProvider, testModelConfiguration("reflect", inference.DefaultModelContextBudget())))
+}
+
+func TestPlanDispatchesActionBeforeSuccessfulReflectionExactlyOnce(t *testing.T) {
+	dispatcher := &lifecycleDispatcher{}
+	reflectionProvider := &universalContextProvider{responses: []string{"considered"}}
+	scheduler := reflectionActionScheduler(reflectionProvider, dispatcher, true)
+
+	result, err := scheduler.Enter(context.Background(), events.TypeMessage, "send it")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dispatcher.callCount() != 1 || len(reflectionProvider.capturedRequests()) != 1 {
+		t.Fatalf("dispatches=%d reflections=%d", dispatcher.callCount(), len(reflectionProvider.capturedRequests()))
+	}
+	if result.Level != LevelReflect || result.Reflection == nil {
+		t.Fatalf("result = %+v", result)
+	}
+}
+
+func TestReflectionFailureDoesNotSuppressOrDuplicatePlannedAction(t *testing.T) {
+	dispatcher := &lifecycleDispatcher{}
+	reflectionProvider := &failingReflectionProvider{err: errors.New("reflection unavailable")}
+	scheduler := reflectionActionScheduler(reflectionProvider, dispatcher, true)
+
+	result, err := scheduler.Enter(context.Background(), events.TypeMessage, "send it")
+	if err != nil {
+		t.Fatalf("plan error = %v", err)
+	}
+	if result == nil || result.Level != LevelPlan || result.Plan == nil || result.ReflectionError == nil ||
+		!strings.Contains(result.ReflectionError.Error(), "enter reflection after plan execution") {
+		t.Fatalf("completed plan result = %+v", result)
+	}
+	if dispatcher.callCount() != 1 || reflectionProvider.callCount() != 1 {
+		t.Fatalf("dispatches=%d reflections=%d", dispatcher.callCount(), reflectionProvider.callCount())
+	}
+}
+
+func TestOutboundFailureRemainsPrimaryAndSkipsReflection(t *testing.T) {
+	dispatcher := &lifecycleDispatcher{err: errors.New("gateway unavailable")}
+	reflectionProvider := &failingReflectionProvider{err: errors.New("must not run")}
+	scheduler := reflectionActionScheduler(reflectionProvider, dispatcher, true)
+
+	result, err := scheduler.Enter(context.Background(), events.TypeMessage, "send it")
+	if result != nil || err == nil || !strings.Contains(err.Error(), "enter dispatch") || !strings.Contains(err.Error(), "gateway unavailable") {
+		t.Fatalf("result=%+v error=%v", result, err)
+	}
+	if dispatcher.callCount() != 1 || reflectionProvider.callCount() != 0 {
+		t.Fatalf("dispatches=%d reflections=%d", dispatcher.callCount(), reflectionProvider.callCount())
+	}
+}
+
+func TestCancellationAfterDispatchReturnsCompletedPlanWithoutRedispatch(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	dispatcher := &lifecycleDispatcher{afterRun: cancel}
+	reflectionProvider := &failingReflectionProvider{err: errors.New("must not be called")}
+	scheduler := reflectionActionScheduler(reflectionProvider, dispatcher, true)
+
+	result, err := scheduler.Enter(ctx, events.TypeMessage, "send it")
+	if err != nil || result == nil || result.Level != LevelPlan || !errors.Is(result.ReflectionError, context.Canceled) {
+		t.Fatalf("result=%+v error=%v", result, err)
+	}
+	if dispatcher.callCount() != 1 || reflectionProvider.callCount() != 0 {
+		t.Fatalf("dispatches=%d reflections=%d", dispatcher.callCount(), reflectionProvider.callCount())
+	}
+}
+
+func TestOrdinaryActionPlanRetainsSingleDispatchWithoutReflection(t *testing.T) {
+	dispatcher := &lifecycleDispatcher{}
+	reflectionProvider := &failingReflectionProvider{err: errors.New("must not run")}
+	scheduler := reflectionActionScheduler(reflectionProvider, dispatcher, false)
+
+	result, err := scheduler.Enter(context.Background(), events.TypeMessage, "send it")
+	if err != nil || result == nil || result.Level != LevelPlan {
+		t.Fatalf("result=%+v error=%v", result, err)
+	}
+	if dispatcher.callCount() != 1 || reflectionProvider.callCount() != 0 {
+		t.Fatalf("dispatches=%d reflections=%d", dispatcher.callCount(), reflectionProvider.callCount())
+	}
+}
+
 func (p *blockingReflectionProvider) ID() inference.ProviderID { return "blocking-reflection" }
 func (p *blockingReflectionProvider) Infer(ctx context.Context, request inference.Request) (*inference.Response, error) {
 	p.once.Do(func() { close(p.entered) })

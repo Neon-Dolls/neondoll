@@ -64,6 +64,10 @@ type Result struct {
 	Orientation *Orientation // set when Level is LevelOrient
 	Plan        *Plan        // set when Level is LevelPlan
 	Reflection  *ReflectionOutcome
+	// ReflectionError reports failure of an optional Reflection follow-on.
+	// A non-nil value does not invalidate the completed Plan or dispatched
+	// action and must not cause the Plan to be replayed.
+	ReflectionError error
 }
 
 // Action represents something the Doll should do.
@@ -238,30 +242,37 @@ func (s *Scheduler) Enter(ctx context.Context, eventType events.Type, input stri
 			return nil, fmt.Errorf("enter plan: %w", err)
 		}
 		result := &Result{Level: LevelPlan, Orientation: orient, Plan: plan, StateDirty: dirty}
+
+		// Dispatch an independently planned action before optional Reflection.
+		// Reflection is cognition about the completed plan, not an execution
+		// gate. Preserve the established dispatch failure boundary: when the
+		// dispatcher fails, return that error and do not obscure it with a
+		// second inference attempt.
+		if plan.OutboundAction != nil && s.dispatcher != nil {
+			if err := s.dispatcher.Dispatch(ctx, *plan.OutboundAction); err != nil {
+				s.log.Warn("outbound action dispatch failed", map[string]any{"error": err.Error()})
+				return nil, fmt.Errorf("enter dispatch: %w", err)
+			}
+		}
+
 		if plan.RequestReflection {
 			signal, signalErr := NewReflectionSignal(ReflectionSourcePlan, plan.ReflectionReason, plan.Summary, s.timeProvider())
 			if signalErr != nil {
-				return nil, fmt.Errorf("enter reflection signal: %w", signalErr)
+				result.ReflectionError = fmt.Errorf("enter reflection signal after plan execution: %w", signalErr)
+				s.log.Warn("optional reflection signal failed after plan execution", map[string]any{"error": signalErr.Error()})
+				return result, nil
 			}
 			if run := cognitionRunFromContext(ctx); run != nil {
 				signal.IntentionID = run.intention()
 			}
 			outcome, reflectErr := s.Reflect(ctx, signal)
 			if reflectErr != nil {
-				return nil, fmt.Errorf("enter reflection: %w", reflectErr)
+				s.log.Warn("optional reflection failed after plan execution", map[string]any{"error": reflectErr.Error()})
+				result.ReflectionError = fmt.Errorf("enter reflection after plan execution: %w", reflectErr)
+				return result, nil
 			}
 			result.Level = LevelReflect
 			result.Reflection = outcome
-		}
-
-		// Dispatch outbound action if present.
-		// A dispatcher failure must be surfaced through the normal error
-		// boundary — not buried in a nil-error result.
-		if plan.OutboundAction != nil && s.dispatcher != nil {
-			if err := s.dispatcher.Dispatch(ctx, *plan.OutboundAction); err != nil {
-				s.log.Warn("outbound action dispatch failed", map[string]any{"error": err.Error()})
-				return nil, fmt.Errorf("enter dispatch: %w", err)
-			}
 		}
 
 		return result, nil

@@ -17,6 +17,17 @@ Interactions, actions, and Pulse wakes do not generate Reflection
 automatically. A spontaneous Pulse or due Intention can reach Reflection only
 when its resulting Plan chooses that escalation.
 
+When one Plan independently proposes both an outbound action and Reflection,
+Core dispatches the action first through the established Dispatcher and its
+authorization boundary. Reflection is an optional cognitive follow-on, never
+an execution gate. A dispatch failure retains the existing `enter dispatch`
+error and Reflection is not started. If dispatch succeeds but Reflection later
+fails or is cancelled, `Enter` returns the completed Plan result with an
+explicit `ReflectionError`; the Plan itself remains successful. This makes the
+partial outcome observable without causing Pulse or Intention recovery to
+replay the Plan and dispatch the action again. Direct `Reflect` calls continue
+to return ordinary cancellation and execution errors.
+
 Pulse also carries a distinct deterministic `reflective_pressure` activation.
 Core components may contribute bounded operational evidence without assigning
 semantic meaning to it. Contributions accumulate as a saturating union and
