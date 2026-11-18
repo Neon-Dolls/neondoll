@@ -18,6 +18,9 @@ import (
 type mindStateFixture struct{ state *dollstate.DollState }
 
 func (fixture *mindStateFixture) State() *dollstate.DollState { return fixture.state }
+func (fixture *mindStateFixture) CurrentSelf(context.Context) (dollstate.Self, error) {
+	return fixture.state.Self, nil
+}
 
 var _ contextbuilder.MindState = (dollmind.MindAPI)(nil)
 
@@ -112,6 +115,55 @@ func TestCognitionRunReadsCurrentAuthoritativeMindState(t *testing.T) {
 	}
 	if strings.Contains(joinContents(before), "Updated goal") || !strings.Contains(joinContents(after), "Updated goal") {
 		t.Fatalf("builder did not read current authoritative state: before=%q after=%q", joinContents(before), joinContents(after))
+	}
+}
+
+func TestCognitionRunUsesOnlyLatestSelfRevisionWithinBudget(t *testing.T) {
+	state := cognitionDollState()
+	state.Self = dollstate.Self{
+		RevisionID: "self-1", Revision: 1, CreatedAt: time.Unix(1, 0).UTC(), UpdatedAt: time.Unix(1, 0).UTC(),
+		Content: "I once understood myself as hurried.",
+	}
+	mind := &mindStateFixture{state: state}
+	resolver, err := contextbuilder.NewCognitionRunResolver(contextbuilder.CognitionRun{ID: "self-run", Objective: "Reflect."}, mind, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	builder, err := contextbuilder.NewWithResolver(resolver, nil, contextbuilder.SlidingWindowPolicy{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := contextbuilder.SourceRequest{Source: resolver.Source(), TokenBudget: 1000}
+	first, err := builder.BuildSource(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasProvenance(first.Messages, "doll.self") || !strings.Contains(joinContents(first), "hurried") {
+		t.Fatalf("initial Self missing: %+v", first.Messages)
+	}
+	state.Self = dollstate.Self{
+		RevisionID: "self-2", Revision: 2, CreatedAt: time.Unix(1, 0).UTC(), UpdatedAt: time.Unix(2, 0).UTC(),
+		Content: "I now understand patience as deliberate attention.",
+	}
+	second, err := builder.BuildSource(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := joinContents(second)
+	if !strings.Contains(content, "deliberate attention") || strings.Contains(content, "hurried") {
+		t.Fatalf("Self history leaked into active context: %q", content)
+	}
+
+	state.Self.Content = strings.Repeat("large-self ", 1000)
+	small, err := builder.BuildSource(context.Background(), contextbuilder.SourceRequest{Source: resolver.Source(), TokenBudget: 50})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if small.Metadata.EstimatedTokens > 50 || !hasProvenance(small.Messages, "doll.identity") || !hasProvenance(small.Messages, "cognition_run.objective") {
+		t.Fatalf("Self displaced required context: %+v", small)
+	}
+	if hasProvenance(small.Messages, "doll.self") {
+		t.Fatal("oversized optional Self should have been omitted from the bounded context")
 	}
 }
 

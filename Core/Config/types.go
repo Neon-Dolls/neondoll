@@ -12,6 +12,7 @@ import (
 	"github.com/Neon-Dolls/neondoll/Core/ExternalIdentity"
 	"github.com/Neon-Dolls/neondoll/Core/Inference"
 	"github.com/Neon-Dolls/neondoll/Core/Memory"
+	selfstate "github.com/Neon-Dolls/neondoll/Core/Self"
 )
 
 // secAsDuration converts an int64 seconds value (as stored in PulseConfig)
@@ -38,6 +39,11 @@ type Config struct {
 	Relay      RelayConfig          `json:"relay"`
 	Extensions []ExtensionManifest  `json:"extensions,omitempty"`
 	Memory     memory.Configuration `json:"memory,omitempty"`
+	Self       SelfConfig           `json:"self,omitempty"`
+}
+
+type SelfConfig struct {
+	MaxTokens int `json:"max_tokens"`
 }
 
 type ExtensionArtifact struct {
@@ -184,6 +190,7 @@ func Defaults() Config {
 		Relay: RelayConfig{
 			Enabled: false,
 		},
+		Self: SelfConfig{MaxTokens: selfstate.DefaultMaxTokens},
 	}
 }
 
@@ -208,6 +215,9 @@ func Load(path string) (*Config, error) {
 	}
 	if err := cfg.Memory.Validate(); err != nil {
 		return nil, fmt.Errorf("config memory: %w", err)
+	}
+	if cfg.Self.MaxTokens <= 0 {
+		return nil, fmt.Errorf("config self: max_tokens must be positive")
 	}
 	return &cfg, nil
 }

@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 
+	selfstate "github.com/Neon-Dolls/neondoll/Core/Self"
 	"github.com/Neon-Dolls/neondoll/DollState"
 )
 
@@ -17,6 +18,10 @@ const recentCognitionMemories = 5
 // and never stores a duplicate DollState.
 type MindState interface {
 	State() *dollstate.DollState
+}
+
+type CurrentSelfReader interface {
+	CurrentSelf(context.Context) (dollstate.Self, error)
 }
 
 type CognitionRun struct {
@@ -99,23 +104,31 @@ func validateCognitionWorking(records []CognitionWorkingRecord) error {
 	return nil
 }
 
-func (resolver *CognitionRunResolver) Resolve(_ context.Context, source ContextSource) (ResolvedSource, error) {
+func (resolver *CognitionRunResolver) Resolve(ctx context.Context, source ContextSource) (ResolvedSource, error) {
 	if source.Kind != SourceCognitionRun {
 		return ResolvedSource{}, ErrSourceUnsupported
 	}
 	if source != resolver.source {
 		return ResolvedSource{}, ErrSourceNotFound
 	}
-	state := resolver.mind.State()
-	if state == nil {
+	current := resolver.mind.State()
+	if current == nil {
 		return ResolvedSource{}, fmt.Errorf("resolve cognition run: %w", ErrSourceNotFound)
+	}
+	state := *current
+	if reader, ok := resolver.mind.(CurrentSelfReader); ok {
+		latest, err := reader.CurrentSelf(ctx)
+		if err != nil {
+			return ResolvedSource{}, fmt.Errorf("resolve cognition run Self: %w", err)
+		}
+		state.Self = latest
 	}
 
 	resolver.mu.RLock()
 	working := append([]CognitionWorkingRecord(nil), resolver.working...)
 	resolver.mu.RUnlock()
 
-	records, err := resolver.stateRecords(state)
+	records, err := resolver.stateRecords(&state)
 	if err != nil {
 		return ResolvedSource{}, err
 	}
@@ -141,7 +154,6 @@ func (resolver *CognitionRunResolver) stateRecords(state *dollstate.DollState) (
 	type mindState struct {
 		Soul   dollstate.Soul   `json:"soul"`
 		Owner  dollstate.Owner  `json:"owner"`
-		Self   dollstate.Self   `json:"self"`
 		Drives dollstate.Drives `json:"drives"`
 	}
 	type essentialIdentity struct {
@@ -158,13 +170,23 @@ func (resolver *CognitionRunResolver) stateRecords(state *dollstate.DollState) (
 		heading    string
 		provenance string
 		value      any
+		raw        bool
 	}{
 		{id: "mind", heading: "Context data — authoritative Doll Mind state", provenance: "doll_mind.state", value: mindState{
-			Soul: state.Soul, Owner: state.Owner, Self: state.Self, Drives: state.Drives,
+			Soul: state.Soul, Owner: state.Owner, Drives: state.Drives,
 		}},
 		{id: "goals", heading: "Context data — authoritative Goals", provenance: "doll_mind.goals", value: state.Goals},
 		{id: "intentions", heading: "Context data — authoritative Intentions", provenance: "doll_mind.intentions", value: state.Intentions},
 		{id: "memory", heading: "Context data — recent Memory references", provenance: "doll_mind.memory", value: memories},
+	}
+	if content := selfstate.ContextText(state.Self); content != "" {
+		sections = append(sections, struct {
+			id         string
+			heading    string
+			provenance string
+			value      any
+			raw        bool
+		}{id: "self", heading: "Context data — active developing Self", provenance: "doll.self", value: content, raw: true})
 	}
 	identity, err := json.Marshal(essentialIdentity{DollID: state.Identity.DollID, CanonicalName: state.Identity.CanonicalName})
 	if err != nil {
@@ -180,9 +202,14 @@ func (resolver *CognitionRunResolver) stateRecords(state *dollstate.DollState) (
 		Required:   true,
 	}}
 	for _, section := range sections {
-		encoded, err := json.Marshal(section.value)
-		if err != nil {
-			return nil, fmt.Errorf("resolve cognition run %s: %w", section.id, err)
+		var encoded []byte
+		if section.raw {
+			encoded = []byte(section.value.(string))
+		} else {
+			encoded, err = json.Marshal(section.value)
+			if err != nil {
+				return nil, fmt.Errorf("resolve cognition run %s: %w", section.id, err)
+			}
 		}
 		records = append(records, ContextRecord{
 			ID:         resolver.source.ID + "/" + section.id,

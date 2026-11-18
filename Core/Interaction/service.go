@@ -13,6 +13,7 @@ import (
 	contextbuilder "github.com/Neon-Dolls/neondoll/Core/ContextBuilder"
 	"github.com/Neon-Dolls/neondoll/Core/Inference"
 	"github.com/Neon-Dolls/neondoll/Core/Persistence"
+	selfstate "github.com/Neon-Dolls/neondoll/Core/Self"
 	"github.com/Neon-Dolls/neondoll/Core/Session"
 	"github.com/Neon-Dolls/neondoll/DollLink/Events"
 	"github.com/Neon-Dolls/neondoll/DollState"
@@ -33,6 +34,10 @@ type Service struct {
 	dolls              keyedLocks
 	modelConfiguration config.ModelConfiguration
 	toolExecutor       cognitiveexecution.ToolExecutor
+	selfReader         interface {
+		Current(context.Context) (dollstate.Self, error)
+		SaveState(context.Context, *dollstate.DollState) error
+	}
 }
 
 var _ SessionHandler = (*Service)(nil)
@@ -66,6 +71,15 @@ func WithModelConfiguration(model config.ModelConfiguration) Option {
 // Interaction turn through Core's shared cognitive execution engine.
 func WithToolExecutor(executor cognitiveexecution.ToolExecutor) Option {
 	return func(service *Service) { service.toolExecutor = executor }
+}
+
+// WithSelfReader supplies the latest active Self on every context rebuild, so
+// a successful Self tool call is visible to the next inference iteration.
+func WithSelfReader(reader interface {
+	Current(context.Context) (dollstate.Self, error)
+	SaveState(context.Context, *dollstate.DollState) error
+}) Option {
+	return func(service *Service) { service.selfReader = reader }
 }
 
 func New(store persistence.Store, provider inference.Provider, log *logger.Logger, opts ...Option) *Service {
@@ -137,7 +151,21 @@ func (s *Service) handleInteraction(ctx context.Context, sessionID session.ID, t
 				instructions = append(instructions, inference.FormatToolsForPrompt(execution.Tools))
 			}
 			required := []contextbuilder.Message{{Role: contextbuilder.RoleUser, Content: currentInput}}
-			transient := make([]contextbuilder.TransientMessage, 0, len(execution.Exchanges))
+			transient := make([]contextbuilder.TransientMessage, 0, len(execution.Exchanges)+1)
+			currentSelf := state.Self
+			if s.selfReader != nil {
+				latest, selfErr := s.selfReader.Current(ctx)
+				if selfErr != nil {
+					return nil, fmt.Errorf("interaction current Self: %w", selfErr)
+				}
+				currentSelf = latest
+			}
+			if content := selfstate.ContextText(currentSelf); content != "" {
+				transient = append(transient, contextbuilder.TransientMessage{
+					ID:      "interaction/self/" + currentSelf.RevisionID,
+					Message: contextbuilder.Message{Role: contextbuilder.RoleSystem, Content: content, Provenance: "doll.self"},
+				})
+			}
 			for index, exchange := range execution.Exchanges {
 				content, formatErr := cognitiveexecution.FormatToolExchange(exchange)
 				if formatErr != nil {
@@ -222,11 +250,17 @@ func (s *Service) handleInteraction(ctx context.Context, sessionID session.ID, t
 
 	state.Memories.Items = append(state.Memories.Items, humanMemory, dollMemory)
 
-	if err := s.store.SaveDoll(ctx, state); err != nil {
+	var saveErr error
+	if s.selfReader != nil {
+		saveErr = s.selfReader.SaveState(ctx, state)
+	} else {
+		saveErr = s.store.SaveDoll(ctx, state)
+	}
+	if saveErr != nil {
 		s.log.Error("failed to persist interaction memory", diagnostics, map[string]any{
 			"doll_id": event.DollID,
 			"event":   event.ID,
-			"error":   err.Error(),
+			"error":   saveErr.Error(),
 		})
 		errResp := events.NewErrorResponse(event.ID, event.DollID, "failed to persist interaction")
 		return &errResp, nil

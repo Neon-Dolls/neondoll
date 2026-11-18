@@ -1,5 +1,7 @@
 package dollstate
 
+import "time"
+
 // Version of the Doll State model.
 const CurrentStateVersion = 1
 
@@ -40,11 +42,20 @@ type Owner struct {
 	Content string `json:"content,omitempty"`
 }
 
-// Self — the Doll's self-concept and identity markers.
+// Self is the Doll's developing, bounded self-understanding. Content is the
+// latest active Markdown snapshot; previous revisions are not accumulated
+// here. The legacy presentation fields remain readable for DollCard v1
+// compatibility and are not part of the developing Self document.
 type Self struct {
-	DisplayName string `json:"display_name,omitempty"`
-	Pronouns    string `json:"pronouns,omitempty"`
-	Tagline     string `json:"tagline,omitempty"`
+	RevisionID string    `json:"revision_id,omitempty"`
+	Revision   uint64    `json:"revision,omitempty"`
+	CreatedAt  time.Time `json:"created_at,omitempty"`
+	UpdatedAt  time.Time `json:"updated_at,omitempty"`
+	Content    string    `json:"content,omitempty"`
+
+	DisplayName string `json:"display_name,omitempty"` // legacy v1 presentation metadata
+	Pronouns    string `json:"pronouns,omitempty"`     // legacy v1 presentation metadata
+	Tagline     string `json:"tagline,omitempty"`      // legacy v1 presentation metadata
 }
 
 // Memories — episodic and semantic memory storage.
