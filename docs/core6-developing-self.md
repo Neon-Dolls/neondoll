@@ -15,6 +15,12 @@ replacement: Core validates it without truncation and atomically compares the
 caller's expected revision ID before activating it. A stale or invalid proposal
 leaves the previous revision active.
 
+SQLite initializes `self_json` when a Doll row is first created. Subsequent
+whole-Doll saves preserve that column at the SQL upsert boundary, even when the
+caller holds an older snapshot or uses another database connection. Only the
+revision-controlled Self replacement operation may update an existing
+`self_json` value.
+
 Only the latest accepted revision is persisted in the existing Doll state
 record and loaded after restart. Core does not maintain an unbounded Self
 history or inject previous revisions into cognition. The legacy structured

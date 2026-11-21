@@ -5,11 +5,87 @@ import (
 	"errors"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/Neon-Dolls/neondoll/Core/Persistence"
 	selfstate "github.com/Neon-Dolls/neondoll/Core/Self"
 	"github.com/Neon-Dolls/neondoll/DollState"
 )
+
+func TestWholeDollSavePreservesSelfAcrossIndependentConnections(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "core.db")
+	firstStore, err := persistence.NewStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer firstStore.Close()
+	secondStore, err := persistence.NewStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer secondStore.Close()
+
+	state := dollstate.NewDollState()
+	state.Identity.DollID = "shared-doll"
+	state.Identity.CanonicalName = "Before"
+	state.Self = dollstate.Self{DisplayName: "Legacy Spark", Pronouns: "she/her"}
+	if err := firstStore.SaveDoll(ctx, &state); err != nil {
+		t.Fatal(err)
+	}
+	stale, err := firstStore.LoadDoll(ctx, state.Identity.DollID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stale.Self.DisplayName != "Legacy Spark" || stale.Self.RevisionID != "" {
+		t.Fatalf("legacy Self initialization = %+v", stale.Self)
+	}
+
+	manager, err := selfstate.NewManager(secondStore.(selfstate.Store), state.Identity.DollID, selfstate.DefaultMaxTokens)
+	if err != nil {
+		t.Fatal(err)
+	}
+	revision, err := manager.Revise(ctx, selfstate.RevisionRequest{Content: "# Self\n\nA newer understanding."})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// This snapshot was loaded before the independent connection revised Self.
+	// Its ordinary fields must persist without restoring its stale self_json.
+	stale.Identity.CanonicalName = "After"
+	stale.Goals.Items = []dollstate.GoalItem{{ID: "goal-1", Name: "Persist me", State: dollstate.GoalStateActive}}
+	if err := firstStore.SaveDoll(ctx, stale); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := firstStore.LoadDoll(ctx, state.Identity.DollID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Self != revision {
+		t.Fatalf("stale whole-Doll save replaced Self: got %+v, want %+v", loaded.Self, revision)
+	}
+	if loaded.Identity.CanonicalName != "After" || len(loaded.Goals.Items) != 1 || loaded.Goals.Items[0].Name != "Persist me" {
+		t.Fatalf("ordinary state was not persisted: %+v", loaded)
+	}
+
+	next := revision
+	next.RevisionID = "self-revision-2"
+	next.Revision = revision.Revision + 1
+	next.UpdatedAt = revision.UpdatedAt.Add(time.Second)
+	next.Content = "# Self\n\nThe current understanding."
+	replaced, err := firstStore.(selfstate.Store).ReplaceSelf(ctx, state.Identity.DollID, revision.RevisionID, next)
+	if err != nil || !replaced {
+		t.Fatalf("expected revision replacement: replaced=%v err=%v", replaced, err)
+	}
+	replaced, err = secondStore.(selfstate.Store).ReplaceSelf(ctx, state.Identity.DollID, revision.RevisionID, revision)
+	if err != nil || replaced {
+		t.Fatalf("stale revision replacement: replaced=%v err=%v", replaced, err)
+	}
+	current, err := firstStore.(selfstate.Store).LoadSelf(ctx, state.Identity.DollID)
+	if err != nil || current != next {
+		t.Fatalf("current Self = %+v, err=%v; want %+v", current, err, next)
+	}
+}
 
 func TestDevelopingSelfPersistsAcrossRestartWithoutChangingSoul(t *testing.T) {
 	ctx := context.Background()
