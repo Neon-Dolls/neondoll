@@ -30,10 +30,11 @@ type Configuration struct {
 	MaxInstructionBytes int64  `json:"max_instruction_bytes,omitempty"`
 	MaxResources        uint32 `json:"max_resources,omitempty"`
 	MaxResourceBytes    int64  `json:"max_resource_bytes,omitempty"`
+	MaxLoadBytes        int64  `json:"max_load_bytes,omitempty"`
 }
 
 func DefaultConfiguration() Configuration {
-	return Configuration{MaxSkills: 128, MaxInstructionBytes: 256 * 1024, MaxResources: 16, MaxResourceBytes: 512 * 1024}
+	return Configuration{MaxSkills: 128, MaxInstructionBytes: 256 * 1024, MaxResources: 16, MaxResourceBytes: 512 * 1024, MaxLoadBytes: 1024 * 1024}
 }
 
 func (configuration Configuration) Enabled() bool {
@@ -44,7 +45,7 @@ func (configuration Configuration) Validate() error {
 	if !configuration.Enabled() {
 		return nil
 	}
-	if configuration.MaxSkills == 0 || configuration.MaxInstructionBytes <= 0 || configuration.MaxResources == 0 || configuration.MaxResourceBytes <= 0 {
+	if configuration.MaxSkills == 0 || configuration.MaxInstructionBytes <= 0 || configuration.MaxResources == 0 || configuration.MaxResourceBytes <= 0 || configuration.MaxLoadBytes <= 0 {
 		return ErrInvalidSkill
 	}
 	return nil

@@ -30,7 +30,7 @@ func TestDefaults(t *testing.T) {
 	if cfg.Self.MaxTokens != 2000 {
 		t.Fatalf("Self max_tokens = %d, want 2000", cfg.Self.MaxTokens)
 	}
-	if cfg.Skills.Enabled() || cfg.Skills.MaxSkills != 128 || cfg.Skills.MaxInstructionBytes == 0 {
+	if cfg.Skills.Enabled() || cfg.Skills.MaxSkills != 128 || cfg.Skills.MaxInstructionBytes == 0 || cfg.Skills.MaxLoadBytes == 0 {
 		t.Fatalf("unexpected Skill defaults: %+v", cfg.Skills)
 	}
 }
@@ -55,6 +55,14 @@ func TestSaveLoadLocalSkillConfiguration(t *testing.T) {
 	}
 	if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "config skills") {
 		t.Fatalf("invalid Skills config error = %v", err)
+	}
+	loaded.Skills.MaxInstructionBytes = cfg.Skills.MaxInstructionBytes
+	loaded.Skills.MaxLoadBytes = -1
+	if err := Save(path, loaded); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "config skills") {
+		t.Fatalf("invalid aggregate Skill bound error = %v", err)
 	}
 }
 

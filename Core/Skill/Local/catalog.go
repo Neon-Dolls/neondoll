@@ -6,12 +6,16 @@ package local
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/Neon-Dolls/neondoll/Core/Skill"
 )
@@ -126,6 +130,9 @@ func (catalog *Catalog) Load(ctx context.Context, request skill.LoadRequest) (sk
 		return skill.Loaded{}, fmt.Errorf("%w: SKILL.md changed after discovery", skill.ErrIntegrity)
 	}
 	loaded := skill.Loaded{Descriptor: entry.descriptor, Instructions: instructions}
+	if loadResponseSize(loaded) > catalog.configuration.MaxLoadBytes {
+		return skill.Loaded{}, skill.ErrTransferBounds
+	}
 	seen := make(map[string]bool, len(request.Resources))
 	for _, name := range request.Resources {
 		if !skill.SafeRelativePath(name) || name == "SKILL.md" || seen[name] {
@@ -136,7 +143,13 @@ func (catalog *Catalog) Load(ctx context.Context, request skill.LoadRequest) (sk
 		if readErr != nil {
 			return skill.Loaded{}, readErr
 		}
-		loaded.Resources = append(loaded.Resources, skill.NewFile(name, data))
+		resource := skill.NewFile(name, data)
+		candidate := loaded
+		candidate.Resources = append(append([]skill.File(nil), loaded.Resources...), resource)
+		if loadResponseSize(candidate) > catalog.configuration.MaxLoadBytes {
+			return skill.Loaded{}, skill.ErrTransferBounds
+		}
+		loaded.Resources = append(loaded.Resources, resource)
 	}
 	return loaded, nil
 }
@@ -145,26 +158,27 @@ func secureRead(ctx context.Context, root, relative string, maxBytes int64) ([]b
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	root, err := filepath.EvalSymlinks(root)
+	rootHandle, err := os.OpenRoot(root)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("skill local: open root: %w", err)
 	}
-	target := filepath.Join(root, relative)
-	target, err = filepath.EvalSymlinks(target)
-	if err != nil || !within(root, target) {
+	defer rootHandle.Close()
+	file, err := rootHandle.Open(relative)
+	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, skill.ErrNotFound
 		}
 		return nil, fmt.Errorf("%w: resource escapes or is inaccessible", skill.ErrInvalidSkill)
 	}
-	info, err := os.Stat(target)
+	defer file.Close()
+	info, err := file.Stat()
 	if err != nil || !info.Mode().IsRegular() {
 		return nil, skill.ErrNotFound
 	}
 	if info.Size() > maxBytes {
 		return nil, skill.ErrTransferBounds
 	}
-	data, err := os.ReadFile(target)
+	data, err := io.ReadAll(io.LimitReader(file, maxBytes+1))
 	if err != nil {
 		return nil, fmt.Errorf("skill local: read %q: %w", relative, err)
 	}
@@ -172,6 +186,30 @@ func secureRead(ctx context.Context, root, relative string, maxBytes int64) ([]b
 		return nil, skill.ErrTransferBounds
 	}
 	return data, nil
+}
+
+// loadResponseSize returns the exact JSON size of the successful skill tool
+// result. It is evaluated incrementally, before DollMind constructs the full
+// response, so encoded binary and escaped text cannot bypass MaxLoadBytes.
+func loadResponseSize(loaded skill.Loaded) int64 {
+	resources := make([]map[string]any, 0, len(loaded.Resources))
+	for _, resource := range loaded.Resources {
+		item := map[string]any{"path": resource.Path, "sha256": resource.SHA256, "size": len(resource.Data)}
+		if utf8.Valid(resource.Data) {
+			item["encoding"], item["content"] = "utf-8", string(resource.Data)
+		} else {
+			item["encoding"], item["content_base64"] = "base64", base64.StdEncoding.EncodeToString(resource.Data)
+		}
+		resources = append(resources, item)
+	}
+	payload, err := json.Marshal(map[string]any{
+		"descriptor": loaded.Descriptor, "instructions": string(loaded.Instructions), "resources": resources,
+		"authority": "contextual_guidance_only", "instructions_loaded": true,
+	})
+	if err != nil {
+		return int64(^uint64(0) >> 1)
+	}
+	return int64(len(payload))
 }
 
 func within(root, target string) bool {

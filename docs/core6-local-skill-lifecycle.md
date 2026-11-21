@@ -14,7 +14,8 @@ configured catalog directory is a Skill directory rooted at `SKILL.md`.
     "max_skills": 128,
     "max_instruction_bytes": 262144,
     "max_resources": 16,
-    "max_resource_bytes": 524288
+    "max_resource_bytes": 524288,
+    "max_load_bytes": 1048576
   }
 }
 ```
@@ -24,6 +25,12 @@ resolved inside `paths.data_dir`; traversal and escaping symlinks are rejected.
 An explicitly configured absolute directory is supported. Startup validates
 every discovered `SKILL.md` and fails rather than silently hiding malformed,
 duplicate, or oversized Skills.
+
+`max_load_bytes` bounds the complete serialized `core.skills__read` result,
+including instructions, requested resources, metadata, JSON escaping, and
+base64 expansion for binary files. Per-instruction and per-resource bounds
+still apply. Callers should request only the small supporting resources needed
+for the current work rather than loading a directory in bulk.
 
 `name` and `description` come from standard YAML frontmatter, and the name must
 match its parent directory. Local installations use revision 1 unless the

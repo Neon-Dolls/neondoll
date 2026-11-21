@@ -5,6 +5,8 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
+	"sync"
 	"testing"
 
 	"github.com/Neon-Dolls/neondoll/Core/Skill"
@@ -127,6 +129,101 @@ func TestLocalCatalogEnforcesBoundsAndRelativeRoot(t *testing.T) {
 	if _, err := Open(escape, Options{DataRoot: dataRoot}); !errors.Is(err, skill.ErrInvalidSkill) {
 		t.Fatalf("traversal error = %v", err)
 	}
+}
+
+func TestLocalCatalogEnforcesAggregateEncodedLoadBound(t *testing.T) {
+	root := t.TempDir()
+	writeSkill(t, root, "aggregate", skillDocument("aggregate", "Exercise aggregate Skill load accounting.", "Use only requested resources."), map[string][]byte{
+		"first.txt":  []byte("first resource"),
+		"second.txt": []byte("second resource"),
+		"binary.bin": {0xff, 0xfe, 0xfd, 0xfc, 0xfb, 0xfa},
+	})
+	configuration := testConfiguration(root)
+	configuration.MaxLoadBytes = 1 << 20
+	catalog, err := Open(configuration, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reference := skill.Reference{ID: "aggregate", Revision: 3}
+	instructions, err := catalog.Load(context.Background(), skill.LoadRequest{Reference: reference})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := catalog.Load(context.Background(), skill.LoadRequest{Reference: reference, Resources: []string{"first.txt"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	both, err := catalog.Load(context.Background(), skill.LoadRequest{Reference: reference, Resources: []string{"first.txt", "second.txt"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	catalog.configuration.MaxLoadBytes = loadResponseSize(instructions) - 1
+	if _, err := catalog.Load(context.Background(), skill.LoadRequest{Reference: reference}); !errors.Is(err, skill.ErrTransferBounds) {
+		t.Fatalf("instruction aggregate error = %v", err)
+	}
+	catalog.configuration.MaxLoadBytes = loadResponseSize(first)
+	if _, err := catalog.Load(context.Background(), skill.LoadRequest{Reference: reference, Resources: []string{"first.txt", "second.txt"}}); !errors.Is(err, skill.ErrTransferBounds) {
+		t.Fatalf("collective resource error = %v (one=%d both=%d)", err, loadResponseSize(first), loadResponseSize(both))
+	}
+	if _, err := catalog.Load(context.Background(), skill.LoadRequest{Reference: reference, Resources: []string{"first.txt"}}); err != nil {
+		t.Fatalf("small load error = %v", err)
+	}
+
+	catalog.configuration.MaxLoadBytes = loadResponseSize(instructions) + 6
+	if _, err := catalog.Load(context.Background(), skill.LoadRequest{Reference: reference, Resources: []string{"binary.bin"}}); !errors.Is(err, skill.ErrTransferBounds) {
+		t.Fatalf("binary encoded overhead error = %v", err)
+	}
+}
+
+func TestSecureReadResistsSymlinkSubstitution(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("atomic replacement fixture uses Unix rename semantics")
+	}
+	root := t.TempDir()
+	target := filepath.Join(root, "resource.txt")
+	outside := filepath.Join(t.TempDir(), "outside.txt")
+	if err := os.WriteFile(target, []byte("safe"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(outside, []byte("outside"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	started := make(chan struct{})
+	stop := make(chan struct{})
+	var writer sync.WaitGroup
+	writer.Add(1)
+	go func() {
+		defer writer.Done()
+		close(started)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			temporary := filepath.Join(root, "replacement")
+			_ = os.Remove(temporary)
+			if err := os.Symlink(outside, temporary); err == nil {
+				_ = os.Rename(temporary, target)
+			}
+			_ = os.Remove(temporary)
+			if err := os.WriteFile(temporary, []byte("safe"), 0o600); err == nil {
+				_ = os.Rename(temporary, target)
+			}
+		}
+	}()
+	<-started
+	for range 2000 {
+		data, err := secureRead(context.Background(), root, "resource.txt", 32)
+		if err == nil && string(data) != "safe" {
+			close(stop)
+			writer.Wait()
+			t.Fatalf("read substituted outside content %q", data)
+		}
+	}
+	close(stop)
+	writer.Wait()
 }
 
 func TestCatalogRejectsDuplicateIdentifiers(t *testing.T) {
