@@ -20,3 +20,15 @@ func TestSharedInstructionsAdvertiseSubjectiveMemoryOnlyWhenAvailable(t *testing
 		}
 	}
 }
+
+func TestSharedInstructionsAdvertiseSelectiveSkillsWithoutReplacingMemoryGuidance(t *testing.T) {
+	skillTool := inference.Tool{Name: "core.skills__list", CapabilityID: "core.skills", OperationID: "list"}
+	if got := SharedInstructions([]inference.Tool{skillTool}); len(got) != 1 || got[0] != SkillGuidance {
+		t.Fatalf("Skill guidance = %q", got)
+	}
+	memoryTool := inference.Tool{Name: "core.memory__recall", CapabilityID: "core.memory", OperationID: "recall"}
+	got := SharedInstructions([]inference.Tool{skillTool, memoryTool})
+	if len(got) != 2 || got[0] != MemoryGuidance || got[1] != SkillGuidance {
+		t.Fatalf("combined guidance = %q", got)
+	}
+}

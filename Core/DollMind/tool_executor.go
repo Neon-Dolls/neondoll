@@ -20,6 +20,7 @@ import (
 	selfstate "github.com/Neon-Dolls/neondoll/Core/Self"
 	"github.com/Neon-Dolls/neondoll/Core/Session"
 	"github.com/Neon-Dolls/neondoll/Core/SessionEvent"
+	"github.com/Neon-Dolls/neondoll/Core/Skill"
 )
 
 // ToolExecutor is the single cognitive tool execution path. It performs the
@@ -39,6 +40,7 @@ type ToolExecutor struct {
 	communication       communication.Sender
 	memory              memory.Provider
 	self                *selfstate.Manager
+	skills              skill.Catalog
 	recoveryMu          sync.Mutex
 	recoveryInitialized bool
 }
@@ -82,6 +84,12 @@ func WithSelfManager(manager *selfstate.Manager) ToolExecutorOption {
 	return func(executor *ToolExecutor) { executor.self = manager }
 }
 
+// WithSkillCatalog exposes compact discovery and selective instruction loading
+// through the shared authorized cognitive tool path.
+func WithSkillCatalog(catalog skill.Catalog) ToolExecutorOption {
+	return func(executor *ToolExecutor) { executor.skills = catalog }
+}
+
 func (executor *ToolExecutor) SetPermissionResolutionNotifier(notifier PermissionResolutionNotifier) {
 	executor.notifier = notifier
 }
@@ -114,7 +122,7 @@ func NewToolExecutor(registry *body.Registry, guard *body.Guard, actionPolicy ac
 // Tools projects each currently available semantic capability/operation once.
 // Body selection stays internal; provider-visible names never encode identity.
 func (executor *ToolExecutor) Tools() []inference.Tool {
-	if executor.registry == nil && executor.communication == nil && executor.memory == nil && executor.self == nil {
+	if executor.registry == nil && executor.communication == nil && executor.memory == nil && executor.self == nil && executor.skills == nil {
 		return nil
 	}
 	var bodies []body.Body
@@ -143,6 +151,9 @@ func (executor *ToolExecutor) Tools() []inference.Tool {
 	}
 	if executor.self != nil {
 		tools = append(tools, selfRevisionTool())
+	}
+	if executor.skills != nil {
+		tools = append(tools, skillListTool(), skillReadTool())
 	}
 	sort.Slice(tools, func(i, j int) bool { return tools[i].Name < tools[j].Name })
 	return tools
@@ -204,6 +215,14 @@ func (executor *ToolExecutor) executeCall(ctx context.Context, correlation cogni
 	}
 	if tool.CapabilityID == selfCapability && tool.OperationID == selfOperationRevise {
 		return executor.reviseSelf(ctx, call)
+	}
+	if tool.CapabilityID == skillCapability {
+		switch tool.OperationID {
+		case skillOperationList:
+			return executor.listSkills(ctx, call)
+		case skillOperationRead:
+			return executor.readSkill(ctx, call)
+		}
 	}
 	if executor.registry == nil || executor.coordinator == nil {
 		return failureResult(call.ID, "invalid_configuration", "Body execution boundaries are unavailable")
