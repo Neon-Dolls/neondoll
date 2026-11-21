@@ -24,8 +24,19 @@ import (
 	"github.com/Neon-Dolls/neondoll/Core/Persistence"
 	"github.com/Neon-Dolls/neondoll/Core/Session"
 	"github.com/Neon-Dolls/neondoll/DollLink/Events"
+	"github.com/Neon-Dolls/neondoll/DollState"
 	"github.com/Neon-Dolls/neondoll/pkg/logger"
 )
+
+type interactionSelfReader struct{ value dollstate.Self }
+
+func (reader *interactionSelfReader) Current(context.Context) (dollstate.Self, error) {
+	return reader.value, nil
+}
+func (reader *interactionSelfReader) SaveState(_ context.Context, state *dollstate.DollState) error {
+	state.Self = reader.value
+	return nil
+}
 
 type sessionContextProvider struct {
 	mu        sync.Mutex
@@ -189,6 +200,30 @@ func TestSessionInteractionBuildsFreshMultiTurnContext(t *testing.T) {
 	}
 	if provider.requests[0].TurnID != stored[0].TurnID || provider.requests[1].TurnID != stored[2].TurnID {
 		t.Fatalf("turn ID was not stable across inference and history: requests=%+v history=%+v", provider.requests, stored)
+	}
+}
+
+func TestInteractionContextIncludesCurrentSelfWithoutHistory(t *testing.T) {
+	store := openStore(t)
+	seedDoll(t, store, "self-doll", "SelfDoll")
+	sessions, _ := interactionSessionStores(t, store)
+	created := createInteractionSession(t, sessions, "body-one")
+	reader := &interactionSelfReader{value: dollstate.Self{
+		RevisionID: "self-2", Revision: 2, CreatedAt: time.Unix(1, 0).UTC(), UpdatedAt: time.Unix(2, 0).UTC(),
+		Content: "I understand patience as deliberate attention.",
+	}}
+	provider := &sessionContextProvider{}
+	service := New(store, provider, logger.New(logger.ErrorLevel, io.Discard), WithModelConfiguration(testModelConfiguration), WithSelfReader(reader))
+	event := newResponse("self-doll", "What matters now?")
+	if _, err := service.HandleInteraction(context.Background(), created, &event); err != nil {
+		t.Fatal(err)
+	}
+	content := strings.Join(messageContents(provider.requests[0].Messages), "\n")
+	if !strings.Contains(content, "deliberate attention") || !strings.Contains(content, "self-2") {
+		t.Fatalf("current Self missing from Interaction context: %s", content)
+	}
+	if strings.Contains(content, "self-1") {
+		t.Fatal("an inactive Self revision leaked into Interaction context")
 	}
 }
 

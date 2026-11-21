@@ -27,6 +27,21 @@ func TestDefaults(t *testing.T) {
 	if model.Budget.ContextTokens != 32768 || model.Budget.OutputTokens != 1024 || model.Budget.RequiredOverheadTokens != 256 {
 		t.Fatalf("unexpected inference budget defaults: %+v", cfg.Inference)
 	}
+	if cfg.Self.MaxTokens != 2000 {
+		t.Fatalf("Self max_tokens = %d, want 2000", cfg.Self.MaxTokens)
+	}
+}
+
+func TestLoadRejectsInvalidSelfBound(t *testing.T) {
+	cfg := Defaults()
+	cfg.Self.MaxTokens = 0
+	path := filepath.Join(t.TempDir(), "invalid-self.json")
+	if err := Save(path, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "config self") {
+		t.Fatalf("Load error = %v", err)
+	}
 }
 
 func TestSaveLoad(t *testing.T) {

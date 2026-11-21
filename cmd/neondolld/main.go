@@ -32,6 +32,7 @@ import (
 	"github.com/Neon-Dolls/neondoll/Core/Persistence"
 	"github.com/Neon-Dolls/neondoll/Core/Pulse"
 	"github.com/Neon-Dolls/neondoll/Core/Runtime"
+	selfstate "github.com/Neon-Dolls/neondoll/Core/Self"
 	"github.com/Neon-Dolls/neondoll/Core/Session"
 	"github.com/Neon-Dolls/neondoll/Core/SessionEvent"
 	"github.com/Neon-Dolls/neondoll/DollLink/WebSocket"
@@ -46,11 +47,23 @@ type productionMindAPI struct {
 	state    *dollstate.DollState
 	store    persistence.Store
 	provider inference.Provider
+	self     *selfstate.Manager
 }
 
 func (m *productionMindAPI) Inference() inference.Provider { return m.provider }
 func (m *productionMindAPI) State() *dollstate.DollState   { return m.state }
-func (m *productionMindAPI) Save() error                   { return m.store.SaveDoll(context.Background(), m.state) }
+func (m *productionMindAPI) Save() error {
+	if m.self != nil {
+		return m.self.SaveState(context.Background(), m.state)
+	}
+	return m.store.SaveDoll(context.Background(), m.state)
+}
+func (m *productionMindAPI) CurrentSelf(ctx context.Context) (dollstate.Self, error) {
+	if m.self == nil {
+		return m.state.Self, nil
+	}
+	return m.self.Current(ctx)
+}
 
 // wireguardListenPort is the stable UDP port the Core's WireGuard tunnel
 // binds. Keeping it stable across reconstructions is what lets a paired Body
@@ -345,7 +358,20 @@ func run() int {
 			return 1
 		}
 	}
-	toolExecutorOptions := []dollmind.ToolExecutorOption{dollmind.WithPermissionRequests(permissionManager, dollState.Owner.OwnerID, 15*time.Minute)}
+	selfStore, ok := store.(selfstate.Store)
+	if !ok {
+		log.Error("store does not implement developing Self persistence")
+		return 1
+	}
+	selfManager, err := selfstate.NewManager(selfStore, dollState.Identity.DollID, cfg.Self.MaxTokens)
+	if err != nil {
+		log.Error("developing Self setup error", map[string]any{"error": err.Error()})
+		return 1
+	}
+	toolExecutorOptions := []dollmind.ToolExecutorOption{
+		dollmind.WithPermissionRequests(permissionManager, dollState.Owner.OwnerID, 15*time.Minute),
+		dollmind.WithSelfManager(selfManager),
+	}
 	if memoryProvider != nil {
 		toolExecutorOptions = append(toolExecutorOptions, dollmind.WithMemoryProvider(memoryProvider))
 	}
@@ -362,7 +388,7 @@ func run() int {
 	defer acceptanceControl()
 	directCognitionProvider := inference.NewToolEnabledProvider(directProvider)
 	orientCognitionProvider := inference.NewToolEnabledProvider(orientProvider)
-	mindAPI := &productionMindAPI{state: dollState, store: store, provider: directCognitionProvider}
+	mindAPI := &productionMindAPI{state: dollState, store: store, provider: directCognitionProvider, self: selfManager}
 	scheduler := dollmind.New(directCognitionProvider, log, mindAPI,
 		dollmind.WithModelConfiguration(directModel),
 		dollmind.WithTaskModelConfiguration(config.InferenceTaskOrient, orientCognitionProvider, orientModel),
@@ -381,6 +407,7 @@ func run() int {
 	interactionSvc := interaction.New(store, inference.NewToolEnabledProvider(interactionProvider), log,
 		interaction.WithModelConfiguration(interactionModel),
 		interaction.WithToolExecutor(cognitionToolExecutor),
+		interaction.WithSelfReader(selfManager),
 	)
 	interactionRouter, err := coreServices.InteractionRouter(interactionSvc)
 	if err != nil {

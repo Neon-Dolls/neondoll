@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Neon-Dolls/neondoll/DollState"
 )
@@ -28,6 +29,11 @@ func testSparkState(t *testing.T) *dollstate.DollState {
 			Content:  "# Spark — NeonDoll Test Doll\n\nSpark is curious and concise.",
 		},
 		Self: dollstate.Self{
+			RevisionID:  "self-revision-1",
+			Revision:    1,
+			CreatedAt:   time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+			UpdatedAt:   time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC),
+			Content:     "# Self\n\nI understand myself as curious and learning.",
 			DisplayName: "Spark",
 			Pronouns:    "she/her",
 			Tagline:     "NeonDoll's first test doll",
@@ -114,6 +120,11 @@ func TestRoundTrip_EncodeDecode(t *testing.T) {
 	}
 	if decoded.Self.Tagline != original.Self.Tagline {
 		t.Errorf("AC4: Self.Tagline = %q, want %q", decoded.Self.Tagline, original.Self.Tagline)
+	}
+	if decoded.Self.RevisionID != original.Self.RevisionID || decoded.Self.Revision != original.Self.Revision ||
+		decoded.Self.Content != original.Self.Content || !decoded.Self.CreatedAt.Equal(original.Self.CreatedAt) ||
+		!decoded.Self.UpdatedAt.Equal(original.Self.UpdatedAt) {
+		t.Errorf("AC4: developing Self mismatch: got %+v, want %+v", decoded.Self, original.Self)
 	}
 	if decoded.Owner.Content != original.Owner.Content {
 		t.Errorf("AC4: Owner.Content = %q, want %q", decoded.Owner.Content, original.Owner.Content)

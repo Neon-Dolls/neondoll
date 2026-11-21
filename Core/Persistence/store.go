@@ -452,7 +452,11 @@ func createSchema(db *sql.DB) error {
 	return nil
 }
 
-// SaveDoll inserts or replaces a Doll's state, keyed by its stable DollID.
+// SaveDoll inserts or replaces a Doll's ordinary state, keyed by its stable
+// DollID. self_json is initialized when the row is created, but an update never
+// replaces it: ReplaceSelf is the only revision-controlled Self mutation path.
+// This persistence-boundary rule prevents stale whole-Doll snapshots from
+// overwriting a newer Self written through another process or DB connection.
 // The doll row and any memory changes are applied atomically in a single
 // SQLite transaction. If Memories.Items is nil, existing memories are
 // preserved untouched; if non-nil (including empty slice), they are replaced.
@@ -549,7 +553,6 @@ func (s *store) SaveDoll(ctx context.Context, state *dollstate.DollState) error 
 			identity_json=excluded.identity_json,
 			soul_json=excluded.soul_json,
 			owner_json=excluded.owner_json,
-			self_json=excluded.self_json,
 			drives_json=excluded.drives_json,
 			goals_json=excluded.goals_json,
 			intentions_json=excluded.intentions_json,
