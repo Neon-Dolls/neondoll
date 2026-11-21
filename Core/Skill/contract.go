@@ -18,7 +18,38 @@ var (
 	ErrInvalidSkill   = errors.New("skill: invalid contract")
 	ErrIntegrity      = errors.New("skill: integrity mismatch")
 	ErrTransferBounds = errors.New("skill: transfer bounds exceeded")
+	ErrNotFound       = errors.New("skill: not found")
+	ErrUnavailable    = errors.New("skill: unavailable")
 )
+
+// Configuration selects Core's local/offline Skill catalog. An empty
+// Directory disables Skill discovery without introducing fallback storage.
+type Configuration struct {
+	Directory           string `json:"directory,omitempty"`
+	MaxSkills           uint32 `json:"max_skills,omitempty"`
+	MaxInstructionBytes int64  `json:"max_instruction_bytes,omitempty"`
+	MaxResources        uint32 `json:"max_resources,omitempty"`
+	MaxResourceBytes    int64  `json:"max_resource_bytes,omitempty"`
+	MaxLoadBytes        int64  `json:"max_load_bytes,omitempty"`
+}
+
+func DefaultConfiguration() Configuration {
+	return Configuration{MaxSkills: 128, MaxInstructionBytes: 256 * 1024, MaxResources: 16, MaxResourceBytes: 512 * 1024, MaxLoadBytes: 1024 * 1024}
+}
+
+func (configuration Configuration) Enabled() bool {
+	return strings.TrimSpace(configuration.Directory) != ""
+}
+
+func (configuration Configuration) Validate() error {
+	if !configuration.Enabled() {
+		return nil
+	}
+	if configuration.MaxSkills == 0 || configuration.MaxInstructionBytes <= 0 || configuration.MaxResources == 0 || configuration.MaxResourceBytes <= 0 || configuration.MaxLoadBytes <= 0 {
+		return ErrInvalidSkill
+	}
+	return nil
+}
 
 type ID string
 
@@ -204,6 +235,8 @@ type Summary struct {
 	Name        string     `json:"name"`
 	Description string     `json:"description"`
 	Activation  Activation `json:"activation"`
+	Source      string     `json:"source,omitempty"`
+	Directory   string     `json:"directory,omitempty"`
 }
 type DiscoverRequest struct {
 	Query   string

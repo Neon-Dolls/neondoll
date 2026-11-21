@@ -35,6 +35,7 @@ import (
 	selfstate "github.com/Neon-Dolls/neondoll/Core/Self"
 	"github.com/Neon-Dolls/neondoll/Core/Session"
 	"github.com/Neon-Dolls/neondoll/Core/SessionEvent"
+	skilllocal "github.com/Neon-Dolls/neondoll/Core/Skill/Local"
 	"github.com/Neon-Dolls/neondoll/DollLink/WebSocket"
 	"github.com/Neon-Dolls/neondoll/DollState"
 	"github.com/Neon-Dolls/neondoll/pkg/logger"
@@ -368,9 +369,18 @@ func run() int {
 		log.Error("developing Self setup error", map[string]any{"error": err.Error()})
 		return 1
 	}
+	skillCatalog, err := skilllocal.Open(cfg.Skills, skilllocal.Options{DataRoot: cfg.Paths.DataDir})
+	if err != nil {
+		log.Error("local Skill catalog setup error", map[string]any{"error": err.Error()})
+		return 1
+	}
 	toolExecutorOptions := []dollmind.ToolExecutorOption{
 		dollmind.WithPermissionRequests(permissionManager, dollState.Owner.OwnerID, 15*time.Minute),
 		dollmind.WithSelfManager(selfManager),
+	}
+	if skillCatalog != nil {
+		toolExecutorOptions = append(toolExecutorOptions, dollmind.WithSkillCatalog(skillCatalog))
+		log.Info("local Skill catalog ready", map[string]any{"skills": skillCatalog.Count()})
 	}
 	if memoryProvider != nil {
 		toolExecutorOptions = append(toolExecutorOptions, dollmind.WithMemoryProvider(memoryProvider))

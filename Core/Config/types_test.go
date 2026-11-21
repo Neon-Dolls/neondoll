@@ -30,6 +30,40 @@ func TestDefaults(t *testing.T) {
 	if cfg.Self.MaxTokens != 2000 {
 		t.Fatalf("Self max_tokens = %d, want 2000", cfg.Self.MaxTokens)
 	}
+	if cfg.Skills.Enabled() || cfg.Skills.MaxSkills != 128 || cfg.Skills.MaxInstructionBytes == 0 || cfg.Skills.MaxLoadBytes == 0 {
+		t.Fatalf("unexpected Skill defaults: %+v", cfg.Skills)
+	}
+}
+
+func TestSaveLoadLocalSkillConfiguration(t *testing.T) {
+	cfg := Defaults()
+	cfg.Skills.Directory = "skills"
+	path := filepath.Join(t.TempDir(), "skills-config.json")
+	if err := Save(path, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Skills.Directory != "skills" || loaded.Skills.MaxSkills != cfg.Skills.MaxSkills {
+		t.Fatalf("loaded Skills = %+v", loaded.Skills)
+	}
+	loaded.Skills.MaxInstructionBytes = -1
+	if err := Save(path, loaded); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "config skills") {
+		t.Fatalf("invalid Skills config error = %v", err)
+	}
+	loaded.Skills.MaxInstructionBytes = cfg.Skills.MaxInstructionBytes
+	loaded.Skills.MaxLoadBytes = -1
+	if err := Save(path, loaded); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "config skills") {
+		t.Fatalf("invalid aggregate Skill bound error = %v", err)
+	}
 }
 
 func TestLoadRejectsInvalidSelfBound(t *testing.T) {
