@@ -12,6 +12,7 @@ import (
 	"github.com/Neon-Dolls/neondoll/Core/ExternalIdentity"
 	"github.com/Neon-Dolls/neondoll/Core/Inference"
 	"github.com/Neon-Dolls/neondoll/Core/Memory"
+	packagesource "github.com/Neon-Dolls/neondoll/Core/PackageSource"
 	selfstate "github.com/Neon-Dolls/neondoll/Core/Self"
 	"github.com/Neon-Dolls/neondoll/Core/Skill"
 )
@@ -31,17 +32,18 @@ type RelayConfig struct {
 
 // Config holds the Doll's runtime configuration.
 type Config struct {
-	Core       CoreConfig           `json:"core"`
-	Console    ConsoleConfig        `json:"console"`
-	Inference  InferenceConfig      `json:"inference"`
-	Paths      PathConfig           `json:"paths"`
-	Link       LinkConfig           `json:"link"`
-	HTTP       HTTPConfig           `json:"http"`
-	Relay      RelayConfig          `json:"relay"`
-	Extensions []ExtensionManifest  `json:"extensions,omitempty"`
-	Memory     memory.Configuration `json:"memory,omitempty"`
-	Self       SelfConfig           `json:"self,omitempty"`
-	Skills     skill.Configuration  `json:"skills,omitempty"`
+	Core           CoreConfig                  `json:"core"`
+	Console        ConsoleConfig               `json:"console"`
+	Inference      InferenceConfig             `json:"inference"`
+	Paths          PathConfig                  `json:"paths"`
+	Link           LinkConfig                  `json:"link"`
+	HTTP           HTTPConfig                  `json:"http"`
+	Relay          RelayConfig                 `json:"relay"`
+	Extensions     []ExtensionManifest         `json:"extensions,omitempty"`
+	Memory         memory.Configuration        `json:"memory,omitempty"`
+	Self           SelfConfig                  `json:"self,omitempty"`
+	Skills         skill.Configuration         `json:"skills,omitempty"`
+	PackageSources packagesource.Configuration `json:"package_sources,omitempty"`
 }
 
 type SelfConfig struct {
@@ -193,7 +195,7 @@ func Defaults() Config {
 			Enabled: false,
 		},
 		Self:   SelfConfig{MaxTokens: selfstate.DefaultMaxTokens},
-		Skills: skill.DefaultConfiguration(),
+		Skills: skill.DefaultConfiguration(), PackageSources: packagesource.DefaultConfiguration(),
 	}
 }
 
@@ -224,6 +226,9 @@ func Load(path string) (*Config, error) {
 	}
 	if err := cfg.Skills.Validate(); err != nil {
 		return nil, fmt.Errorf("config skills: %w", err)
+	}
+	if err := cfg.PackageSources.Validate(); err != nil {
+		return nil, fmt.Errorf("config package sources: %w", err)
 	}
 	return &cfg, nil
 }

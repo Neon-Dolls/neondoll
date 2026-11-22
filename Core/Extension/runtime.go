@@ -95,7 +95,14 @@ func NewWASMRuntime(ctx context.Context, state StateStore, secretsRoot string, o
 }
 
 func (r *WASMRuntime) installHost(ctx context.Context) error {
-	b := r.runtime.NewHostModuleBuilder("gateway_host")
+	if err := r.installHostModule(ctx, "gateway_host"); err != nil {
+		return err
+	}
+	return r.installHostModule(ctx, "extension_host")
+}
+
+func (r *WASMRuntime) installHostModule(ctx context.Context, moduleName string) error {
+	b := r.runtime.NewHostModuleBuilder(moduleName)
 	b.NewFunctionBuilder().WithFunc(func(_ context.Context, m api.Module, p, n uint32) {
 		if i := r.instance(m); i != nil && i.manifest.GrantedCapability(CapabilityLog) {
 			_, _ = m.Memory().Read(p, n)
@@ -229,22 +236,23 @@ func (r *WASMRuntime) Load(ctx context.Context, manifest Manifest, dataRoot stri
 		return err
 	}
 	inst.module = mod
-	buf, size := mod.ExportedFunction("gateway_event_buf"), mod.ExportedFunction("gateway_event_buf_size")
-	abi, init := mod.ExportedFunction("gateway_abi_version"), mod.ExportedFunction("gateway_init")
+	names, expectedABI := contractFunctions(manifest.Contract)
+	buf, size := mod.ExportedFunction(names.buffer), mod.ExportedFunction(names.bufferSize)
+	abi, init := mod.ExportedFunction(names.abi), mod.ExportedFunction(names.init)
 	if buf == nil || size == nil || abi == nil || init == nil {
 		r.Unload(context.Background(), manifest.InstanceID)
-		return ErrUnsupportedABI
+		return fmt.Errorf("%w: required %s exports missing", ErrUnsupportedABI, manifest.Contract)
 	}
-	av, _ := abi.Call(ictx)
-	if len(av) == 0 || int32(av[0]) != GuestABIVersion {
+	av, abiErr := abi.Call(ictx)
+	if abiErr != nil || len(av) == 0 || int32(av[0]) != expectedABI {
 		_ = r.Unload(context.Background(), manifest.InstanceID)
-		return ErrUnsupportedABI
+		return fmt.Errorf("%w: %s ABI result=%v error=%v", ErrUnsupportedABI, manifest.Contract, av, abiErr)
 	}
 	bp, e := buf.Call(ictx)
 	bs, se := size.Call(ictx)
 	if e != nil || se != nil || len(bp) == 0 || len(bs) == 0 || bs[0] < minGuestEventBuffer {
 		_ = r.Unload(context.Background(), manifest.InstanceID)
-		return ErrUnsupportedABI
+		return fmt.Errorf("%w: %s event buffer pointer=%v size=%v errors=%v/%v", ErrUnsupportedABI, manifest.Contract, bp, bs, e, se)
 	}
 	inst.eventPtr = uint32(bp[0])
 	inst.eventSize = uint32(bs[0])
@@ -298,7 +306,7 @@ func (r *WASMRuntime) Poll(id string) error {
 	i.callMu.Lock()
 	defer i.callMu.Unlock()
 	i.beginOutboundCall()
-	fn := i.module.ExportedFunction("gateway_poll")
+	fn := i.module.ExportedFunction(contractFunctionsOnly(i.manifest.Contract).poll)
 	if fn == nil {
 		i.discardOutboundCall()
 		return ErrUnsupportedABI
@@ -329,7 +337,7 @@ func (r *WASMRuntime) HandleEvent(id, typ string, payload []byte) error {
 		i.discardOutboundCall()
 		return ErrInvalidManifest
 	}
-	fn := i.module.ExportedFunction("gateway_handle_event")
+	fn := i.module.ExportedFunction(contractFunctionsOnly(i.manifest.Contract).handle)
 	if fn == nil {
 		i.discardOutboundCall()
 		return ErrUnsupportedABI
@@ -402,11 +410,28 @@ func (r *WASMRuntime) Unload(ctx context.Context, id string) error {
 		return nil
 	}
 	r.remove(id)
-	if fn := i.module.ExportedFunction("gateway_shutdown"); fn != nil {
+	if fn := i.module.ExportedFunction(contractFunctionsOnly(i.manifest.Contract).shutdown); fn != nil {
 		_, _ = fn.Call(i.ctx)
 	}
 	i.cancel()
 	return i.module.Close(ctx)
+}
+
+type functionNames struct{ abi, buffer, bufferSize, init, poll, handle, shutdown string }
+
+func contractFunctions(contract string) (functionNames, int32) {
+	names := contractFunctionsOnly(contract)
+	if contract == ContractPackageSource {
+		return names, PackageSourceABIVersion
+	}
+	return names, GuestABIVersion
+}
+
+func contractFunctionsOnly(contract string) functionNames {
+	if contract == ContractPackageSource {
+		return functionNames{abi: "package_source_abi_version", buffer: "package_source_event_buf", bufferSize: "package_source_event_buf_size", init: "package_source_init", poll: "package_source_poll", handle: "package_source_handle_event", shutdown: "package_source_shutdown"}
+	}
+	return functionNames{abi: "gateway_abi_version", buffer: "gateway_event_buf", bufferSize: "gateway_event_buf_size", init: "gateway_init", poll: "gateway_poll", handle: "gateway_handle_event", shutdown: "gateway_shutdown"}
 }
 func (r *WASMRuntime) Close(ctx context.Context) error {
 	r.mu.Lock()

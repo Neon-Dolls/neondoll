@@ -12,6 +12,7 @@ import (
 
 	"github.com/Neon-Dolls/neondoll/Core/ExternalIdentity"
 	"github.com/Neon-Dolls/neondoll/Core/Gateway"
+	packagesource "github.com/Neon-Dolls/neondoll/Core/PackageSource"
 )
 
 type GatewayHost interface {
@@ -29,6 +30,7 @@ type installation struct {
 	mu       sync.Mutex
 	manifest Manifest
 	adapter  *GatewayAdapter
+	source   *WASMPackageSource
 	running  bool
 	failure  error
 }
@@ -37,6 +39,7 @@ type Manager struct {
 	activationMu           sync.Mutex
 	runtime                *WASMRuntime
 	host                   GatewayHost
+	sources                *packagesource.Registry
 	dataRoot, installsRoot string
 	entries                map[string]*installation
 	closing                bool
@@ -44,11 +47,22 @@ type Manager struct {
 	shutdownErr            error
 }
 
-func NewManager(runtime *WASMRuntime, host GatewayHost, dataRoot string, configured []Manifest) (*Manager, error) {
+type ManagerOption func(*Manager)
+
+func WithPackageSourceRegistry(registry *packagesource.Registry) ManagerOption {
+	return func(manager *Manager) { manager.sources = registry }
+}
+
+func NewManager(runtime *WASMRuntime, host GatewayHost, dataRoot string, configured []Manifest, options ...ManagerOption) (*Manager, error) {
 	if runtime == nil || host == nil {
 		return nil, ErrInvalidManifest
 	}
 	m := &Manager{runtime: runtime, host: host, dataRoot: dataRoot, installsRoot: filepath.Join(dataRoot, "extensions", "installed"), entries: map[string]*installation{}}
+	for _, option := range options {
+		if option != nil {
+			option(m)
+		}
+	}
 	for _, manifest := range configured {
 		manifest.ManagedBy = ManagedConfiguration
 		if err := m.add(manifest); err != nil {
@@ -173,6 +187,51 @@ func (m *Manager) Install(manifest Manifest) error {
 	return nil
 }
 
+// InstallExtension implements the Package Source installation handoff. The
+// source proposes a manifest, but Core independently verifies it and stages
+// the supplied artifact through the existing managed installation lifecycle.
+func (m *Manager) InstallExtension(ctx context.Context, rawManifest, artifact []byte) error {
+	var manifest Manifest
+	if json.Unmarshal(rawManifest, &manifest) != nil || manifest.ManagedBy != "" {
+		return ErrInvalidManifest
+	}
+	// A Package Source may request capabilities, but its plan is not a grant.
+	// Acquired extensions start with no host grants until trusted Core policy
+	// explicitly supplies them through a later lifecycle operation.
+	manifest.Granted = nil
+	if err := manifest.Validate(); err != nil {
+		return err
+	}
+	if !verifySHA256(artifact, manifest.Artifact.SHA256) {
+		return ErrInvalidManifest
+	}
+	temporary, err := os.CreateTemp(m.dataRoot, "package-extension-*.wasm")
+	if err != nil {
+		return err
+	}
+	name := temporary.Name()
+	defer os.Remove(name)
+	if err = temporary.Chmod(0o600); err != nil {
+		temporary.Close()
+		return err
+	}
+	if _, err = temporary.Write(artifact); err != nil {
+		temporary.Close()
+		return err
+	}
+	if err = temporary.Close(); err != nil {
+		return err
+	}
+	manifest.Artifact.Path = name
+	if err = m.Install(manifest); err != nil {
+		return err
+	}
+	if manifest.Enabled {
+		return m.Enable(ctx, manifest.InstanceID)
+	}
+	return nil
+}
+
 func (m *Manager) entry(id string) (*installation, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -228,7 +287,12 @@ func (m *Manager) Enable(ctx context.Context, id string) error {
 		entry.mu.Unlock()
 		return err
 	}
+	if manifest.Contract == ContractPackageSource && m.sources == nil {
+		_ = m.runtime.Unload(ctx, id)
+		return ErrInvalidManifest
+	}
 	adapter := NewGatewayAdapter(manifest, m.runtime)
+	source := NewWASMPackageSource(manifest, m.runtime)
 	// Activation is the linearization boundary shared with Shutdown. Once
 	// Shutdown marks the manager closing, no later Host registration is
 	// possible, including an Enable that was waiting on this installation.
@@ -241,7 +305,12 @@ func (m *Manager) Enable(ctx context.Context, id string) error {
 		_ = m.runtime.Unload(ctx, id)
 		return ErrInvalidManifest
 	}
-	if err = m.host.Register(ctx, adapter); err != nil {
+	if manifest.Contract == ContractGateway {
+		err = m.host.Register(ctx, adapter)
+	} else {
+		err = m.sources.Register(source)
+	}
+	if err != nil {
 		m.activationMu.Unlock()
 		_ = m.runtime.Unload(ctx, id)
 		entry.mu.Lock()
@@ -251,7 +320,12 @@ func (m *Manager) Enable(ctx context.Context, id string) error {
 	}
 	m.activationMu.Unlock()
 	entry.mu.Lock()
-	entry.adapter, entry.running, entry.failure = adapter, true, nil
+	entry.running, entry.failure = true, nil
+	if manifest.Contract == ContractGateway {
+		entry.adapter = adapter
+	} else {
+		entry.source = source
+	}
 	entry.mu.Unlock()
 	return nil
 }
@@ -270,12 +344,24 @@ func (m *Manager) Disable(ctx context.Context, id string) error {
 		return nil
 	}
 	entry.mu.Unlock()
-	err := m.host.Unregister(ctx, externalidentity.GatewayInstanceID(id))
+	entry.mu.Lock()
+	manifest := entry.manifest
+	entry.mu.Unlock()
+	var err error
+	if manifest.Contract == ContractGateway {
+		err = m.host.Unregister(ctx, externalidentity.GatewayInstanceID(id))
+	} else {
+		err = m.sources.Unregister(ctx, id)
+		if unloadErr := m.runtime.Unload(ctx, id); err == nil {
+			err = unloadErr
+		}
+	}
 	entry.mu.Lock()
 	defer entry.mu.Unlock()
 	// Unregister returns only after the Host has made the adapter inactive and
 	// drained it, even when Adapter.Stop reports an error.
 	entry.adapter = nil
+	entry.source = nil
 	entry.running = false
 	if err != nil {
 		entry.failure = err
@@ -340,7 +426,18 @@ func (m *Manager) Shutdown(ctx context.Context) error {
 		running := entry.running
 		entry.mu.Unlock()
 		if running {
-			err := m.host.Unregister(ctx, externalidentity.GatewayInstanceID(id))
+			entry.mu.Lock()
+			manifest := entry.manifest
+			entry.mu.Unlock()
+			var err error
+			if manifest.Contract == ContractGateway {
+				err = m.host.Unregister(ctx, externalidentity.GatewayInstanceID(id))
+			} else if m.sources != nil {
+				err = m.sources.Unregister(ctx, id)
+				if unloadErr := m.runtime.Unload(ctx, id); err == nil {
+					err = unloadErr
+				}
+			}
 			entry.mu.Lock()
 			if err != nil {
 				entry.failure = err
@@ -351,6 +448,7 @@ func (m *Manager) Shutdown(ctx context.Context) error {
 			// Host.Unregister has completed its drain before returning.
 			entry.running = false
 			entry.adapter = nil
+			entry.source = nil
 			entry.mu.Unlock()
 		}
 		entry.opMu.Unlock()

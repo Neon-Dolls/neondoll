@@ -3,14 +3,15 @@ package extension
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+
+	packagesource "github.com/Neon-Dolls/neondoll/Core/PackageSource"
 )
 
-var ErrStateNotFound = errors.New("extension: state not found")
+var ErrStateNotFound = packagesource.ErrStateNotFound
 
 type StateStore interface {
 	Get(context.Context, string, string) ([]byte, error)

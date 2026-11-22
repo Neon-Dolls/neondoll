@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"unicode/utf8"
 
 	"github.com/Neon-Dolls/neondoll/Core/Skill"
@@ -30,6 +31,7 @@ type entry struct {
 }
 
 type Catalog struct {
+	mu            sync.RWMutex
 	root          string
 	configuration skill.Configuration
 	entries       map[skill.ID]entry
@@ -84,6 +86,8 @@ func (catalog *Catalog) Count() int {
 	if catalog == nil {
 		return 0
 	}
+	catalog.mu.RLock()
+	defer catalog.mu.RUnlock()
 	return len(catalog.entries)
 }
 
@@ -91,6 +95,8 @@ func (catalog *Catalog) Discover(ctx context.Context, request skill.DiscoverRequ
 	if catalog == nil || request.Limit == 0 {
 		return nil, skill.ErrInvalidSkill
 	}
+	catalog.mu.RLock()
+	defer catalog.mu.RUnlock()
 	query := strings.ToLower(strings.TrimSpace(request.Query))
 	limit := int(request.Limit)
 	result := make([]skill.Summary, 0, min(limit, len(catalog.entries)))
@@ -115,6 +121,8 @@ func (catalog *Catalog) Load(ctx context.Context, request skill.LoadRequest) (sk
 	if catalog == nil || request.Reference.ID == "" || request.Reference.Revision == 0 || uint32(len(request.Resources)) > catalog.configuration.MaxResources {
 		return skill.Loaded{}, skill.ErrInvalidSkill
 	}
+	catalog.mu.RLock()
+	defer catalog.mu.RUnlock()
 	entry, ok := catalog.entries[request.Reference.ID]
 	if !ok || entry.descriptor.Revision != request.Reference.Revision {
 		return skill.Loaded{}, skill.ErrNotFound
