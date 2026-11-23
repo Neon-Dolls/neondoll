@@ -102,9 +102,28 @@ func TestLocalSourcePlanInstallsAndRefreshesSkillCatalog(t *testing.T) {
 	if err != nil || restarted.Count() != 1 {
 		t.Fatalf("restart count=%d err=%v", restarted.Count(), err)
 	}
-	proposals, err := source.Proposals(ctx, packagesource.ProposalRequest{Limit: 10})
+	proposals, err := source.Proposals(ctx, packagesource.ProposalRequest{Cursor: "zzzz-opaque", Limit: 10})
 	if err != nil || len(proposals.Proposals) != 1 {
 		t.Fatalf("proposals=%+v err=%v", proposals, err)
+	}
+	if err = source.AcknowledgeProposals(ctx, []string{proposals.Proposals[0].ID}); err != nil {
+		t.Fatal(err)
+	}
+	afterAck, err := source.Proposals(ctx, packagesource.ProposalRequest{Limit: 10})
+	if err != nil || len(afterAck.Proposals) != 0 {
+		t.Fatalf("acknowledged proposals=%+v err=%v", afterAck, err)
+	}
+	workflow, err := source.RequestWorkflow(ctx, packagesource.WorkflowRequest{Package: search.Packages[0].Reference, Operation: "install", Correlation: "turn-1"})
+	if err != nil || workflow.State != packagesource.WorkflowReady || workflow.Plan == nil {
+		t.Fatalf("workflow=%+v err=%v", workflow, err)
+	}
+	status, err := source.WorkflowStatus(ctx, workflow.ID)
+	if err != nil || status.State != packagesource.WorkflowReady {
+		t.Fatalf("status=%+v err=%v", status, err)
+	}
+	cancelled, err := source.CancelWorkflow(ctx, workflow.ID)
+	if err != nil || cancelled.State != packagesource.WorkflowCancelled || cancelled.Plan != nil {
+		t.Fatalf("cancelled=%+v err=%v", cancelled, err)
 	}
 }
 

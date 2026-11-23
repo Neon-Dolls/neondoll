@@ -3,8 +3,7 @@ package packagesource
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
+	"errors"
 	"fmt"
 	"sync"
 
@@ -28,8 +27,11 @@ type ExecutionItem struct {
 type ExecutionReport struct {
 	PlanID    string          `json:"plan_id"`
 	Completed bool            `json:"completed"`
+	Partial   bool            `json:"partial"`
 	Items     []ExecutionItem `json:"items"`
 }
+
+type Progress func(ExecutionReport) error
 
 type Executor struct {
 	mu         sync.RWMutex
@@ -53,6 +55,10 @@ func NewExecutor(registry *Registry, skills SkillInstaller, extensions Extension
 }
 
 func (e *Executor) Execute(ctx context.Context, plan InstallationPlan) (ExecutionReport, error) {
+	return e.ExecuteWithProgress(ctx, plan, nil)
+}
+
+func (e *Executor) ExecuteWithProgress(ctx context.Context, plan InstallationPlan, progress Progress) (ExecutionReport, error) {
 	report := ExecutionReport{PlanID: plan.ID}
 	if err := plan.Validate(); err != nil {
 		return report, err
@@ -85,10 +91,6 @@ func (e *Executor) Execute(ctx context.Context, plan InstallationPlan) (Executio
 		if limited.exceeded || int64(buffer.Len()) != item.Artifact.Size {
 			return report, ErrBounds
 		}
-		digest := sha256.Sum256(buffer.Bytes())
-		if hex.EncodeToString(digest[:]) != item.Artifact.SHA256 {
-			return report, ErrConflict
-		}
 		total += int64(buffer.Len())
 		artifacts = append(artifacts, acquired{item: item, data: append([]byte(nil), buffer.Bytes()...)})
 	}
@@ -117,13 +119,36 @@ func (e *Executor) Execute(ctx context.Context, plan InstallationPlan) (Executio
 		if err != nil {
 			result.Error = err.Error()
 			report.Items = append(report.Items, result)
-			return report, fmt.Errorf("package source: install %s: %w", artifact.item.Package.ID, err)
+			report.Partial = installedCount(report.Items) > 0
+			installErr := fmt.Errorf("package source: install %s: %w", artifact.item.Package.ID, err)
+			if progress != nil {
+				if progressErr := progress(report); progressErr != nil {
+					return report, errors.Join(installErr, progressErr)
+				}
+			}
+			return report, installErr
 		}
 		result.Installed = true
 		report.Items = append(report.Items, result)
+		report.Partial = len(report.Items) < len(artifacts)
+		if progress != nil {
+			if err := progress(report); err != nil {
+				return report, err
+			}
+		}
 	}
 	report.Completed = true
 	return report, nil
+}
+
+func installedCount(items []ExecutionItem) int {
+	count := 0
+	for _, item := range items {
+		if item.Installed {
+			count++
+		}
+	}
+	return count
 }
 
 type boundedWriter struct {

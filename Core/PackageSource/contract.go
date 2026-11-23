@@ -5,7 +5,6 @@ package packagesource
 
 import (
 	"context"
-	"encoding/hex"
 	"errors"
 	"io"
 	"strings"
@@ -145,9 +144,6 @@ func (p InstallationPlan) Validate() error {
 			strings.TrimSpace(item.Artifact.ID) == "" || len(item.Artifact.SHA256) != 64 || item.Artifact.Size < 0 || strings.TrimSpace(item.Artifact.MediaType) == "" {
 			return ErrInvalid
 		}
-		if _, err := hex.DecodeString(item.Artifact.SHA256); err != nil {
-			return ErrInvalid
-		}
 		key := item.Package.SourceID + "\x00" + item.Package.ID + "\x00" + item.Package.Version
 		if packages[key] {
 			return ErrInvalid
@@ -156,8 +152,7 @@ func (p InstallationPlan) Validate() error {
 	}
 	for _, item := range p.Items {
 		for _, dependency := range item.Dependencies {
-			key := dependency.Reference.SourceID + "\x00" + dependency.Reference.ID + "\x00" + dependency.Reference.Version
-			if !dependency.Reference.Valid() || !dependency.Optional && !packages[key] {
+			if !dependency.Reference.Valid() {
 				return ErrInvalid
 			}
 		}
@@ -182,12 +177,40 @@ type ProposalResult struct {
 	Cursor    string     `json:"cursor,omitempty"`
 }
 
+type WorkflowState string
+
+const (
+	WorkflowPending   WorkflowState = "pending"
+	WorkflowReady     WorkflowState = "ready"
+	WorkflowRejected  WorkflowState = "rejected"
+	WorkflowFailed    WorkflowState = "failed"
+	WorkflowCancelled WorkflowState = "cancelled"
+)
+
+type WorkflowRequest struct {
+	Package     Reference `json:"package"`
+	Operation   string    `json:"operation"`
+	Correlation string    `json:"correlation,omitempty"`
+}
+
+type Workflow struct {
+	ID        string            `json:"id"`
+	State     WorkflowState     `json:"state"`
+	Plan      *InstallationPlan `json:"plan,omitempty"`
+	Message   string            `json:"message,omitempty"`
+	UpdatedAt time.Time         `json:"updated_at"`
+}
+
 type Source interface {
 	ID() string
 	Search(context.Context, SearchRequest) (SearchResult, error)
 	Plan(context.Context, PlanRequest) (InstallationPlan, error)
 	Acquire(context.Context, Artifact, io.Writer) error
 	Proposals(context.Context, ProposalRequest) (ProposalResult, error)
+	AcknowledgeProposals(context.Context, []string) error
+	RequestWorkflow(context.Context, WorkflowRequest) (Workflow, error)
+	WorkflowStatus(context.Context, string) (Workflow, error)
+	CancelWorkflow(context.Context, string) (Workflow, error)
 	Close(context.Context) error
 }
 

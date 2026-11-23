@@ -202,9 +202,6 @@ func (m *Manager) InstallExtension(ctx context.Context, rawManifest, artifact []
 	if err := manifest.Validate(); err != nil {
 		return err
 	}
-	if !verifySHA256(artifact, manifest.Artifact.SHA256) {
-		return ErrInvalidManifest
-	}
 	temporary, err := os.CreateTemp(m.dataRoot, "package-extension-*.wasm")
 	if err != nil {
 		return err

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	packagesource "github.com/Neon-Dolls/neondoll/Core/PackageSource"
@@ -136,6 +137,15 @@ func TestIndependentWASMPackageSourceContract(t *testing.T) {
 	if err != nil || len(search.Packages) != 1 || search.Packages[0].Reference.SourceID != "wasm-source" {
 		t.Fatalf("search=%+v err=%v", search, err)
 	}
+	pendingState, err := runtime.state.Get(ctx, "wasm-source", packageSourceProposalStateKey)
+	if err != nil || !bytes.Contains(pendingState, []byte("proposal-1")) {
+		t.Fatalf("proposal emitted during search was not durable: %q err=%v", pendingState, err)
+	}
+	recoveredSource := NewWASMPackageSource(manifest, runtime)
+	recoveredProposals, err := recoveredSource.Proposals(ctx, packagesource.ProposalRequest{Limit: 10})
+	if err != nil || len(recoveredProposals.Proposals) != 1 {
+		t.Fatalf("recovered proposals=%+v err=%v", recoveredProposals, err)
+	}
 	plan, err := source.Plan(ctx, packagesource.PlanRequest{Package: search.Packages[0].Reference, Operation: "install"})
 	if err != nil || plan.SourceID != "wasm-source" || plan.Items[0].Package.SourceID != "wasm-source" {
 		t.Fatalf("plan=%+v err=%v", plan, err)
@@ -144,9 +154,28 @@ func TestIndependentWASMPackageSourceContract(t *testing.T) {
 	if err = source.Acquire(ctx, plan.Items[0].Artifact, &artifact); err != nil || artifact.String() != "abc" {
 		t.Fatalf("artifact=%q err=%v", artifact.String(), err)
 	}
+	workflow, err := source.RequestWorkflow(ctx, packagesource.WorkflowRequest{Package: search.Packages[0].Reference, Operation: "install", Correlation: "turn-1"})
+	if err != nil || workflow.State != packagesource.WorkflowReady {
+		t.Fatalf("workflow=%+v err=%v", workflow, err)
+	}
+	status, err := source.WorkflowStatus(ctx, workflow.ID)
+	if err != nil || status.State != packagesource.WorkflowReady {
+		t.Fatalf("status=%+v err=%v", status, err)
+	}
+	cancelled, err := source.CancelWorkflow(ctx, workflow.ID)
+	if err != nil || cancelled.State != packagesource.WorkflowCancelled {
+		t.Fatalf("cancel=%+v err=%v", cancelled, err)
+	}
 	proposals, err := source.Proposals(ctx, packagesource.ProposalRequest{Limit: 10})
 	if err != nil || len(proposals.Proposals) != 1 || proposals.Proposals[0].Plan.SourceID != "wasm-source" {
 		t.Fatalf("proposals=%+v err=%v", proposals, err)
+	}
+	if err = source.AcknowledgeProposals(ctx, []string{"proposal-1"}); err != nil {
+		t.Fatal(err)
+	}
+	pendingState, err = runtime.state.Get(ctx, "wasm-source", packageSourceProposalStateKey)
+	if err != nil || bytes.Contains(pendingState, []byte("proposal-1")) {
+		t.Fatalf("acknowledged proposal retained: %q err=%v", pendingState, err)
 	}
 }
 
@@ -174,5 +203,44 @@ func TestManagerRegistersMultipleWASMPackageSources(t *testing.T) {
 	}
 	if len(registry.IDs()) != 0 {
 		t.Fatalf("sources remain after shutdown: %v", registry.IDs())
+	}
+}
+
+func TestWASMPackageSourceConcurrentSearchAndProposalPollDoNotLoseEvents(t *testing.T) {
+	ctx := context.Background()
+	root := findRepoRoot(t)
+	runtime, err := NewWASMRuntime(ctx, NewFileStateStore(filepath.Join(t.TempDir(), "state")), t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close(ctx)
+	manifest := packageSourceManifest(t, root, "wasm-source")
+	if err = runtime.Load(ctx, manifest, root); err != nil {
+		t.Fatal(err)
+	}
+	source := NewWASMPackageSource(manifest, runtime)
+	var wait sync.WaitGroup
+	wait.Add(2)
+	errorsFound := make(chan error, 2)
+	go func() {
+		defer wait.Done()
+		_, err := source.Search(ctx, packagesource.SearchRequest{Limit: 10})
+		errorsFound <- err
+	}()
+	go func() {
+		defer wait.Done()
+		_, err := source.Proposals(ctx, packagesource.ProposalRequest{Limit: 10})
+		errorsFound <- err
+	}()
+	wait.Wait()
+	close(errorsFound)
+	for err := range errorsFound {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	proposals, err := source.Proposals(ctx, packagesource.ProposalRequest{Limit: 10})
+	if err != nil || len(proposals.Proposals) != 1 {
+		t.Fatalf("proposals=%+v err=%v", proposals, err)
 	}
 }

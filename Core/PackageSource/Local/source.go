@@ -43,11 +43,13 @@ type item struct {
 }
 
 type Source struct {
-	mu     sync.RWMutex
-	root   string
-	config packagesource.Configuration
-	items  map[string]item
-	closed bool
+	mu           sync.RWMutex
+	root         string
+	config       packagesource.Configuration
+	items        map[string]item
+	acknowledged map[string]bool
+	workflows    map[string]packagesource.Workflow
+	closed       bool
 }
 
 func Open(dataRoot string, configuration packagesource.Configuration) (*Source, error) {
@@ -61,7 +63,7 @@ func Open(dataRoot string, configuration packagesource.Configuration) (*Source, 
 	if err = os.MkdirAll(root, 0o700); err != nil {
 		return nil, err
 	}
-	source := &Source{root: root, config: configuration, items: map[string]item{}}
+	source := &Source{root: root, config: configuration, items: map[string]item{}, acknowledged: map[string]bool{}, workflows: map[string]packagesource.Workflow{}}
 	if err = source.refresh(); err != nil {
 		return nil, err
 	}
@@ -270,7 +272,10 @@ func (s *Source) Proposals(ctx context.Context, request packagesource.ProposalRe
 			return result, err
 		}
 		proposalID := "local:" + summary.Reference.ID + "@" + summary.Reference.Version
-		if proposalID <= request.Cursor {
+		s.mu.RLock()
+		acknowledged := s.acknowledged[proposalID]
+		s.mu.RUnlock()
+		if acknowledged {
 			continue
 		}
 		plan.ProposalID = proposalID
@@ -281,6 +286,60 @@ func (s *Source) Proposals(ctx context.Context, request packagesource.ProposalRe
 		}
 	}
 	return result, nil
+}
+
+func (s *Source) AcknowledgeProposals(_ context.Context, ids []string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return packagesource.ErrSourceClosed
+	}
+	for _, id := range ids {
+		if strings.TrimSpace(id) == "" {
+			return packagesource.ErrInvalid
+		}
+		s.acknowledged[id] = true
+	}
+	return nil
+}
+
+func (s *Source) RequestWorkflow(ctx context.Context, request packagesource.WorkflowRequest) (packagesource.Workflow, error) {
+	plan, err := s.Plan(ctx, packagesource.PlanRequest{Package: request.Package, Operation: request.Operation})
+	if err != nil {
+		return packagesource.Workflow{}, err
+	}
+	plan.Correlation = request.Correlation
+	workflow := packagesource.Workflow{ID: "local-workflow:" + plan.ID, State: packagesource.WorkflowReady, Plan: &plan, UpdatedAt: time.Now().UTC()}
+	s.mu.Lock()
+	s.workflows[workflow.ID] = workflow
+	s.mu.Unlock()
+	return workflow, nil
+}
+
+func (s *Source) WorkflowStatus(_ context.Context, id string) (packagesource.Workflow, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	workflow, ok := s.workflows[id]
+	if !ok {
+		return packagesource.Workflow{}, packagesource.ErrNotFound
+	}
+	return workflow, nil
+}
+
+func (s *Source) CancelWorkflow(_ context.Context, id string) (packagesource.Workflow, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	workflow, ok := s.workflows[id]
+	if !ok {
+		return packagesource.Workflow{}, packagesource.ErrNotFound
+	}
+	if workflow.State == packagesource.WorkflowReady || workflow.State == packagesource.WorkflowPending {
+		workflow.State = packagesource.WorkflowCancelled
+		workflow.Plan = nil
+		workflow.UpdatedAt = time.Now().UTC()
+		s.workflows[id] = workflow
+	}
+	return workflow, nil
 }
 
 func (s *Source) Close(context.Context) error {

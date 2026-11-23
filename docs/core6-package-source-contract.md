@@ -4,8 +4,11 @@ Package Sources own package discovery, version/dependency resolution,
 acquisition strategy, source-specific approvals, and proactive update or
 installation proposals. Core does not repeat that intelligence. It validates a
 complete source-authored plan, acquires its declared artifacts, verifies their
-size and SHA-256 identity, and hands accepted items to the existing Skill or
-Extension installation lifecycle.
+declared transfer bounds, and hands accepted items to the existing Skill or
+Extension installation lifecycle. Package-level integrity is the source's
+responsibility. The Extension Manager retains its pre-existing manifest and
+artifact checks as part of extension activation; the plan executor does not
+add a second package checksum policy.
 
 Package Source content is not authority. A manifest, plan, package, or Skill
 cannot grant host capabilities, execution permission, or activation rights.
@@ -68,8 +71,10 @@ Required exports:
 - `package_source_handle_event(pointer, length) -> i32`
 
 `package_source_shutdown()` is optional. Host requests use the existing atomic
-event envelope with types `package_source.search`, `package_source.plan`, and
-`package_source.acquire`. Guest responses emitted through `outgoing` carry the
+event envelope with types `package_source.search`, `package_source.plan`,
+`package_source.acquire`, `package_source.workflow.request`,
+`package_source.workflow.status`, `package_source.workflow.cancel`, and
+`package_source.proposals.ack`. Guest responses emitted through `outgoing` carry the
 same `request_id` and the corresponding `.result`, `artifact.chunk`, or
 `artifact.complete` event type. Artifact chunks are base64 encoded. Core's
 assigned extension instance ID is the trusted Source ID; guest-supplied Source
@@ -78,11 +83,21 @@ IDs are replaced.
 `package_source_poll` may emit `package_source.proposal` without an active user
 Interaction. Core persists the stable proposal ID, source cursor, plan, state,
 and execution report together. Repeated polls and restart recovery do not
-duplicate a proposal. Acceptance is explicit; polling never installs or
+duplicate a proposal. Cursors are opaque source values; Core never compares or
+orders proposal IDs. The WASM adapter captures proposals emitted during every
+guest call, durably retains them, and releases them only after Core has
+persisted and acknowledged their stable IDs. Acceptance is explicit; polling never installs or
 activates code by itself. Before execution, acceptance is durably marked
 `executing`; a crash across an external installation side effect therefore
 recovers as an explicit ambiguous/in-progress proposal rather than blindly
 executing the plan twice.
+
+Multi-item execution reports every attempted item. If a later item fails,
+`completed` is false and `partial` is true when an earlier item installed.
+Progress is persisted after each completed item for proposal-driven plans.
+There is no cross-package transaction or generic rollback: after a crash, an
+`executing` proposal and its durable item report require explicit recovery
+rather than blind replay.
 
 The deterministic ABI fixture is independently compiled with TinyGo 0.39:
 

@@ -82,6 +82,7 @@ func (s *Service) persist(ctx context.Context) error {
 func (s *Service) Poll(ctx context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	acknowledgments := map[string][]string{}
 	for _, id := range s.registry.IDs() {
 		source, ok := s.registry.Source(id)
 		if !ok {
@@ -99,12 +100,25 @@ func (s *Service) Poll(ctx context.Context) error {
 			if _, exists := s.snapshot.Proposals[key]; !exists {
 				s.snapshot.Proposals[key] = StoredProposal{Proposal: proposal, State: ProposalPending}
 			}
+			acknowledgments[id] = append(acknowledgments[id], proposal.ID)
 		}
 		if result.Cursor != "" {
 			s.snapshot.Cursors[id] = result.Cursor
 		}
 	}
-	return s.persist(ctx)
+	if err := s.persist(ctx); err != nil {
+		return err
+	}
+	for sourceID, ids := range acknowledgments {
+		source, ok := s.registry.Source(sourceID)
+		if !ok {
+			continue
+		}
+		if err := source.AcknowledgeProposals(ctx, ids); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *Service) Start(ctx context.Context, interval time.Duration) error {
@@ -162,7 +176,14 @@ func (s *Service) Accept(ctx context.Context, sourceID, proposalID string) (Exec
 		return ExecutionReport{}, err
 	}
 	s.mu.Unlock()
-	report, err := s.executor.Execute(ctx, stored.Proposal.Plan)
+	report, err := s.executor.ExecuteWithProgress(ctx, stored.Proposal.Plan, func(progress ExecutionReport) error {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		current := s.snapshot.Proposals[key]
+		current.Report = progress
+		s.snapshot.Proposals[key] = current
+		return s.persist(ctx)
+	})
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	stored = s.snapshot.Proposals[key]
@@ -173,8 +194,8 @@ func (s *Service) Accept(ctx context.Context, sourceID, proposalID string) (Exec
 		stored.State = ProposalAccepted
 	}
 	s.snapshot.Proposals[key] = stored
-	if persistErr := s.persist(ctx); err == nil {
-		err = persistErr
+	if persistErr := s.persist(ctx); persistErr != nil {
+		err = errors.Join(err, persistErr)
 	}
 	return report, err
 }
