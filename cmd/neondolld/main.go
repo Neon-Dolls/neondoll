@@ -28,6 +28,8 @@ import (
 	memoryruntime "github.com/Neon-Dolls/neondoll/Core/Memory/Runtime"
 	"github.com/Neon-Dolls/neondoll/Core/Network"
 	"github.com/Neon-Dolls/neondoll/Core/OwnerControl"
+	packagesource "github.com/Neon-Dolls/neondoll/Core/PackageSource"
+	packagesourcelocal "github.com/Neon-Dolls/neondoll/Core/PackageSource/Local"
 	"github.com/Neon-Dolls/neondoll/Core/PermissionRequest"
 	"github.com/Neon-Dolls/neondoll/Core/Persistence"
 	"github.com/Neon-Dolls/neondoll/Core/Pulse"
@@ -374,6 +376,30 @@ func run() int {
 		log.Error("local Skill catalog setup error", map[string]any{"error": err.Error()})
 		return 1
 	}
+	packageSources := packagesource.NewRegistry()
+	localPackageSource, err := packagesourcelocal.Open(cfg.Paths.DataDir, cfg.PackageSources)
+	if err != nil {
+		log.Error("local Package Source setup error", map[string]any{"error": err.Error()})
+		return 1
+	}
+	if err = packageSources.Register(localPackageSource); err != nil {
+		log.Error("local Package Source registration error", map[string]any{"error": err.Error()})
+		return 1
+	}
+	cleanup.Add(func() error { return packageSources.Close(context.Background()) })
+	extensionState := extension.NewFileStateStore(filepath.Join(cfg.Paths.DataDir, "extensions", "state"))
+	packageExecutor, err := packagesource.NewExecutor(packageSources, skillCatalog, nil, packagesource.ArtifactBounds{MaxBytes: cfg.PackageSources.MaxArtifactBytes, MaxItems: cfg.PackageSources.MaxPlanItems})
+	if err != nil {
+		log.Error("Package Source executor setup error", map[string]any{"error": err.Error()})
+		return 1
+	}
+	packageService, err := packagesource.NewService(ctx, packageSources, packageExecutor, extensionState, "core-package-sources")
+	if err != nil {
+		log.Error("Package Source proposal setup error", map[string]any{"error": err.Error()})
+		return 1
+	}
+	cleanup.Add(func() error { return packageService.Close(context.Background()) })
+	log.Info("embedded local Package Source ready", map[string]any{"source": localPackageSource.ID()})
 	toolExecutorOptions := []dollmind.ToolExecutorOption{
 		dollmind.WithPermissionRequests(permissionManager, dollState.Owner.OwnerID, 15*time.Minute),
 		dollmind.WithSelfManager(selfManager),
@@ -453,7 +479,6 @@ func run() int {
 		return 1
 	}
 	cognitionToolExecutor.SetCommunicationSender(communicationService)
-	extensionState := extension.NewFileStateStore(filepath.Join(cfg.Paths.DataDir, "extensions", "state"))
 	extensionRuntime, err := extension.NewWASMRuntime(ctx, extensionState, cfg.Paths.SecretsDir)
 	if err != nil {
 		log.Error("extension runtime setup error", map[string]any{"error": err.Error()})
@@ -468,7 +493,7 @@ func run() int {
 		log.Error("extension manifest setup error", map[string]any{"error": err.Error()})
 		return 1
 	}
-	extensionManager, err := extension.NewManager(extensionRuntime, gatewayRuntime, cfg.Paths.DataDir, extensionManifests)
+	extensionManager, err := extension.NewManager(extensionRuntime, gatewayRuntime, cfg.Paths.DataDir, extensionManifests, extension.WithPackageSourceRegistry(packageSources))
 	if err == nil {
 		err = extensionManager.LoadEnabled(ctx)
 	}
@@ -477,6 +502,15 @@ func run() int {
 		return 1
 	}
 	defer extensionManager.Shutdown(context.Background())
+	packageExecutor.SetExtensionInstaller(extensionManager)
+	if err = packageService.Poll(ctx); err != nil {
+		log.Error("Package Source proposal recovery error", map[string]any{"error": err.Error()})
+		return 1
+	}
+	if err = packageService.Start(ctx, time.Duration(cfg.PackageSources.ProposalPollSeconds)*time.Second); err != nil {
+		log.Error("Package Source proposal runner error", map[string]any{"error": err.Error()})
+		return 1
+	}
 	log.Info("Gateway runtime ready")
 
 	// Create WebSocket transport.

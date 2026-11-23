@@ -33,6 +33,9 @@ func TestDefaults(t *testing.T) {
 	if cfg.Skills.Enabled() || cfg.Skills.MaxSkills != 128 || cfg.Skills.MaxInstructionBytes == 0 || cfg.Skills.MaxLoadBytes == 0 {
 		t.Fatalf("unexpected Skill defaults: %+v", cfg.Skills)
 	}
+	if cfg.PackageSources.LocalDirectory != "packages/local" || cfg.PackageSources.MaxArtifactBytes == 0 || cfg.PackageSources.ProposalPollSeconds <= 0 {
+		t.Fatalf("unexpected Package Source defaults: %+v", cfg.PackageSources)
+	}
 }
 
 func TestSaveLoadLocalSkillConfiguration(t *testing.T) {

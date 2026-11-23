@@ -10,11 +10,12 @@ import (
 )
 
 const (
-	ManifestVersion       = 1
-	GuestABIVersion       = 2
-	ContractGateway       = "gateway"
-	ContractCapability    = "capability"
-	ContractPackageSource = "package_source"
+	ManifestVersion         = 1
+	GuestABIVersion         = 2
+	PackageSourceABIVersion = 1
+	ContractGateway         = "gateway"
+	ContractCapability      = "capability"
+	ContractPackageSource   = "package_source"
 	// ContractMemoryProvider reserves the stateful Core 6 provider boundary.
 	// Runtime support is deliberately deferred beyond the contract milestone.
 	ContractMemoryProvider = "memory-provider/v1"
@@ -74,19 +75,23 @@ func (m Manifest) Validate() error {
 	if _, err := hex.DecodeString(m.Artifact.SHA256); err != nil {
 		return ErrInvalidManifest
 	}
-	if m.Contract != ContractGateway {
-		if m.Contract == ContractCapability || m.Contract == ContractPackageSource || m.Contract == ContractMemoryProvider {
+	if m.Contract != ContractGateway && m.Contract != ContractPackageSource {
+		if m.Contract == ContractCapability || m.Contract == ContractMemoryProvider {
 			return ErrUnsupportedContract
 		}
 		return ErrInvalidManifest
 	}
-	if m.ABI != GuestABIVersion {
+	if m.Contract == ContractGateway && m.ABI != GuestABIVersion || m.Contract == ContractPackageSource && m.ABI != PackageSourceABIVersion {
 		return ErrUnsupportedABI
 	}
 	if m.ManagedBy != "" && m.ManagedBy != ManagedConfiguration && m.ManagedBy != ManagedInstalled {
 		return ErrInvalidManifest
 	}
-	if m.Gateway == nil || strings.TrimSpace(m.Gateway.Platform) == "" || strings.TrimSpace(m.Gateway.DollID) == "" || strings.TrimSpace(m.Gateway.ConversationPrefix) == "" {
+	if m.Contract == ContractGateway {
+		if m.Gateway == nil || strings.TrimSpace(m.Gateway.Platform) == "" || strings.TrimSpace(m.Gateway.DollID) == "" || strings.TrimSpace(m.Gateway.ConversationPrefix) == "" {
+			return ErrInvalidManifest
+		}
+	} else if m.Gateway != nil {
 		return ErrInvalidManifest
 	}
 	for name, path := range m.Secrets {
