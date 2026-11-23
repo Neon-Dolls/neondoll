@@ -156,6 +156,103 @@ func TestFailedUpdatePreservesInstalledSkill(t *testing.T) {
 	}
 }
 
+func TestProposalAcknowledgmentsSurviveRestart(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	writePackage(t, root, "proposed-skill", "1", skillZIP(t, "proposed-skill", "Use runtime.info."), true)
+	configuration := packagesource.DefaultConfiguration()
+
+	source, err := Open(root, configuration)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proposals, err := source.Proposals(ctx, packagesource.ProposalRequest{Limit: 10})
+	if err != nil || len(proposals.Proposals) != 1 {
+		t.Fatalf("initial proposals=%+v err=%v", proposals, err)
+	}
+	proposalID := proposals.Proposals[0].ID
+	if err = source.AcknowledgeProposals(ctx, []string{proposalID}); err != nil {
+		t.Fatal(err)
+	}
+	if err = source.AcknowledgeProposals(ctx, []string{proposalID}); err != nil {
+		t.Fatalf("repeated acknowledgment: %v", err)
+	}
+	afterAck, err := source.Proposals(ctx, packagesource.ProposalRequest{Limit: 10})
+	if err != nil || len(afterAck.Proposals) != 0 {
+		t.Fatalf("after acknowledgment proposals=%+v err=%v", afterAck, err)
+	}
+	if err = source.Close(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := Open(root, configuration)
+	if err != nil {
+		t.Fatal(err)
+	}
+	afterRestart, err := reopened.Proposals(ctx, packagesource.ProposalRequest{Limit: 10})
+	if err != nil || len(afterRestart.Proposals) != 0 {
+		t.Fatalf("after restart proposals=%+v err=%v", afterRestart, err)
+	}
+}
+
+func TestUnacknowledgedProposalSurvivesRestart(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	writePackage(t, root, "pending-skill", "1", skillZIP(t, "pending-skill", "Use runtime.info."), true)
+	configuration := packagesource.DefaultConfiguration()
+	source, err := Open(root, configuration)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if proposals, proposalErr := source.Proposals(ctx, packagesource.ProposalRequest{Limit: 10}); proposalErr != nil || len(proposals.Proposals) != 1 {
+		t.Fatalf("initial proposals=%+v err=%v", proposals, proposalErr)
+	}
+	if err = source.Close(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := Open(root, configuration)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proposals, err := reopened.Proposals(ctx, packagesource.ProposalRequest{Limit: 10})
+	if err != nil || len(proposals.Proposals) != 1 {
+		t.Fatalf("restarted proposals=%+v err=%v", proposals, err)
+	}
+}
+
+func TestProposalAcknowledgmentPersistenceFailureDoesNotAcknowledge(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	writePackage(t, root, "durable-skill", "1", skillZIP(t, "durable-skill", "Use runtime.info."), true)
+	configuration := packagesource.DefaultConfiguration()
+	source, err := Open(root, configuration)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proposals, err := source.Proposals(ctx, packagesource.ProposalRequest{Limit: 10})
+	if err != nil || len(proposals.Proposals) != 1 {
+		t.Fatalf("initial proposals=%+v err=%v", proposals, err)
+	}
+	statePath := filepath.Join(root, configuration.LocalDirectory, proposalAcknowledgmentsFile)
+	if err = os.Mkdir(statePath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err = source.AcknowledgeProposals(ctx, []string{proposals.Proposals[0].ID}); err == nil {
+		t.Fatal("acknowledgment succeeded without durable persistence")
+	}
+	stillPending, err := source.Proposals(ctx, packagesource.ProposalRequest{Limit: 10})
+	if err != nil || len(stillPending.Proposals) != 1 {
+		t.Fatalf("proposal silently acknowledged: proposals=%+v err=%v", stillPending, err)
+	}
+	if err = os.Remove(statePath); err != nil {
+		t.Fatal(err)
+	}
+	if err = source.AcknowledgeProposals(ctx, []string{proposals.Proposals[0].ID}); err != nil {
+		t.Fatalf("acknowledgment did not recover: %v", err)
+	}
+}
+
 func TestLocalSourceRejectsTraversalSymlinkIntegrityAndOversize(t *testing.T) {
 	for _, test := range []struct {
 		name    string

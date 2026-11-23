@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -19,6 +20,7 @@ import (
 )
 
 const SourceID = "local"
+const proposalAcknowledgmentsFile = ".proposal-acknowledgments-v1"
 
 type manifest struct {
 	Version           int                        `json:"version"`
@@ -64,6 +66,9 @@ func Open(dataRoot string, configuration packagesource.Configuration) (*Source, 
 		return nil, err
 	}
 	source := &Source{root: root, config: configuration, items: map[string]item{}, acknowledged: map[string]bool{}, workflows: map[string]packagesource.Workflow{}}
+	if err = source.loadAcknowledgments(); err != nil {
+		return nil, err
+	}
 	if err = source.refresh(); err != nil {
 		return nil, err
 	}
@@ -294,13 +299,99 @@ func (s *Source) AcknowledgeProposals(_ context.Context, ids []string) error {
 	if s.closed {
 		return packagesource.ErrSourceClosed
 	}
+	next := make(map[string]bool, len(s.acknowledged)+len(ids))
+	for id := range s.acknowledged {
+		next[id] = true
+	}
+	changed := false
 	for _, id := range ids {
 		if strings.TrimSpace(id) == "" {
 			return packagesource.ErrInvalid
 		}
-		s.acknowledged[id] = true
+		if !next[id] {
+			next[id], changed = true, true
+		}
+	}
+	if !changed {
+		return nil
+	}
+	if err := s.persistAcknowledgments(next); err != nil {
+		return err
+	}
+	s.acknowledged = next
+	return nil
+}
+
+func (s *Source) loadAcknowledgments() error {
+	data, err := readRootFile(s.root, proposalAcknowledgmentsFile, 1<<20)
+	if errors.Is(err, packagesource.ErrNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	var acknowledged map[string]bool
+	if json.Unmarshal(data, &acknowledged) != nil {
+		return packagesource.ErrInvalid
+	}
+	for id, value := range acknowledged {
+		if strings.TrimSpace(id) == "" || !value {
+			return packagesource.ErrInvalid
+		}
+	}
+	s.acknowledged = acknowledged
+	if s.acknowledged == nil {
+		s.acknowledged = map[string]bool{}
 	}
 	return nil
+}
+
+func (s *Source) persistAcknowledgments(acknowledged map[string]bool) (err error) {
+	data, err := json.Marshal(acknowledged)
+	if err != nil {
+		return err
+	}
+	temporary, err := os.CreateTemp(s.root, ".proposal-acknowledgments-*.tmp")
+	if err != nil {
+		return err
+	}
+	temporaryName := temporary.Name()
+	defer os.Remove(temporaryName)
+	temporaryClosed := false
+	defer func() {
+		if !temporaryClosed {
+			if closeErr := temporary.Close(); err == nil {
+				err = closeErr
+			}
+		}
+	}()
+	if err = temporary.Chmod(0o600); err != nil {
+		return err
+	}
+	written, writeErr := temporary.Write(data)
+	if writeErr != nil {
+		return writeErr
+	}
+	if written != len(data) {
+		err = io.ErrShortWrite
+		return err
+	}
+	if err = temporary.Sync(); err != nil {
+		return err
+	}
+	if err = temporary.Close(); err != nil {
+		return err
+	}
+	temporaryClosed = true
+	if err = os.Rename(temporaryName, filepath.Join(s.root, proposalAcknowledgmentsFile)); err != nil {
+		return err
+	}
+	directory, err := os.Open(s.root)
+	if err != nil {
+		return err
+	}
+	defer directory.Close()
+	return directory.Sync()
 }
 
 func (s *Source) RequestWorkflow(ctx context.Context, request packagesource.WorkflowRequest) (packagesource.Workflow, error) {
